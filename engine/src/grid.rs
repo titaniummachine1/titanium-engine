@@ -56,13 +56,11 @@ pub fn can_step(board: &Board, row: u8, col: u8, dr: i8, dc: i8) -> bool {
             !has_horizontal(board, js_to, col)
                 && (col == 0 || !has_horizontal(board, js_to, col - 1))
         }
-        (0, 1) => {
-            !has_vertical(board, js_from, col) && !has_vertical(board, js_to, col)
-        }
-        (0, -1) => {
-            !has_vertical(board, js_from, nc)
-                && !has_vertical(board, js_to, nc)
-        }
+        // Lateral steps: match scraped `pawnCanMove` wall anchors (see docs/video/05-first-perft-bug.md).
+        // Right — wallAnchor = from, sideAnchor = step(from, Down).
+        (0, 1) => !has_vertical(board, js_from, col) && !has_vertical(board, row, col),
+        // Left — wallAnchor = to, sideAnchor = step(to, Down).
+        (0, -1) => !has_vertical(board, js_to, nc) && !has_vertical(board, nr, nc),
         _ => false,
     }
 }
@@ -104,5 +102,27 @@ pub fn has_wall(board: &Board, row: u8, col: u8, orientation: WallOrientation) -
     match orientation {
         WallOrientation::Horizontal => has_horizontal(board, js_row, col),
         WallOrientation::Vertical => has_vertical(board, js_row, col),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::{Board, WallOrientation};
+
+    #[test]
+    fn vertical_d8v_blocks_black_left_from_e9() {
+        let mut board = Board::new();
+        set_wall(
+            &mut board,
+            7,
+            3,
+            WallOrientation::Vertical,
+            true,
+        );
+        board.side_to_move = crate::board::Player::Two;
+        // P2 at e9 (internal 8,4) — left to d9 must be blocked by d8v.
+        assert!(!can_step(&board, 8, 4, 0, -1));
+        assert!(can_step(&board, 8, 4, 0, 1));
     }
 }
