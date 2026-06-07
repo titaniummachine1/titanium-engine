@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /**
- * Titanium (greedy Rust) vs Gorisanson MCTS — terminal benchmark.
+ * Rust Titanium vs Gorisanson MCTS — equal budget (10s / 2B sims, whichever stops first).
  *
  *   node benchmark/titanium_vs_gorisanson.mjs
- *   node benchmark/titanium_vs_gorisanson.mjs --games 10 --gorisanson 7500
+ *   node benchmark/titanium_vs_gorisanson.mjs --games 10
  */
 
 import { eloFromMatch, playMatch } from './lib/match_engine.mjs';
-import { GORISANSON_TIME_SIMS } from './lib/gorisanson_ai.mjs';
+import { RUST_TITANIUM_ID, GORISANSON_ID } from './lib/engine_ids.mjs';
+import { BENCH_TIME_SEC, BENCH_MAX_SIMULATIONS, formatThinkBudget } from './lib/bench_limits.mjs';
 
 function parseArgs(argv) {
   const opts = {
     games: 4,
-    gorisanson: GORISANSON_TIME_SIMS.short,
     verbose: false,
   };
 
@@ -20,8 +20,6 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--games' && argv[i + 1]) {
       opts.games = Number(argv[++i]);
-    } else if (arg === '--gorisanson' && argv[i + 1]) {
-      opts.gorisanson = Number(argv[++i]);
     } else if (arg === '--verbose' || arg === '-v') {
       opts.verbose = true;
     }
@@ -31,45 +29,70 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv);
-const log = console.log.bind(console);
+const budget = { timeSec: BENCH_TIME_SEC, maxSimulations: BENCH_MAX_SIMULATIONS };
 
-if (!opts.verbose) {
-  console.log = () => {};
-}
+const titanium = { id: RUST_TITANIUM_ID };
+const gorisanson = { id: GORISANSON_ID };
 
-const titanium = { id: 'titanium' };
-const gorisanson = { id: 'gorisanson', simulations: opts.gorisanson };
-
-log('Titanium (greedy) vs Gorisanson MCTS');
-log(`games=${opts.games}  gorisanson=${opts.gorisanson} sims`);
+console.log('Rust Titanium vs Gorisanson MCTS');
+console.log(`games=${opts.games}  budget=${formatThinkBudget(budget)} (both sides)`);
 
 const started = performance.now();
-const match = playMatch(titanium, gorisanson, opts.games, { verbose: opts.verbose });
+const match = playMatch(titanium, gorisanson, opts.games, {
+  ...budget,
+  verbose: opts.verbose,
+});
 const elapsed = (performance.now() - started) / 1000;
 
-const { ratingA, ratingB, expectedA } = eloFromMatch(
-  match.scoreA,
-  match.scoreB,
-  opts.games,
-  1400,
-  1600,
-);
-
-log('');
-log(`Score: titanium ${match.scoreA} — gorisanson ${match.scoreB}  (draws ${match.draws})`);
-log(`Time:  ${elapsed.toFixed(1)}s  (${(elapsed / opts.games).toFixed(1)}s/game)`);
-log('');
-log('Elo (provisional):');
-log(`  titanium   → ${ratingA.toFixed(0)}`);
-log(`  gorisanson → ${ratingB.toFixed(0)}`);
-log(`  expected titanium score: ${(expectedA * 100).toFixed(1)}%`);
-
-if (match.scoreB > match.scoreA) {
-  log(`\nGorisanson leads as expected at ${opts.gorisanson} sims`);
-} else if (match.scoreA > match.scoreB) {
-  log('\nTitanium greedy won — MCTS may need more sims or variance is high');
-} else {
-  log('\nTied — try --games 20');
+const totals = {
+  [RUST_TITANIUM_ID]: { plies: 0, simulations: 0, nodes: 0 },
+  [GORISANSON_ID]: { plies: 0, simulations: 0, nodes: 0 },
+};
+for (const game of match.results) {
+  const byEngine = game.stats?.byEngine ?? {};
+  for (const id of [RUST_TITANIUM_ID, GORISANSON_ID]) {
+    const src = byEngine[id];
+    if (!src) {
+      continue;
+    }
+    totals[id].plies += src.plies ?? 0;
+    totals[id].simulations += src.simulations ?? 0;
+    totals[id].nodes += src.nodes ?? 0;
+  }
 }
+
+function fmtInt(n) {
+  return n.toLocaleString('en-US');
+}
+
+function perMove(total, plies) {
+  if (!plies) {
+    return 'n/a';
+  }
+  return fmtInt(Math.round(total / plies));
+}
+
+const { ratingA, ratingB, expectedA } = eloFromMatch(match.scoreA, match.scoreB, opts.games, 1400, 1600);
+
+console.log('');
+console.log(`Score: titanium ${match.scoreA} — gorisanson ${match.scoreB}  (draws ${match.draws})`);
+console.log('Search totals:');
+console.log(
+  `  titanium   sims=${fmtInt(totals[RUST_TITANIUM_ID].simulations)}  avg/move=${perMove(totals[RUST_TITANIUM_ID].simulations, totals[RUST_TITANIUM_ID].plies)}  plies=${fmtInt(totals[RUST_TITANIUM_ID].plies)}`,
+);
+console.log(
+  `  gorisanson sims=${fmtInt(totals[GORISANSON_ID].simulations)}  avg/move=${perMove(totals[GORISANSON_ID].simulations, totals[GORISANSON_ID].plies)}  plies=${fmtInt(totals[GORISANSON_ID].plies)}`,
+);
+if (totals[RUST_TITANIUM_ID].nodes > 0 || totals[GORISANSON_ID].nodes > 0) {
+  console.log('Node totals:');
+  console.log(
+    `  titanium   nodes=${fmtInt(totals[RUST_TITANIUM_ID].nodes)}  avg/move=${perMove(totals[RUST_TITANIUM_ID].nodes, totals[RUST_TITANIUM_ID].plies)}`,
+  );
+  console.log(
+    `  gorisanson nodes=${fmtInt(totals[GORISANSON_ID].nodes)}  avg/move=${perMove(totals[GORISANSON_ID].nodes, totals[GORISANSON_ID].plies)}`,
+  );
+}
+console.log(`Time:  ${elapsed.toFixed(1)}s`);
+console.log(`Elo: titanium ${ratingA.toFixed(0)} · gorisanson ${ratingB.toFixed(0)} · expected ${(expectedA * 100).toFixed(1)}%`);
 
 process.exit(0);

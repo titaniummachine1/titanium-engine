@@ -84,6 +84,12 @@ export function playOneGame(playerA, playerB, options = {}) {
   let game = createGorisansonGame();
   const algebraicHistory = [];
   let plies = 0;
+  const stats = {
+    byEngine: {
+      [playerA.id]: { plies: 0, simulations: 0, nodes: 0 },
+      [playerB.id]: { plies: 0, simulations: 0, nodes: 0 },
+    },
+  };
   const logMoves = options.logMoves !== false && !options.quiet;
   const budget = resolveThinkBudget(options);
 
@@ -93,6 +99,12 @@ export function playOneGame(playerA, playerB, options = {}) {
     const ply = plies + 1;
 
     const { move, meta } = chooseMove(game, algebraicHistory, cfg, ply, options);
+
+    if (stats.byEngine[cfg.id]) {
+      stats.byEngine[cfg.id].plies += 1;
+      stats.byEngine[cfg.id].simulations += meta?.simulations ?? 0;
+      stats.byEngine[cfg.id].nodes += meta?.nodes ?? 0;
+    }
 
     applyGorisansonMove(game, move);
     algebraicHistory.push(toAlgebraic(gorisansonMoveToAction(move)));
@@ -122,7 +134,7 @@ export function playOneGame(playerA, playerB, options = {}) {
   });
 
   if (winner === null) {
-    return { result: 'draw', winner: null, plies, replayCode, algebraicHistory, game };
+    return { result: 'draw', winner: null, plies, replayCode, algebraicHistory, game, stats };
   }
   return {
     result: 'decided',
@@ -132,6 +144,7 @@ export function playOneGame(playerA, playerB, options = {}) {
     replayCode,
     algebraicHistory,
     game,
+    stats,
   };
 }
 
