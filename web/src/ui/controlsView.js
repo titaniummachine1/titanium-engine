@@ -1,6 +1,16 @@
+import {
+  STRENGTH_LEVEL_PRESETS,
+  TIME_TO_MOVE_PRESETS,
+  formatVisits,
+  formatWallClock,
+} from '../lib/timeControl.js';
+import { renderDiscreteSlider } from './discreteSlider.js';
+import { wireRangeSlider } from './sliderWire.js';
+import './scrapedSlider.css';
+
 export function renderControls(container, state, controller) {
-  const { settings, aiThinking, timePresets, playerOptionGroups, timeBudgetHint, searchInfoLine } =
-    state;
+  const { settings, aiThinking, playerAiSettingsUi, playerOptionGroups, searchInfoLine } = state;
+  const [p1Ui, p2Ui] = playerAiSettingsUi ?? [];
 
   container.innerHTML = `
     <section class="controls-card">
@@ -10,24 +20,13 @@ export function renderControls(container, state, controller) {
       <div class="control-group">
         <label class="control-label">Player 1 (moves first)</label>
         ${renderPlayerSelect('player1', settings.players[0], playerOptionGroups)}
+        ${renderPlayerAiSettings(p1Ui, 1)}
       </div>
 
       <div class="control-group">
         <label class="control-label">Player 2</label>
         ${renderPlayerSelect('player2', settings.players[1], playerOptionGroups)}
-      </div>
-
-      <div class="control-group">
-        <label class="control-label">AI Time</label>
-        <select class="control-select" data-setting="time">
-          ${timePresets
-            .map(
-              (preset) =>
-                `<option value="${preset.id}" ${settings.timeToMove === preset.id ? 'selected' : ''}>${preset.label}</option>`,
-            )
-            .join('')}
-        </select>
-        <p class="time-hint">${escapeHtml(timeBudgetHint)}</p>
+        ${renderPlayerAiSettings(p2Ui, 2)}
       </div>
 
       <div class="button-row">
@@ -61,9 +60,9 @@ export function renderControls(container, state, controller) {
   container.querySelector('[data-setting="player2"]')?.addEventListener('change', (event) => {
     controller.setPlayer(2, event.target.value);
   });
-  container.querySelector('[data-setting="time"]')?.addEventListener('change', (event) => {
-    controller.setTimeToMove(Number(event.target.value));
-  });
+
+  wirePlayerAiSettings(container, controller, 1);
+  wirePlayerAiSettings(container, controller, 2);
 
   container.querySelector('[data-action="new-game"]')?.addEventListener('click', () => {
     controller.newGame();
@@ -84,6 +83,110 @@ export function renderControls(container, state, controller) {
   container.querySelector('[data-toggle="eval"]')?.addEventListener('change', () => {
     controller.toggleDisplayEvalBar();
   });
+}
+
+function wirePlayerAiSettings(container, controller, playerNum) {
+  const refresh = () => controller.onChange?.();
+
+  wireRangeSlider(
+    container,
+    `[data-setting="strength-level-${playerNum}"]`,
+    (value) => controller.setPlayerStrengthLevel(playerNum, value, { silent: true }),
+    refresh,
+  );
+
+  wireRangeSlider(
+    container,
+    `[data-setting="time-to-move-${playerNum}"]`,
+    (value) => controller.setPlayerTimeToMove(playerNum, value, { silent: true }),
+    refresh,
+  );
+
+  wireRangeSlider(
+    container,
+    `[data-setting="wallclock-${playerNum}"]`,
+    (value) => {
+      controller.setPlayerWallClock(playerNum, value, { silent: true });
+      const label = container.querySelector(`[data-wallclock-label="${playerNum}"]`);
+      if (label) {
+        label.textContent = formatWallClock(Number(value));
+      }
+    },
+    refresh,
+  );
+
+  wireRangeSlider(
+    container,
+    `[data-setting="visits-${playerNum}"]`,
+    (value) => {
+      controller.setPlayerVisitsBudget(playerNum, value, { silent: true });
+      const label = container.querySelector(`[data-visits-label="${playerNum}"]`);
+      if (label) {
+        label.textContent = formatVisits(Number(value));
+      }
+    },
+    refresh,
+  );
+}
+
+function renderPlayerAiSettings(ui, playerNum) {
+  if (!ui || ui.isHuman) {
+    return '';
+  }
+
+  if (ui.isLocal) {
+    const { min: tMin, max: tMax, step: tStep } = ui.wallclockRange;
+    const { min: vMin, max: vMax, step: vStep } = ui.visitsRange;
+    return `
+      <div class="player-ai-settings">
+        <label class="control-label control-label--sub">Time per move</label>
+        <div class="time-slider-row">
+          <input
+            type="range"
+            class="time-slider scraped-slider"
+            data-setting="wallclock-${playerNum}"
+            min="${tMin}"
+            max="${tMax}"
+            step="${tStep}"
+            value="${ui.wallClockSeconds}"
+          />
+          <output class="time-slider-value" data-wallclock-label="${playerNum}">${formatWallClock(ui.wallClockSeconds)}</output>
+        </div>
+        <label class="control-label control-label--sub">Visit budget</label>
+        <div class="time-slider-row">
+          <input
+            type="range"
+            class="time-slider scraped-slider"
+            data-setting="visits-${playerNum}"
+            min="${vMin}"
+            max="${vMax}"
+            step="${vStep}"
+            value="${ui.visitsBudget}"
+          />
+          <output class="time-slider-value" data-visits-label="${playerNum}">${formatVisits(ui.visitsBudget)}</output>
+        </div>
+        <p class="time-hint">${escapeHtml(ui.hint)}</p>
+      </div>`;
+  }
+
+  return `
+    <div class="player-ai-settings">
+      ${renderDiscreteSlider({
+        label: 'AI Strength',
+        settingName: 'strength-level',
+        playerNum,
+        value: ui.strengthLevel,
+        presets: STRENGTH_LEVEL_PRESETS,
+      })}
+      ${renderDiscreteSlider({
+        label: 'AI Time',
+        settingName: 'time-to-move',
+        playerNum,
+        value: ui.timeToMove,
+        presets: TIME_TO_MOVE_PRESETS,
+      })}
+      <p class="time-hint">${escapeHtml(ui.hint)}</p>
+    </div>`;
 }
 
 function renderPlayerSelect(name, value, groups) {

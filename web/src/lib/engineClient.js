@@ -1,6 +1,9 @@
 /**
  * Browser WebSocket client for remote Ishtar/Ka engines.
- * Reconstructed from scraped quoridor-ai.netlify.app bundle.
+ * Reconstructed from scraped quoridor-ai.netlify.app bundle (class mT).
+ *
+ * Sync model matches the original: incremental makemove after each human ply,
+ * full replay only after reconnect/undo/new game; AI turns call go() only.
  */
 
 import {
@@ -47,6 +50,8 @@ export class EngineClient {
     this.outstandingSearches = 0;
     this.isPondering = false;
     this.hasSynced = false;
+    this.lastTimeMode = null;
+    this.pendingSearch = null;
 
     this.onInfo = null;
     this.onBestMove = null;
@@ -61,6 +66,7 @@ export class EngineClient {
     this.sendBuffer = [];
     this.outstandingSearches = 0;
     this.hasSynced = false;
+    this.pendingSearch = null;
     this.setStatus('idle');
   }
 
@@ -98,6 +104,10 @@ export class EngineClient {
       if (this.ws === socket) {
         this.setStatus('error');
         this.ws = null;
+        if (this.pendingSearch) {
+          this.pendingSearch = null;
+          this.onError?.(new Error('WebSocket closed before bestmove'));
+        }
       }
     });
   }
@@ -117,7 +127,25 @@ export class EngineClient {
     this.hasSynced = true;
   }
 
+  /** Full replay — used after reconnect, undo, or selecting a remote opponent mid-game. */
+  syncGameState({ moveHistory, gameSnapshot, isFreshGame }) {
+    if (isFreshGame && moveHistory.length === 0) {
+      this.hasSynced = true;
+      return;
+    }
+
+    if (moveHistory.length > 0) {
+      this.makeMoves(moveHistory);
+      return;
+    }
+
+    if (gameSnapshot) {
+      this.setPosition(gameSnapshot);
+    }
+  }
+
   go(timeMode) {
+    this.lastTimeMode = timeMode;
     const visits = this.config.visits?.[timeMode];
     this.outstandingSearches++;
 
@@ -130,19 +158,12 @@ export class EngineClient {
     this.setStatus('searching');
   }
 
-  requestMove({ timeMode, gameSnapshot, moveHistory, isFreshGame }) {
+  requestMove({ aiSettings, gameSnapshot, moveHistory, isFreshGame }) {
+    const timeMode = aiSettings?.timeToMove;
     const runSearch = () => {
-      if (isFreshGame && moveHistory.length === 0) {
-        this.go(timeMode);
-        return;
+      if (!this.hasSynced) {
+        this.syncGameState({ moveHistory, gameSnapshot, isFreshGame });
       }
-
-      if (moveHistory.length > 0) {
-        this.makeMoves(moveHistory);
-      } else if (gameSnapshot) {
-        this.setPosition(gameSnapshot);
-      }
-
       this.go(timeMode);
     };
 
@@ -167,6 +188,10 @@ export class EngineClient {
   onOpen() {
     this.ws.send(JSON.stringify({ token: AUTH_TOKEN, version: '0.0.0' }));
     this.sendStaticSettings();
+
+    if (this.lastTimeMode != null) {
+      this.sendTimeToMoveSettings(this.lastTimeMode);
+    }
 
     for (const command of this.sendBuffer) {
       if (this.ws?.readyState === WebSocket.OPEN) {

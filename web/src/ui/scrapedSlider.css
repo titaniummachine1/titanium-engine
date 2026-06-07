@@ -1,0 +1,95 @@
+/**
+ * Range slider styling — Chakra Slider look from quoridor-ai.netlify.app
+ * (track + filled track + round thumb, draggable).
+ */
+
+.scraped-slider {
+  --slider-track: rgba(255, 255, 255, 0.16);
+  --slider-fill: #3182ce;
+  --slider-thumb: #3182ce;
+  --slider-thumb-ring: #ffffff;
+  --fill-pct: 50%;
+
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.scraped-slider:focus {
+  outline: none;
+}
+
+.scraped-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px rgba(49, 130, 206, 0.45);
+}
+
+.scraped-slider::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--slider-fill) 0%,
+    var(--slider-fill) var(--fill-pct),
+    var(--slider-track) var(--fill-pct),
+    var(--slider-track) 100%
+  );
+}
+
+.scraped-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -5px;
+  border-radius: 50%;
+  border: 2px solid var(--slider-thumb-ring);
+  background: var(--slider-thumb);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  cursor: grab;
+}
+
+.scraped-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.06);
+}
+
+.scraped-slider::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--slider-track);
+}
+
+.scraped-slider::-moz-range-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--slider-fill);
+}
+
+.scraped-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--slider-thumb-ring);
+  background: var(--slider-thumb);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  cursor: grab;
+}
+
+.scraped-slider:active::-moz-range-thumb {
+  cursor: grabbing;
+}
+
+.scraped-slider:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.scraped-slider:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+}

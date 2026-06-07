@@ -4,6 +4,7 @@
 
 import GorisansonWorker from '../workers/gorisansonWorker.js?worker';
 import { actionToGorisansonMove, gorisansonMoveToAction } from './gorisansonBridge.js';
+import { LOCAL_VISITS_RANGE } from './timeControl.js';
 
 export class GorisansonEngineClient {
   constructor(engineConfig) {
@@ -37,14 +38,16 @@ export class GorisansonEngineClient {
     this.setStatus('idle');
   }
 
-  requestMove({ timeMode, moveHistory, isFreshGame }) {
+  requestMove({ aiSettings, moveHistory, isFreshGame }) {
     if (isFreshGame) {
       this.gorisansonMoves = [];
     } else if (moveHistory?.length) {
       this.gorisansonMoves = moveHistory.map(actionToGorisansonMove);
     }
 
-    const simulations = this.config.simulations[timeMode];
+    const timeMs = Math.round((aiSettings?.wallClockSeconds ?? 3) * 1000);
+    const maxSimulations = aiSettings?.visitsBudget ?? LOCAL_VISITS_RANGE.default;
+
     const runSearch = () => {
       this.setStatus('searching');
       const started = performance.now();
@@ -66,7 +69,7 @@ export class GorisansonEngineClient {
           const elapsed = performance.now() - started;
           this.onInfo?.({
             time: elapsed,
-            simulations,
+            simulations: data.simulations,
             progress: 1,
           });
           this.setStatus('idle');
@@ -83,7 +86,8 @@ export class GorisansonEngineClient {
 
       this.worker.postMessage({
         gorisansonMoves: this.gorisansonMoves,
-        simulations,
+        timeMs,
+        maxSimulations,
         uctConst: this.config.uctConst ?? 0.2,
       });
     };

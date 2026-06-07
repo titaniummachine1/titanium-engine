@@ -1,19 +1,34 @@
 import { GameSession } from './gameSession.js';
 import { EngineClient } from '../lib/engineClient.js';
 import { GorisansonEngineClient } from '../lib/gorisansonEngine.js';
+import { PlayerType, StrengthLevel, TimeToMove } from '../lib/engineConfig.js';
 import {
-  PlayerType,
-  TimeToMove,
-  EngineStatus,
-} from '../lib/engineConfig.js';
-import {
-  TIME_PRESETS,
+  STRENGTH_LEVEL_PRESETS,
+  TIME_TO_MOVE_PRESETS,
   getAllEngineConfigs,
   getPlayerOptionGroups,
   flattenPlayerOptions,
   describeTimeBudget,
   describeActiveSearchInfo,
 } from '../lib/playerRegistry.js';
+import {
+  WALL_CLOCK_RANGE,
+  LOCAL_VISITS_RANGE,
+  defaultPlayerAiSettings,
+  describePlayerAiSettings,
+  isLocalEngine,
+  isRemoteEngine,
+} from '../lib/timeControl.js';
+
+function isSavedSettingsValid(playerType, saved, engineConfigs) {
+  if (isLocalEngine(playerType, engineConfigs)) {
+    return saved.wallClockSeconds != null && saved.visitsBudget != null;
+  }
+  if (isRemoteEngine(playerType, engineConfigs)) {
+    return saved.strengthLevel != null && saved.timeToMove != null;
+  }
+  return false;
+}
 
 export class AppController {
   constructor() {
@@ -23,7 +38,11 @@ export class AppController {
 
     this.settings = {
       players: [PlayerType.Human, PlayerType.IshtarV3],
-      timeToMove: TimeToMove.Short,
+      playerAiSettings: [
+        null,
+        defaultPlayerAiSettings(PlayerType.IshtarV3, this.engineConfigs),
+      ],
+      playerAiSettingsMemory: [{}, {}],
       rotateBoard: false,
       displayCoordinates: true,
       displayRemainingWalls: true,
@@ -45,12 +64,14 @@ export class AppController {
       engineStatus: { ...this.engineStatus },
       eval: { ...this.eval },
       aiThinking: this.aiThinking,
-      timePresets: TIME_PRESETS,
+      strengthLevelPresets: STRENGTH_LEVEL_PRESETS,
+      timeToMovePresets: TIME_TO_MOVE_PRESETS,
       playerOptionGroups: getPlayerOptionGroups(),
       playerOptions: flattenPlayerOptions(getPlayerOptionGroups()),
+      playerAiSettingsUi: this.getPlayerAiSettingsUi(),
       timeBudgetHint: describeTimeBudget(
         this.settings.players,
-        this.settings.timeToMove,
+        this.settings.playerAiSettings,
         this.engineConfigs,
       ),
       searchInfoLine: describeActiveSearchInfo(
@@ -68,13 +89,140 @@ export class AppController {
       return;
     }
     this.settings.players[playerNum - 1] = playerType;
+    this.ensurePlayerAiSettingsSlot(playerNum, playerType);
+
+    if (playerType !== PlayerType.Human && playerType !== PlayerType.GorisansonMCTS) {
+      this.syncRemoteEngine(playerType);
+    }
     this.onChange?.();
     this.maybeRequestAiMove();
   }
 
-  setTimeToMove(timeMode) {
-    this.settings.timeToMove = Number(timeMode);
-    this.onChange?.();
+  ensurePlayerAiSettingsSlot(playerNum, playerType) {
+    const index = playerNum - 1;
+    if (playerType === PlayerType.Human) {
+      return;
+    }
+
+    const memory = this.settings.playerAiSettingsMemory[index] ?? {};
+    let saved = memory[playerType];
+    if (saved?.strength != null && saved.timeToMove == null) {
+      saved = {
+        strengthLevel: StrengthLevel.Alpha,
+        timeToMove: saved.strength,
+      };
+      memory[playerType] = saved;
+    }
+    if (saved && isSavedSettingsValid(playerType, saved, this.engineConfigs)) {
+      this.settings.playerAiSettings[index] = { ...saved };
+      return;
+    }
+
+    const created = defaultPlayerAiSettings(playerType, this.engineConfigs);
+    memory[playerType] = { ...created };
+    this.settings.playerAiSettingsMemory[index] = memory;
+    this.settings.playerAiSettings[index] = created;
+  }
+
+  rememberPlayerAiSettings(playerNum, aiSettings) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    if (playerType === PlayerType.Human || !aiSettings) {
+      return;
+    }
+    const memory = this.settings.playerAiSettingsMemory[index] ?? {};
+    memory[playerType] = { ...aiSettings };
+    this.settings.playerAiSettingsMemory[index] = memory;
+    this.settings.playerAiSettings[index] = { ...aiSettings };
+  }
+
+  getPlayerAiSettingsUiForSlot(playerNum) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    const current = this.settings.playerAiSettings[index];
+
+    return {
+      playerNum,
+      playerType,
+      isHuman: playerType === PlayerType.Human,
+      isLocal: isLocalEngine(playerType, this.engineConfigs),
+      isRemote: isRemoteEngine(playerType, this.engineConfigs),
+      strengthLevel: current?.strengthLevel ?? StrengthLevel.Alpha,
+      timeToMove: current?.timeToMove ?? TimeToMove.Short,
+      wallClockSeconds: current?.wallClockSeconds ?? WALL_CLOCK_RANGE.defaultSeconds,
+      visitsBudget: current?.visitsBudget ?? LOCAL_VISITS_RANGE.default,
+      wallclockRange: WALL_CLOCK_RANGE,
+      visitsRange: LOCAL_VISITS_RANGE,
+      hint: describePlayerAiSettings(playerType, current, this.engineConfigs),
+    };
+  }
+
+  getPlayerAiSettingsUi() {
+    return [this.getPlayerAiSettingsUiForSlot(1), this.getPlayerAiSettingsUiForSlot(2)];
+  }
+
+  setPlayerStrengthLevel(playerNum, strengthLevel, { silent = false } = {}) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    if (!isRemoteEngine(playerType, this.engineConfigs)) {
+      return;
+    }
+    const current = this.settings.playerAiSettings[index] ?? {};
+    this.rememberPlayerAiSettings(playerNum, {
+      ...current,
+      strengthLevel: Number(strengthLevel),
+    });
+    if (!silent) {
+      this.onChange?.();
+    }
+  }
+
+  setPlayerTimeToMove(playerNum, timeToMove, { silent = false } = {}) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    if (!isRemoteEngine(playerType, this.engineConfigs)) {
+      return;
+    }
+    const current = this.settings.playerAiSettings[index] ?? {};
+    this.rememberPlayerAiSettings(playerNum, {
+      ...current,
+      timeToMove: Number(timeToMove),
+    });
+    if (!silent) {
+      this.onChange?.();
+    }
+  }
+
+  setPlayerWallClock(playerNum, seconds, { silent = false } = {}) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    if (!isLocalEngine(playerType, this.engineConfigs)) {
+      return;
+    }
+    const current = this.settings.playerAiSettings[index] ?? {};
+    this.rememberPlayerAiSettings(playerNum, {
+      ...current,
+      wallClockSeconds: Number(seconds),
+    });
+    if (!silent) {
+      this.onChange?.();
+    }
+  }
+
+  setPlayerVisitsBudget(playerNum, visits, { silent = false } = {}) {
+    const index = playerNum - 1;
+    const playerType = this.settings.players[index];
+    if (!isLocalEngine(playerType, this.engineConfigs)) {
+      return;
+    }
+    const current = this.settings.playerAiSettings[index] ?? {};
+    this.rememberPlayerAiSettings(playerNum, {
+      ...current,
+      visitsBudget: Number(visits),
+    });
+    if (!silent) {
+      this.onChange?.();
+    }
   }
 
   toggleRotateBoard() {
@@ -167,7 +315,6 @@ export class AppController {
       };
       engine.onInfo = (info) => {
         this.searchInfo[playerType] = { ...this.searchInfo[playerType], ...info };
-        // Progress-only updates (local MCTS) must not re-render the board every tick.
         if (info.progress !== undefined && info.p1 === undefined && !info.pv) {
           return;
         }
@@ -192,12 +339,26 @@ export class AppController {
 
   syncEnginesAfterHumanMove(action) {
     for (const playerType of this.settings.players) {
-      if (playerType === PlayerType.Human) {
+      if (playerType === PlayerType.Human || playerType === PlayerType.GorisansonMCTS) {
         continue;
       }
       const engine = this.getEngine(playerType);
       engine?.makeMoves([action]);
     }
+  }
+
+  syncRemoteEngine(playerType) {
+    const engine = this.getEngine(playerType);
+    if (!engine?.syncGameState) {
+      return;
+    }
+
+    const moveHistory = this.session.actions;
+    engine.syncGameState({
+      moveHistory,
+      gameSnapshot: this.session.getEngineSnapshot(),
+      isFreshGame: moveHistory.length === 0,
+    });
   }
 
   maybeRequestAiMove() {
@@ -223,18 +384,32 @@ export class AppController {
 
     engine.onBestMove = (action) => {
       this.aiThinking = false;
-      if (!this.session.winner) {
-        this.session.applyAction(action);
-        this.onChange?.();
-        this.maybeRequestAiMove();
+      if (this.session.winner) {
+        return;
       }
+
+      const applied = this.session.applyAction(action);
+      if (!applied) {
+        this.engineStatus[playerType] = 'error';
+        this.onChange?.();
+        return;
+      }
+
+      this.onChange?.();
+      this.maybeRequestAiMove();
     };
 
+    const playerIndex = this.session.getSnapshot().playerToMove - 1;
+    let aiSettings = this.settings.playerAiSettings[playerIndex];
+    if (!aiSettings) {
+      aiSettings = defaultPlayerAiSettings(playerType, this.engineConfigs);
+      this.settings.playerAiSettings[playerIndex] = aiSettings;
+    }
     const moveHistory = this.session.actions;
     const isFreshGame = moveHistory.length === 0;
 
     engine.requestMove({
-      timeMode: this.settings.timeToMove,
+      aiSettings,
       gameSnapshot: this.session.getEngineSnapshot(),
       moveHistory,
       isFreshGame,

@@ -427,6 +427,48 @@ body {
   color: var(--muted);
 }
 
+.control-label--sub {
+  margin-top: 8px;
+  font-size: 0.8rem;
+}
+
+.player-ai-settings {
+  margin-top: 4px;
+  padding-left: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.discrete-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.discrete-slider__input {
+  width: 100%;
+}
+
+.discrete-slider__ticks {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  padding: 0 2px;
+}
+
+.discrete-slider__tick {
+  flex: 1;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.discrete-slider--disabled {
+  opacity: 0.5;
+}
+
 .control-select,
 .btn {
   font: inherit;
@@ -490,6 +532,29 @@ body {
   font-size: 0.85rem;
   color: var(--muted);
   line-height: 1.35;
+}
+
+.time-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.time-slider {
+  flex: 1;
+}
+
+.time-slider-value {
+  min-width: 3.5rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
+}
+
+.time-hint--all {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  opacity: 0.85;
 }
 
 .status-line--muted strong {
