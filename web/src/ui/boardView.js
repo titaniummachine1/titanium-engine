@@ -310,15 +310,18 @@ function renderTurnIndicator(playerNum, playerToMove, playerType, engineStatus, 
   const status = engineStatus[playerType] ?? 'idle';
   const spinner = document.createElement('div');
   spinner.className = 'engine-spinner';
-  spinner.title =
-    status === 'error'
-      ? 'Engine connection error'
-      : aiThinking
-        ? 'Engine is thinking...'
-        : 'Connecting...';
   if (status === 'error') {
     spinner.classList.add('engine-spinner--error');
     spinner.textContent = '!';
+    spinner.title = 'Engine error — try New game or pick another opponent';
+  } else if (aiThinking || status === 'searching') {
+    spinner.title = 'Engine is thinking...';
+  } else if (status === 'connecting') {
+    spinner.title = 'Connecting to engine...';
+  } else {
+    spinner.classList.add('engine-spinner--error');
+    spinner.textContent = '!';
+    spinner.title = 'Engine idle on AI turn — try New game';
   }
   wrap.appendChild(spinner);
   return wrap;
