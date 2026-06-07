@@ -1,9 +1,10 @@
-//! Checkpoint 02 CLI — list legal moves.
+//! Checkpoint 03 CLI — perft only.
 
-use titanium::{generate_legal_moves, Board};
+use std::env;
+use titanium::{perft, Board};
 
 fn main() {
+    let depth: u32 = env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(1);
     let board = Board::new();
-    let moves = generate_legal_moves(&board);
-    println!("{} legal moves at startpos", moves.len());
+    println!("perft {} {}", depth, perft(&board, depth));
 }
