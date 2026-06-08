@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use crate::board::{Board, Move, Player, WallOrientation};
-use crate::grid::{is_goal, square_index, unpack_square};
+use crate::grid::{is_goal, square_index, unpack_square, wall_touch_squares};
 use crate::moves::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::path::BfsScratch;
 use crate::perft::format_move;
@@ -12,7 +12,9 @@ const MATE: i32 = 20_000;
 const MATE_WINDOW: i32 = 500;
 const MAX_PLY: u32 = 64;
 const DIST_PENALTY: u8 = 255;
-const MAX_EVAL: i32 = 500;
+const MAX_EVAL: i32 = 255;
+/// Wasted turn: opponent gets to improve on reply.
+const TEMPO_PENALTY: i32 = -1;
 
 const LMR_MIN_DEPTH: u32 = 2;
 // Full-depth moves before LMR kicks in — 4 protects the critical 4th move
@@ -154,7 +156,8 @@ impl SearchState<'_> {
 
     fn bump_nodes(&mut self) -> bool {
         self.nodes += 1;
-        self.nodes % 4096 == 0 && self.should_stop()
+        // Check more frequently to respect limits better
+        self.nodes % 1024 == 0 && self.should_stop()
     }
 }
 
@@ -275,16 +278,11 @@ fn unpack_move(packed: u32) -> Option<Move> {
 
 
 
-/// Path distance + wall stock — bounded so horizon leaves cannot look like mate.
+/// Static eval: how many more steps they need minus how many we need.
 fn eval_stm(board: &Board, stm: Player, bfs: &mut BfsScratch) -> i32 {
-    let us = stm;
-    let opp = stm.opposite();
-    let our = i32::from(bfs.shortest_distance(board, us).unwrap_or(DIST_PENALTY));
-    let opp_d = i32::from(bfs.shortest_distance(board, opp).unwrap_or(DIST_PENALTY));
-    let our_walls = i32::from(board.walls_remaining[us as usize]);
-    let opp_walls = i32::from(board.walls_remaining[opp as usize]);
-    let wall_term = (our_walls - opp_walls) * 2;
-    (opp_d - our + wall_term).clamp(-MAX_EVAL, MAX_EVAL)
+    let our = i32::from(bfs.shortest_distance(board, stm).unwrap_or(DIST_PENALTY));
+    let opp = i32::from(bfs.shortest_distance(board, stm.opposite()).unwrap_or(DIST_PENALTY));
+    (opp - our).clamp(-MAX_EVAL, MAX_EVAL)
 }
 
 fn terminal_score(ply: u32) -> i32 {
@@ -371,35 +369,55 @@ fn path_distance(player: Player, path: &[u8], len: usize) -> u8 {
     }
 }
 
-fn wall_disturbs_path(board: &mut Board, mv: Move, opp_dist: u8, bfs: &mut BfsScratch) -> bool {
+fn opp_path_gain(
+    board: &mut Board,
+    mv: Move,
+    opp_dist: u8,
+    bfs: &mut BfsScratch,
+) -> i32 {
     let Move::Wall { .. } = mv else {
-        return false;
+        return 0;
     };
     let opp = board.side().opposite();
     let undo = board.make_move(mv);
     let new_opp = bfs.shortest_distance(board, opp).unwrap_or(DIST_PENALTY);
     board.unmake_move(undo);
-    new_opp > opp_dist
+    i32::from(new_opp.saturating_sub(opp_dist))
 }
 
-/// A pawn move is tactical if it actually shortens our BFS distance to the goal.
-/// This is stricter than row-progress: a sideways detour can be "forward" by row
-/// but not reduce the path length at all.
-/// We avoid a full BFS by using the pre-computed `our_dist` and checking that the
-/// new square is strictly closer to the goal row than the current position.
-/// For final-rank moves (dist == 1), any pawn move to the goal row is always tactical.
-fn is_tactical_pawn(board: &Board, mv: Move, our_dist: u8) -> bool {
-    let Move::Pawn { row, .. } = mv else {
-        return false;
+fn our_path_gain(
+    board: &mut Board,
+    mv: Move,
+    our_dist: u8,
+    bfs: &mut BfsScratch,
+) -> i32 {
+    let Move::Pawn { .. } = mv else {
+        return 0;
     };
-    let stm = board.side();
-    let goal = if stm == Player::One { 8u8 } else { 0u8 };
-    // Distance from destination square to goal row.
-    let dest_dist_to_goal = row.abs_diff(goal);
-    // Tactical: the new square is strictly closer to the goal than our current distance.
-    // our_dist is pawn-steps; dest_dist_to_goal is row-distance (lower bound on pawn-steps).
-    // This correctly handles both straight advances and jump-overs.
-    dest_dist_to_goal < our_dist
+    let us = board.side();
+    let undo = board.make_move(mv);
+    let new_our = bfs.shortest_distance(board, us).unwrap_or(DIST_PENALTY);
+    board.unmake_move(undo);
+    i32::from(our_dist.saturating_sub(new_our))
+}
+
+fn move_immediate_gain(
+    board: &mut Board,
+    mv: Move,
+    our_dist: u8,
+    opp_dist: u8,
+    bfs: &mut BfsScratch,
+) -> i32 {
+    match mv {
+        Move::Pawn { .. } => {
+            let g = our_path_gain(board, mv, our_dist, bfs);
+            if g > 0 { g } else { TEMPO_PENALTY }
+        }
+        Move::Wall { .. } => {
+            let g = opp_path_gain(board, mv, opp_dist, bfs);
+            if g > 0 { g } else { TEMPO_PENALTY }
+        }
+    }
 }
 
 fn is_tactical_move(
@@ -407,26 +425,29 @@ fn is_tactical_move(
     mv: Move,
     our_dist: u8,
     opp_dist: u8,
-    opp_path: &[u8],
-    opp_path_len: usize,
     bfs: &mut BfsScratch,
 ) -> bool {
     match mv {
-        Move::Pawn { .. } => is_tactical_pawn(board, mv, our_dist),
-        Move::Wall { .. } => {
-            if wall_intersects_path(mv, opp_path, opp_path_len) {
-                wall_disturbs_path(board, mv, opp_dist, bfs)
-            } else {
-                false
-            }
-        }
+        Move::Pawn { .. } => our_path_gain(board, mv, our_dist, bfs) > 0,
+        Move::Wall { .. } => opp_path_gain(board, mv, opp_dist, bfs) > 0,
     }
 }
 
-fn wall_proximity_score(mv: Move, opp_goal: u8) -> i32 {
-    let Move::Wall { row, .. } = mv else { return 0 };
-    // Higher = closer to opponent's goal = more likely to block them.
-    80i32 - i32::from(row.abs_diff(opp_goal))
+fn wall_in_dead_zone(mv: Move, reachable: u128) -> bool {
+    let Move::Wall {
+        row,
+        col,
+        orientation,
+    } = mv
+    else {
+        return false;
+    };
+    for (r, c) in wall_touch_squares(row, col, orientation) {
+        if reachable & (1u128 << square_index(r, c)) != 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn collect_moves(
@@ -434,10 +455,6 @@ fn collect_moves(
     buf: &mut [Move],
     bfs: &mut BfsScratch,
     tactical_only: bool,
-    // Maximum number of quiet (non-path-disturbing) walls to include.
-    // 0 = same as old prune_quiet_walls=true but depth-scaled.
-    // usize::MAX = include all quiet walls (too slow at root).
-    max_quiet_walls: usize,
     allow_walls: bool,
 ) -> usize {
     let mut scratch = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
@@ -446,87 +463,37 @@ fn collect_moves(
         return 0;
     }
 
-    let mut opp_path = [0u8; 81];
-    let mut opp_path_len = 0;
     let mut opp_dist = DIST_PENALTY;
     if allow_walls {
-        opp_path_len = get_shortest_path(board, board.side().opposite(), bfs, &mut opp_path);
-        opp_dist = path_distance(board.side().opposite(), &opp_path, opp_path_len);
+        opp_dist = bfs
+            .shortest_distance(board, board.side().opposite())
+            .unwrap_or(DIST_PENALTY);
     }
     let our_dist = bfs.shortest_distance(board, board.side()).unwrap_or(DIST_PENALTY);
+    let reachable = bfs.both_reachable_mask(board);
 
-    let stm = board.side();
-    let opp_goal: u8 = if stm.opposite() == Player::One { 8 } else { 0 };
     let mut n = 0usize;
 
-    // First pass: all pawns + path-disturbing walls.
     for i in 0..full {
         let mv = scratch[i];
         match mv {
             Move::Pawn { .. } => {
-                if tactical_only && !is_tactical_pawn(board, mv, our_dist) {
+                if tactical_only && our_path_gain(board, mv, our_dist, bfs) <= 0 {
                     continue;
                 }
                 buf[n] = mv;
                 n += 1;
             }
             Move::Wall { .. } => {
-                if !allow_walls {
+                if !allow_walls || wall_in_dead_zone(mv, reachable) {
                     continue;
                 }
-                let disturbs = if wall_intersects_path(mv, &opp_path, opp_path_len) {
-                    wall_disturbs_path(board, mv, opp_dist, bfs)
-                } else {
-                    false
-                };
-                if tactical_only && !disturbs {
+                if opp_path_gain(board, mv, opp_dist, bfs) <= 0 {
                     continue;
                 }
-                if disturbs {
-                    buf[n] = mv;
-                    n += 1;
-                }
+                buf[n] = mv;
+                n += 1;
             }
-        }
-    }
-
-    // Second pass: top quiet walls by proximity to opponent goal, up to cap.
-    if allow_walls && !tactical_only && max_quiet_walls > 0 {
-        // Collect quiet wall candidates with their proximity score.
-        let mut quiet: [(i32, Move); MAX_LEGAL_MOVES] =
-            [(0, Move::Pawn { row: 0, col: 0 }); MAX_LEGAL_MOVES];
-        let mut q_count = 0usize;
-        for i in 0..full {
-            let mv = scratch[i];
-            if !matches!(mv, Move::Wall { .. }) {
-                continue;
-            }
-            // Skip walls already added as path-disturbing.
-            let blocks_path = wall_intersects_path(mv, &opp_path, opp_path_len);
-            let disturbs = if blocks_path {
-                wall_disturbs_path(board, mv, opp_dist, bfs)
-            } else {
-                false
-            };
-            if disturbs {
-                continue;
-            }
-            let score = wall_proximity_score(mv, opp_goal);
-            quiet[q_count] = (score, mv);
-            q_count += 1;
-        }
-        // Partial sort: extract top max_quiet_walls by score (selection sort, cheap for small cap).
-        let take = max_quiet_walls.min(q_count);
-        for slot in 0..take {
-            let mut best_idx = slot;
-            for j in (slot + 1)..q_count {
-                if quiet[j].0 > quiet[best_idx].0 {
-                    best_idx = j;
-                }
-            }
-            quiet.swap(slot, best_idx);
-            buf[n] = quiet[slot].1;
-            n += 1;
         }
     }
 
@@ -546,59 +513,36 @@ fn collect_moves(
 }
 
 fn move_order_score(
-    board: &Board,
+    board: &mut Board,
     mv: Move,
     tt_best: Option<Move>,
-    opp_path: &[u8],
-    opp_path_len: usize,
-    _opp_dist: u8,
+    our_dist: u8,
+    opp_dist: u8,
     bfs: &mut BfsScratch,
 ) -> i32 {
     if tt_best == Some(mv) {
         return 10_000;
     }
-
-    let stm = board.side();
-    let base_our = bfs.shortest_distance(board, stm).unwrap_or(DIST_PENALTY);
-    match mv {
-        Move::Pawn { row, .. } => {
-            let goal = if stm == Player::One { 8 } else { 0 };
-            let progress = i32::from(base_our) - i32::from(row.abs_diff(goal));
-            500 + progress * 10
-        }
-        Move::Wall { row, .. } => {
-            let opp_goal = if stm.opposite() == Player::One { 8 } else { 0 };
-            // row_bonus: 0..80 (highest near opponent goal)
-            let row_bonus = 80i32 - i32::from(row.abs_diff(opp_goal)) * 8;
-            let stock = i32::from(board.walls_remaining[stm as usize]);
-
-            // Non-mutating fast check for path intersection
-            let disturbs = wall_intersects_path(mv, opp_path, opp_path_len);
-
-            if disturbs {
-                // Tactical blocking wall: high priority
-                600 + row_bonus + stock
-            } else {
-                // Quiet wall: low priority
-                200 + row_bonus + stock
-            }
-        }
+    let gain = move_immediate_gain(board, mv, our_dist, opp_dist, bfs);
+    if gain > 0 {
+        1000 + gain * 100
+    } else {
+        TEMPO_PENALTY
     }
 }
 
 fn order_moves(
-    board: &Board,
+    board: &mut Board,
     moves: &mut [Move],
     n: usize,
     tt_best: Option<Move>,
     scores: &mut [i32; MAX_LEGAL_MOVES],
-    opp_path: &[u8],
-    opp_path_len: usize,
+    our_dist: u8,
     opp_dist: u8,
     bfs: &mut BfsScratch,
 ) {
     for i in 0..n {
-        scores[i] = move_order_score(board, moves[i], tt_best, opp_path, opp_path_len, opp_dist, bfs);
+        scores[i] = move_order_score(board, moves[i], tt_best, our_dist, opp_dist, bfs);
     }
     let mut order: [usize; MAX_LEGAL_MOVES] = core::array::from_fn(|i| i);
     order[..n].sort_unstable_by(|&a, &b| scores[b].cmp(&scores[a]));
@@ -637,10 +581,19 @@ fn quiescence(
     }
 
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_moves(board, &mut buf, state.bfs, true, 0, false);
+    let n = collect_moves(board, &mut buf, state.bfs, true, true);
     if n == 0 {
         return alpha;
     }
+
+    let our_dist = state
+        .bfs
+        .shortest_distance(board, board.side())
+        .unwrap_or(DIST_PENALTY);
+    let opp_dist = state
+        .bfs
+        .shortest_distance(board, board.side().opposite())
+        .unwrap_or(DIST_PENALTY);
 
     let mut scores = [0i32; MAX_LEGAL_MOVES];
     order_moves(
@@ -649,9 +602,8 @@ fn quiescence(
         n,
         None,
         &mut scores,
-        &[],
-        0,
-        DIST_PENALTY,
+        our_dist,
+        opp_dist,
         state.bfs,
     );
 
@@ -808,26 +760,8 @@ fn negamax(
         && !is_mate_score(static_eval)
         && !is_mate_score(alpha);
 
-    // Quiet-wall cap: root keeps 3/6/10; sub-nodes are very tight to control
-    // branching factor. Path-disturbing walls are NEVER capped (added separately).
-    // Target effective branching factor ~7-8 to reach depth 12 in 10 seconds.
-    let quiet_wall_cap = if ply == 0 {
-        match depth {
-            0..=2 => 3usize,
-            3..=4 => 6usize,
-            _     => 10usize,
-        }
-    } else {
-        // Sub-nodes: keep very lean — only 1 strategic quiet wall at high depth.
-        // Path-blocking walls are already captured in the tactical pass.
-        match depth {
-            0..=2 => 0usize,
-            3..=4 => 1usize,
-            _     => 2usize,
-        }
-    };
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_moves(board, &mut buf, state.bfs, false, quiet_wall_cap, true);
+    let n = collect_moves(board, &mut buf, state.bfs, false, true);
     if n == 0 {
         return eval_stm(board, board.side(), state.bfs);
     }
@@ -844,8 +778,7 @@ fn negamax(
         n,
         tt_best,
         &mut scores,
-        &opp_path,
-        opp_path_len,
+        our_dist_pre,
         opp_dist_pre,
         state.bfs,
     );
@@ -903,15 +836,7 @@ fn negamax(
             // We treat early moves as tactical by definition (no reduction either way).
             true
         } else {
-            is_tactical_move(
-                board,
-                mv,
-                our_dist_pre,
-                opp_dist_pre,
-                &opp_path,
-                opp_path_len,
-                state.bfs,
-            )
+            is_tactical_move(board, mv, our_dist_pre, opp_dist_pre, state.bfs)
         };
 
         // ── Futility pruning ──────────────────────────────────────────────────
@@ -1212,6 +1137,14 @@ pub fn search_best_move(board: &mut Board, config: SearchConfig) -> Option<Searc
         });
         log_depth(&state, depth, verified);
 
+        // Stop immediately if we found a proven mate - no need to search deeper
+        if is_mate_score(verified) && verify_pv_mate(board, state.tt, verified) {
+            if state.log {
+                eprintln!("info mate found at depth {}, stopping search", depth);
+            }
+            break;
+        }
+
         if state.should_stop() {
             break;
         }
@@ -1244,7 +1177,8 @@ pub fn genmove_algebraic(board: &mut Board, config: SearchConfig) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::Board;
+    use crate::board::{Board, Move, Player};
+    use crate::perft::format_move;
 
     #[test]
     fn startpos_eval_is_bounded() {
@@ -1261,6 +1195,37 @@ mod tests {
         let fake_mate = MATE - 8;
         assert_eq!(clamp_unproven_mate(fake_mate, 3, fallback), fallback);
         assert_eq!(clamp_unproven_mate(fake_mate, 10, fallback), fake_mate);
+    }
+
+    #[test]
+    fn funnel_position_avoids_tempo_waste() {
+        let moves = [
+            "e2", "e8", "e3", "e7", "e4", "e6", "d1h", "e6h", "d4", "c6h", "d5", "a6h", "e5",
+            "e5v",
+        ];
+        let mut board = Board::new();
+        for m in moves {
+            board.apply_algebraic(m);
+        }
+        assert_eq!(board.side(), Player::One);
+
+        let mut bfs = BfsScratch::new();
+        let our_dist = bfs.shortest_distance(&board, Player::One).unwrap_or(DIST_PENALTY);
+        let opp_dist = bfs.shortest_distance(&board, Player::Two).unwrap_or(DIST_PENALTY);
+
+        let config = SearchConfig {
+            time_ms: 3000,
+            max_nodes: 2_000_000,
+            log: false,
+        };
+        let report = search_best_move(&mut board, config).expect("report");
+        let gain = move_immediate_gain(&mut board, report.best_move, our_dist, opp_dist, &mut bfs);
+        assert!(
+            gain > 0,
+            "expected move that shortens our path or lengthens theirs, got {} (score {})",
+            format_move(report.best_move),
+            report.root_score
+        );
     }
 
     #[test]

@@ -162,7 +162,11 @@ export class TitaniumEngineClient {
         }
         this.pendingRequest = null;
         this.setStatus('error');
-        this.onError?.(err);
+        const message =
+          err?.message === 'Failed to fetch'
+            ? 'Cannot reach dev server (/api/titanium/genmove) — run npm run dev and ensure engine is built (cargo build --release in engine/)'
+            : err?.message ?? String(err);
+        this.onError?.(new Error(message));
       });
   }
 

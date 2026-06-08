@@ -74,6 +74,47 @@ impl BfsScratch {
         self.can_reach_goal(board, Player::One) && self.can_reach_goal(board, Player::Two)
     }
 
+    /// BFS from `player`'s pawn — sets bits in `mask` for every reachable square.
+    pub fn fill_reachable(&mut self, board: &Board, player: Player, mask: &mut u128) {
+        let (sr, sc) = board.pawn(player);
+        let start = square_index(sr, sc);
+        self.visited = 1u128 << start;
+        *mask |= self.visited;
+        let mut head = 0usize;
+        let mut tail = 1usize;
+        self.queue[0] = start;
+
+        while head < tail {
+            let sq = self.queue[head];
+            head += 1;
+            let (r, c) = unpack_square(sq);
+            for (dr, dc) in NEIGHBORS {
+                if !can_step(board, r, c, dr, dc) {
+                    continue;
+                }
+                let nr = (r as i8 + dr) as u8;
+                let nc = (c as i8 + dc) as u8;
+                let nsq = square_index(nr, nc);
+                let bit = 1u128 << nsq;
+                if self.visited & bit != 0 {
+                    continue;
+                }
+                self.visited |= bit;
+                *mask |= bit;
+                self.queue[tail] = nsq;
+                tail += 1;
+            }
+        }
+    }
+
+    /// Union of squares reachable by either pawn — used to skip wall slots in dead zones.
+    pub fn both_reachable_mask(&mut self, board: &Board) -> u128 {
+        let mut mask = 0u128;
+        self.fill_reachable(board, Player::One, &mut mask);
+        self.fill_reachable(board, Player::Two, &mut mask);
+        mask
+    }
+
     /// Distance BFS — uses `depth` scratch for eval.
     pub fn shortest_distance(&mut self, board: &Board, player: Player) -> Option<u8> {
         let (sr, sc) = board.pawn(player);
@@ -230,5 +271,14 @@ mod tests {
             Some(8)
         );
         assert!(scratch.both_players_reach_goals(&board));
+    }
+
+    #[test]
+    fn both_reachable_mask_includes_both_pawns() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let mask = scratch.both_reachable_mask(&board);
+        assert_ne!(mask & (1u128 << square_index(0, 4)), 0);
+        assert_ne!(mask & (1u128 << square_index(8, 4)), 0);
     }
 }

@@ -18,6 +18,9 @@ pub mod perft;
 pub mod tt;
 pub mod zobrist;
 
+#[cfg(test)]
+mod test_replay;
+
 pub use board::{Board, Column, Move, Player, Row, Undo, WallOrientation};
 pub use moves::{
     generate_legal_moves, generate_legal_moves_into, generate_legal_moves_slice, MAX_LEGAL_MOVES,

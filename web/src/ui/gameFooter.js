@@ -26,7 +26,7 @@ export function renderGameFooter(container, state) {
     if (liveSearch.mode) {
       liveLine = `${who}: ${modeLabel}`;
       if (liveSearch.searchDepth) {
-        liveLine += ` d${liveSearch.searchDepth}`;
+        liveLine += ` depth=${liveSearch.searchDepth}`;
       }
       if (liveSearch.nodes) {
         liveLine += ` · ${liveSearch.nodes.toLocaleString()} nodes`;
@@ -35,9 +35,13 @@ export function renderGameFooter(container, state) {
       }
       if (liveSearch.depthLog?.length) {
         const last = liveSearch.depthLog[liveSearch.depthLog.length - 1];
-        liveLine += ` · eval ${last.score > 0 ? '+' : ''}${last.score}`;
+        const scoreStr = last.score > 0 ? '+' : '';
+        liveLine += ` · eval=${scoreStr}${last.score}`;
       } else if (liveSearch.rootWinRate != null) {
         liveLine += ` · wr ${(liveSearch.rootWinRate * 100).toFixed(0)}%`;
+      }
+      if (liveSearch.bestMove) {
+        liveLine += ` · best=${liveSearch.bestMove}`;
       }
     } else if (liveSearch.simulations) {
       liveLine = `${who}: thinking… ${liveSearch.simulations.toLocaleString()} sims`;

@@ -75,6 +75,19 @@ pub fn unpack_square(sq: u8) -> (u8, u8) {
     (sq / 9, sq % 9)
 }
 
+/// Pawn squares adjacent to a wall segment (internal wall coords).
+#[inline]
+pub fn wall_touch_squares(row: u8, col: u8, orientation: WallOrientation) -> [(u8, u8); 4] {
+    match orientation {
+        WallOrientation::Horizontal | WallOrientation::Vertical => [
+            (row, col),
+            (row, col + 1),
+            (row + 1, col),
+            (row + 1, col + 1),
+        ],
+    }
+}
+
 pub fn set_wall(board: &mut Board, row: u8, col: u8, orientation: WallOrientation, place: bool) {
     debug_assert!((1..=8).contains(&(row + 1)) && col < 8);
     let js_row = row + 1;

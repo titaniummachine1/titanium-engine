@@ -16,9 +16,9 @@ export const TIME_PRESETS = TIME_TO_MOVE_PRESETS;
 
 const GORISANSON_ENGINE = {
   kind: 'local',
-  name: 'Gorisanson MCTS',
+  name: 'Gorisanson (JS, original)',
   key: PlayerType.GorisansonMCTS,
-  tooltip: 'Local MCTS — first boss (github.com/gorisanson/quoridor-ai)',
+  tooltip: 'Original JavaScript MCTS — first boss (github.com/gorisanson/quoridor-ai)',
   uctConst: 0.2,
 };
 
@@ -67,7 +67,7 @@ export function getPlayerOptionGroups() {
       options: [
         {
           value: PlayerType.GorisansonMCTS,
-          label: 'Gorisanson MCTS',
+          label: 'Gorisanson (JS, original)',
           disabled: false,
           tooltip: GORISANSON_ENGINE.tooltip,
         },

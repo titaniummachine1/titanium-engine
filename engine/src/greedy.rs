@@ -7,10 +7,12 @@ use crate::path::BfsScratch;
 const DIST_PENALTY: u8 = 255;
 
 pub(crate) fn greedy_eval_for_player(board: &Board, player: Player, scratch: &mut BfsScratch) -> i32 {
-    let us = player;
-    let opp = player.opposite();
-    let our_dist = i32::from(scratch.shortest_distance(board, us).unwrap_or(DIST_PENALTY));
-    let opp_dist = i32::from(scratch.shortest_distance(board, opp).unwrap_or(DIST_PENALTY));
+    let our_dist = i32::from(scratch.shortest_distance(board, player).unwrap_or(DIST_PENALTY));
+    let opp_dist = i32::from(
+        scratch
+            .shortest_distance(board, player.opposite())
+            .unwrap_or(DIST_PENALTY),
+    );
     opp_dist - our_dist
 }
 
@@ -49,4 +51,3 @@ pub fn choose_greedy_move(board: &mut Board, scratch: &mut BfsScratch) -> Option
 
     Some(best_mv)
 }
-

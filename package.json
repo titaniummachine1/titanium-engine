@@ -1,0 +1,9 @@
+{
+  "name": "quoridor-ai",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "cd web && npm run dev",
+    "build": "cd web && npm run build"
+  }
+}
