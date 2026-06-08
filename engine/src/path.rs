@@ -20,6 +20,10 @@ const CAT_BASE_CM: u16 = 100;
 const CAT_DIST_PENALTY_CM: u16 = 3;
 const CAT_MAX_PENALTY_CM: u16 = 30;
 
+/// CAT weight for a square at `dist` steps from the pawn (centi-units).
+///
+/// `weight = 100 - clamp(dist * 3, 0, 30)`
+/// - dist 0 → 100 cm, dist 10+ → 70 cm (floor).
 #[inline]
 pub fn attention_weight_cm(dist: u8) -> u16 {
     let penalty = u16::from(dist)
@@ -145,6 +149,18 @@ fn predecessor_flood(bit: u32, reached: u128, masks: DirMasks) -> u32 {
     bit
 }
 
+/// Accumulate one player's contribution into `out` (CAT forward pass + back-prop).
+///
+/// **Forward pass** — level-BFS from the player's pawn:
+///   Each reached square accumulates `attention_weight_cm(dist)` = `100 - min(dist*3, 30)`.
+///   Adjacent squares score 100 cm; squares ≥10 steps away floor at 70 cm.
+///
+/// **Back-propagation** — shortest-path reconstruction:
+///   After the goal row is first touched, walk `parent[]` back to the pawn and add
+///   the same `attention_weight_cm(dist)` a second time to every square on that path.
+///   On-path squares near the pawn thus score up to 200 cm; far ones 140 cm.
+///
+/// Call twice (P1, P2) and sum into the same `out` array → unified heat map.
 fn add_player_attention(
     board: &Board,
     player: Player,
@@ -235,7 +251,18 @@ impl BfsScratch {
         }
     }
 
-    /// Consensus Attention Table — forward level-BFS + shortest-path back-prop per player.
+    /// Build the Consensus Attention Table (CAT) for this position.
+    ///
+    /// Runs `add_player_attention` for both players and sums the results into a
+    /// single `[u16; 81]` heat map (centi-units).  Used in search for move ordering
+    /// and LMR only — never called from perft or move generation.
+    ///
+    /// Score ranges per square:
+    /// - On-path, close (dist ≤ 1): up to **200 cm** per player → 400 cm combined.
+    /// - On-path, far (dist ≥ 10): 140 cm per player.
+    /// - Off-path, any dist: 70–100 cm per player.
+    ///
+    /// See `docs/video/CAT-SPEC.md` for full specification.
     pub fn build_consensus_attention(&mut self, board: &Board) -> ConsensusAttention {
         let masks = DirMasks::from_board(board);
         let mut cat = [0u16; 81];
