@@ -76,7 +76,7 @@ impl Board {
             move_number: 1,
             hash: 0,
         };
-        board.hash = crate::zobrist::hash_board(&board);
+        board.hash = crate::core::zobrist::hash_board(&board);
         board
     }
 
@@ -143,24 +143,24 @@ impl Board {
 
         match mv {
             Move::Pawn { row, col } => {
-                crate::zobrist::xor_pawn(&mut self.hash, side, undo.pawn_from.0, undo.pawn_from.1);
+                crate::core::zobrist::xor_pawn(&mut self.hash, side, undo.pawn_from.0, undo.pawn_from.1);
                 self.pawns[side] = (row, col);
-                crate::zobrist::xor_pawn(&mut self.hash, side, row, col);
+                crate::core::zobrist::xor_pawn(&mut self.hash, side, row, col);
             }
             Move::Wall {
                 row,
                 col,
                 orientation,
             } => {
-                crate::zobrist::xor_wall(&mut self.hash, orientation, row, col);
-                crate::grid::set_wall(self, row, col, orientation, true);
-                crate::zobrist::xor_walls_left(&mut self.hash, side, self.walls_remaining[side]);
+                crate::core::zobrist::xor_wall(&mut self.hash, orientation, row, col);
+                crate::util::grid::set_wall(self, row, col, orientation, true);
+                crate::core::zobrist::xor_walls_left(&mut self.hash, side, self.walls_remaining[side]);
                 self.walls_remaining[side] -= 1;
-                crate::zobrist::xor_walls_left(&mut self.hash, side, self.walls_remaining[side]);
+                crate::core::zobrist::xor_walls_left(&mut self.hash, side, self.walls_remaining[side]);
             }
         }
 
-        crate::zobrist::xor_side(&mut self.hash);
+        crate::core::zobrist::xor_side(&mut self.hash);
         self.side_to_move = self.side_to_move.opposite();
         if self.side_to_move == Player::One {
             self.move_number += 1;
@@ -186,7 +186,7 @@ impl Board {
                 orientation,
             } => {
                 self.walls_remaining[side] = undo.walls_remaining;
-                crate::grid::set_wall(self, row, col, orientation, false);
+                crate::util::grid::set_wall(self, row, col, orientation, false);
             }
         }
 

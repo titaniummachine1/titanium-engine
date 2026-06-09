@@ -102,8 +102,8 @@ export class TitaniumEngineClient {
             if (data.type === 'progress') {
               this.onInfo?.({
                 thinking: true,
-                mode: engineMode,
-                stoppedBy: engineMode,
+                mode: 'mcts',
+                stoppedBy: 'time',
                 simulations: data.simulations,
                 progress: Math.min(0.99, data.elapsedMs / (timeSec * 1000)),
                 rootWinRate: data.winRate,
@@ -114,16 +114,19 @@ export class TitaniumEngineClient {
             if (data.type === 'info') {
               const stoppedBy = data.stoppedBy ?? engineMode;
               finalMeta = { ...finalMeta, ...data, stoppedBy };
+              const isMinimax = stoppedBy === 'minimax';
               this.onInfo?.({
                 thinking: true,
                 mode: stoppedBy,
+                stoppedBy,
                 simulations: data.simulations,
                 nodes: data.nodes,
                 searchDepth: data.searchDepth,
                 depthLog: data.depthLog,
                 whiteDist: data.whiteDist,
                 blackDist: data.blackDist,
-                rootWinRate: stoppedBy === 'minimax' ? null : data.rootWinRate,
+                rootScore: data.rootScore,
+                rootWinRate: isMinimax ? null : data.rootWinRate,
                 rootMoves: data.rootMoves,
               });
               continue;

@@ -1,6 +1,6 @@
 //! O(1) wall checks and step logic — matches scraped `gameLogic.js` pawnCanMove / hasWall.
 
-use crate::board::{Board, Player, WallOrientation};
+use crate::core::board::{Board, Player, WallOrientation};
 
 /// P1 races to row 8, P2 to row 0 (internal 0..8 indexing).
 #[inline]
@@ -14,6 +14,15 @@ pub fn goal_row(player: Player) -> u8 {
 #[inline]
 pub fn is_goal(player: Player, row: u8) -> bool {
     row == goal_row(player)
+}
+
+/// True when a pawn step moves toward that player's goal row (not lateral/back).
+#[inline]
+pub fn pawn_geometrically_advances(stm: Player, from_row: u8, to_row: u8) -> bool {
+    match stm {
+        Player::One => to_row > from_row,
+        Player::Two => to_row < from_row,
+    }
 }
 
 #[inline]
@@ -194,7 +203,7 @@ pub fn has_wall(board: &Board, row: u8, col: u8, orientation: WallOrientation) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Board, WallOrientation};
+    use crate::core::board::{Board, WallOrientation};
 
     #[test]
     fn flood_layout_centered_with_side_buffers() {
@@ -218,7 +227,7 @@ mod tests {
     fn vertical_d8v_blocks_black_left_from_e9() {
         let mut board = Board::new();
         set_wall(&mut board, 7, 3, WallOrientation::Vertical, true);
-        board.side_to_move = crate::board::Player::Two;
+        board.side_to_move = crate::core::board::Player::Two;
         // P2 at e9 (internal 8,4) — left to d9 must be blocked by d8v.
         assert!(!can_step(&board, 8, 4, 0, -1));
         assert!(can_step(&board, 8, 4, 0, 1));

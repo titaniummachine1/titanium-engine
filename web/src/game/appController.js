@@ -1,6 +1,8 @@
 import { GameSession } from './gameSession.js';
 import { naiveDistanceEval } from '../lib/gameLogic.js';
 import { decodeReplayCode, encodeReplayFromActions } from '../lib/replayCode.js';
+import { fetchCatSnapshot, indexCatWalls } from '../lib/catHeatmap.js';
+import { toAlgebraic } from '../lib/gameLogic.js';
 import { EngineClient } from '../lib/engineClient.js';
 import { GorisansonEngineClient, TitaniumEngineClient } from '../lib/localMctsEngine.js';
 import { PlayerType, StrengthLevel, TimeToMove } from '../lib/engineConfig.js';
@@ -13,6 +15,56 @@ import {
   describeTimeBudget,
   describeActiveSearchInfo,
 } from '../lib/playerRegistry.js';
+
+function mergeDepthLogs(existing, incoming) {
+  const byDepth = new Map((existing ?? []).map((entry) => [entry.depth, entry]));
+  for (const entry of incoming ?? []) {
+    byDepth.set(entry.depth, entry);
+  }
+  return [...byDepth.values()].sort((a, b) => a.depth - b.depth);
+}
+
+function deepestDepthEntry(depthLog) {
+  if (!depthLog?.length) {
+    return null;
+  }
+  return depthLog.reduce((best, entry) => (entry.depth > (best?.depth ?? 0) ? entry : best));
+}
+
+function buildThinkSeatSnapshot({
+  engine,
+  live = false,
+  move = null,
+  ply = null,
+  depthLog,
+  searchDepth,
+  whiteDist,
+  blackDist,
+  rootScore,
+  nodes,
+  simulations,
+  rootWinRate,
+  stoppedBy,
+  rootMoves,
+}) {
+  const deep = deepestDepthEntry(depthLog);
+  return {
+    live,
+    engine,
+    move,
+    ply,
+    whiteDist,
+    blackDist,
+    score: deep?.score ?? rootScore ?? null,
+    depth: deep?.depth ?? searchDepth ?? null,
+    pv: deep?.pv ?? '',
+    nodes: nodes ?? simulations ?? 0,
+    rootWinRate,
+    stoppedBy: stoppedBy ?? (live ? 'searching' : '?'),
+    rootMoves: rootMoves ? [...rootMoves] : [],
+    depthLog: depthLog ? [...depthLog] : [],
+  };
+}
 import {
   WALL_CLOCK_RANGE,
   LOCAL_VISITS_RANGE,
@@ -61,15 +113,24 @@ export class AppController {
       displayCoordinates: true,
       displayRemainingWalls: true,
       displayEvalBar: true,
+      showCatVision: false,
       uiMode: 'play',
     };
 
     this.replay = null;
+    this.catViz = null;
+    this.catVizLoading = false;
+    this.catVizError = null;
+    this._catFetchSeq = 0;
+    this._catMovesKey = null;
+    this.catHintDismissed = false;
+    this.showCatHint = false;
 
     this.engineStatus = {};
     this.engineErrors = {};
     this.searchInfo = {};
     this.moveThinkLog = [];
+    this.lastThinkBySeat = [null, null];
     this.eval = { score: 0.5, p1: 0.5, pv: [] };
     this.aiThinking = false;
     this.liveSearch = null;
@@ -107,13 +168,27 @@ export class AppController {
         this.settings.playerAiSettings,
         this.engineConfigs,
       ),
+      thinkingPlayerType: this.thinkingPlayerType,
       searchInfoLine: describeActiveSearchInfo(
         this.settings.players,
         this.searchInfo,
         this.engineConfigs,
+        {
+          thinkingPlayerType: this.thinkingPlayerType,
+          aiThinking: this.aiThinking,
+        },
       ),
+      activeSearchInfo: this.thinkingPlayerType
+        ? this.searchInfo[this.thinkingPlayerType]
+        : null,
       moveThinkLog: this.moveThinkLog,
+      lastThinkBySeat: this.lastThinkBySeat,
       uiMode: this.settings.uiMode,
+      catViz: this.catViz,
+      catVizLoading: this.catVizLoading,
+      catVizError: this.catVizError,
+      showCatHint: this.showCatHint && this.settings.showCatVision,
+      canRedo: snapshot.canRedo,
       replay: this.replay
         ? {
           index: this.replay.index,
@@ -123,11 +198,16 @@ export class AppController {
         }
         : null,
       playReplayCode:
-        this.session.winner && this.settings.uiMode === 'play'
-          ? encodeReplayFromActions(this.session.actions, {
-            winner: this.session.winner === 1 ? 'white' : 'black',
-            plies: this.session.actions.length,
-          })
+        this.session.actions.length > 0 && this.settings.uiMode === 'play'
+          ? encodeReplayFromActions(
+            this.session.actions,
+            this.session.winner
+              ? {
+                winner: this.session.winner === 1 ? 'white' : 'black',
+                plies: this.session.actions.length,
+              }
+              : null,
+          )
           : null,
     };
   }
@@ -306,6 +386,50 @@ export class AppController {
     this.onChange?.();
   }
 
+  toggleCatVision(enabled = !this.settings.showCatVision) {
+    this.settings.showCatVision = Boolean(enabled);
+    if (this.settings.showCatVision) {
+      if (!this.catHintDismissed) {
+        this.showCatHint = true;
+      }
+      this.invalidateCatCache();
+      this.refreshCatViz();
+    } else {
+      this._catFetchSeq += 1;
+      this._catMovesKey = null;
+      this.catViz = null;
+      this.catVizError = null;
+      this.catVizLoading = false;
+      this.showCatHint = false;
+    }
+    this.onChange?.();
+  }
+
+  dismissCatHint() {
+    this.catHintDismissed = true;
+    this.showCatHint = false;
+    this.onChange?.();
+  }
+
+  catMovesKey() {
+    return this.session.actions.map((action) => toAlgebraic(action)).join('|');
+  }
+
+  invalidateCatCache() {
+    this._catMovesKey = null;
+  }
+
+  scheduleCatRefresh() {
+    if (!this.settings.showCatVision || this.settings.uiMode === 'replay') {
+      return;
+    }
+    const key = this.catMovesKey();
+    if (key === this._catMovesKey && this.catViz && !this.catVizError) {
+      return;
+    }
+    this.refreshCatViz();
+  }
+
   newGame() {
     this._moveRequestSeq += 1;
     this.aiThinking = false;
@@ -313,19 +437,119 @@ export class AppController {
     this.engineErrors = {};
     this.replay = null;
     this.moveThinkLog = [];
+    this.lastThinkBySeat = [null, null];
+    this.catHintDismissed = false;
+    this.showCatHint = false;
     this.settings.uiMode = 'play';
     this.eval = { score: 0.5, p1: 0.5, pv: [] };
     for (const engine of this.engines.values()) {
       engine.resetConnection();
     }
     this.session.reset();
+    this.invalidateCatCache();
+    this.scheduleCatRefresh();
     this.onChange?.();
     this.maybeRequestAiMove();
   }
 
+  isFreePlayMode() {
+    return this.settings.uiMode === 'analysis';
+  }
+
   setUiMode(mode) {
     this.settings.uiMode = mode;
+    if (mode === 'analysis') {
+      this._moveRequestSeq += 1;
+      this.replay = null;
+      this.aiThinking = false;
+      this.thinkingPlayerType = null;
+      this.liveSearch = null;
+    }
+    this.scheduleCatRefresh();
     this.onChange?.();
+  }
+
+  loadAnalysisPosition(code) {
+    this._moveRequestSeq += 1;
+    const trimmed = code.trim();
+    const { actions } = decodeReplayCode(trimmed);
+    this.replay = null;
+    this.aiThinking = false;
+    this.liveSearch = null;
+    this.session.rebuildFromActions(actions);
+    this.invalidateCatCache();
+    this.scheduleCatRefresh();
+    this.onChange?.();
+  }
+
+  async refreshCatViz() {
+    if (!this.settings.showCatVision) {
+      return;
+    }
+    const movesKey = this.catMovesKey();
+    const seq = ++this._catFetchSeq;
+    this.catVizLoading = true;
+    this.catVizError = null;
+    this.onChange?.();
+
+    const moves = this.session.actions.map((action) => toAlgebraic(action));
+    try {
+      const data = await fetchCatSnapshot(moves);
+      if (seq !== this._catFetchSeq) {
+        return;
+      }
+      const squares = data.squares ?? [];
+      const reachableRaw = data.reachable ?? [];
+      const reachable =
+        reachableRaw.length === 81
+          ? reachableRaw.map((v) => v === 1 || v === true || v === '1')
+          : null;
+      const walls = data.walls ?? [];
+
+      this.catViz = {
+        squares,
+        reachable,
+        wallIndex: indexCatWalls(walls),
+        whiteDist: data.whiteDist,
+        blackDist: data.blackDist,
+        hotCm: data.hotCm ?? 160,
+        coldCm: data.coldCm ?? 60,
+        maxCm: data.maxCm ?? 400,
+        skippedSquares:
+          data.skippedSquares ?? reachable?.filter((r) => !r).length ?? 0,
+        skippedWallCount: walls.filter((w) => w.skip ?? w.pruned).length,
+        searchableWallCount: walls.filter((w) => w.search ?? !(w.skip ?? w.pruned)).length,
+      };
+      this._catMovesKey = movesKey;
+      this.catVizError = null;
+    } catch (err) {
+      if (seq !== this._catFetchSeq) {
+        return;
+      }
+      this.catViz = null;
+      this.catVizError = err.message ?? String(err);
+    } finally {
+      if (seq === this._catFetchSeq) {
+        this.catVizLoading = false;
+        this.onChange?.();
+      }
+    }
+  }
+
+  /** Leave replay scrubber but keep the current position — human can play from here. */
+  continueFromReplay() {
+    if (!this.replay) {
+      return;
+    }
+    this._moveRequestSeq += 1;
+    this.replay = null;
+    this.settings.uiMode = 'play';
+    this.aiThinking = false;
+    this.thinkingPlayerType = null;
+    this.liveSearch = null;
+    this.moveThinkLog = [];
+    this.onChange?.();
+    this.maybeRequestAiMove();
   }
 
   loadReplay(code) {
@@ -382,22 +606,49 @@ export class AppController {
   }
 
   undo() {
-    if (this.aiThinking) {
+    if (this.aiThinking || this.replay) {
       return;
     }
     this._moveRequestSeq += 1;
     this.liveSearch = null;
     this.engineErrors = {};
-    this.session.undo();
+    if (!this.session.undo()) {
+      return;
+    }
     for (const engine of this.engines.values()) {
       engine.resetConnection();
     }
     this.onChange?.();
-    this.maybeRequestAiMove();
+    if (!this.isFreePlayMode()) {
+      this.maybeRequestAiMove();
+    }
+  }
+
+  redo() {
+    if (this.aiThinking || this.replay) {
+      return;
+    }
+    this._moveRequestSeq += 1;
+    this.liveSearch = null;
+    if (!this.session.redo()) {
+      return;
+    }
+    for (const engine of this.engines.values()) {
+      engine.resetConnection();
+    }
+    this.onChange?.();
+    if (!this.isFreePlayMode()) {
+      this.maybeRequestAiMove();
+    }
   }
 
   tryAction(action) {
-    if (this.replay || this.aiThinking || !this.session.isHumanTurn(this.settings.players)) {
+    if (this.replay || this.aiThinking) {
+      return;
+    }
+
+    const freePlay = this.isFreePlayMode();
+    if (!freePlay && !this.session.isHumanTurn(this.settings.players)) {
       return;
     }
 
@@ -406,13 +657,19 @@ export class AppController {
       return;
     }
 
-    this.syncRemoteEnginesAfterMove(action);
+    if (!freePlay) {
+      this.syncRemoteEnginesAfterMove(action);
+    }
     this.onChange?.();
+    if (freePlay) {
+      return;
+    }
     this.maybeRequestAiMove();
     this.maybePonderInactiveEngines();
   }
 
   onSessionChange() {
+    this.scheduleCatRefresh();
     this.onChange?.();
   }
 
@@ -446,23 +703,53 @@ export class AppController {
         }
       };
       engine.onInfo = (info) => {
-        this.searchInfo[playerType] = { ...this.searchInfo[playerType], ...info };
+        const prev = this.searchInfo[playerType] ?? {};
+        const depthLog = info.depthLog?.length
+          ? mergeDepthLogs(prev.depthLog, info.depthLog)
+          : prev.depthLog;
+        this.searchInfo[playerType] = {
+          ...prev,
+          ...info,
+          ...(depthLog?.length ? { depthLog } : {}),
+        };
         if (info.thinking) {
+          const liveDepthLog = depthLog?.length
+            ? depthLog
+            : mergeDepthLogs(this.liveSearch?.depthLog, info.depthLog);
           this.liveSearch = {
+            playerType,
             playerLabel: this.engineLabel(playerType),
-            simulations: info.simulations,
-            nodes: info.nodes,
+            simulations: info.simulations ?? this.liveSearch?.simulations,
+            nodes: info.nodes ?? this.liveSearch?.nodes,
             progress: info.progress,
             mode: info.mode ?? info.stoppedBy ?? 'mcts',
-            searchDepth: info.searchDepth,
-            depthLog: info.depthLog,
-            rootWinRate: info.rootWinRate,
-            whiteDist: info.whiteDist,
-            blackDist: info.blackDist,
-            rootMoves: info.rootMoves,
+            searchDepth: info.searchDepth ?? this.liveSearch?.searchDepth,
+            depthLog: liveDepthLog,
+            rootWinRate:
+              info.rootWinRate != null ? info.rootWinRate : this.liveSearch?.rootWinRate,
+            whiteDist: info.whiteDist ?? this.liveSearch?.whiteDist,
+            blackDist: info.blackDist ?? this.liveSearch?.blackDist,
+            rootMoves: info.rootMoves ?? this.liveSearch?.rootMoves,
+            rootScore: info.rootScore ?? this.liveSearch?.rootScore,
           };
+          const seat = this.seatIndexForPlayerType(playerType);
+          this.snapshotThinkSeat(seat, {
+            live: true,
+            ply: this.session.actions.length + 1,
+            depthLog: liveDepthLog,
+            searchDepth: this.liveSearch.searchDepth,
+            whiteDist: this.liveSearch.whiteDist,
+            blackDist: this.liveSearch.blackDist,
+            rootScore: this.liveSearch.rootScore,
+            nodes: this.liveSearch.nodes,
+            simulations: this.liveSearch.simulations,
+            rootWinRate: this.liveSearch.rootWinRate,
+            stoppedBy: this.liveSearch.mode,
+            rootMoves: this.liveSearch.rootMoves,
+            engine: this.liveSearch.playerLabel,
+          });
           const now = performance.now();
-          if (now - this._liveUpdateLastMs >= 250) {
+          if (now - this._liveUpdateLastMs >= 120) {
             this._liveUpdateLastMs = now;
             (this.onLiveUpdate ?? this.onChange)?.();
           }
@@ -475,18 +762,23 @@ export class AppController {
           this.eval.pv = info.pv;
         }
         if (info.stoppedBy) {
-          this.liveSearch = {
-            playerLabel: this.engineLabel(playerType),
-            mode: info.stoppedBy,
-            searchDepth: info.searchDepth,
-            simulations: info.simulations,
-            nodes: info.nodes,
-            depthLog: info.depthLog,
-            rootWinRate: info.rootWinRate,
-            whiteDist: info.whiteDist,
-            blackDist: info.blackDist,
-            rootMoves: info.rootMoves,
-          };
+          const si = this.searchInfo[playerType] ?? {};
+          const seat = this.seatIndexForPlayerType(playerType);
+          this.snapshotThinkSeat(seat, {
+            live: false,
+            ply: this.session.actions.length + 1,
+            depthLog: si.depthLog,
+            searchDepth: si.searchDepth,
+            whiteDist: si.whiteDist,
+            blackDist: si.blackDist,
+            rootScore: si.rootScore,
+            nodes: si.nodes,
+            simulations: si.simulations,
+            rootWinRate: si.rootWinRate,
+            stoppedBy: info.stoppedBy,
+            rootMoves: si.rootMoves,
+            engine: this.engineLabel(playerType),
+          });
         }
         this.onChange?.();
       };
@@ -560,8 +852,22 @@ export class AppController {
     return config?.name ?? playerType;
   }
 
+  seatIndexForPlayerType(playerType) {
+    return this.settings.players.indexOf(playerType);
+  }
+
+  snapshotThinkSeat(seatIndex, fields) {
+    if (seatIndex < 0) {
+      return;
+    }
+    this.lastThinkBySeat[seatIndex] = buildThinkSeatSnapshot({
+      engine: fields.engine ?? this.engineLabel(this.settings.players[seatIndex]),
+      ...fields,
+    });
+  }
+
   maybeRequestAiMove() {
-    if (this.replay) {
+    if (this.replay || this.isFreePlayMode()) {
       this.aiThinking = false;
       return;
     }
@@ -592,7 +898,33 @@ export class AppController {
 
     this.aiThinking = true;
     this.thinkingPlayerType = playerType;
-    this.liveSearch = { playerLabel: this.engineLabel(playerType), mode: 'searching' };
+    const seat = this.seatIndexForPlayerType(playerType);
+    const prevThink = seat >= 0 ? this.lastThinkBySeat[seat] : null;
+    this.snapshotThinkSeat(seat, {
+      live: true,
+      ply: requestPly + 1,
+      depthLog: [],
+      stoppedBy: 'searching',
+      engine: this.engineLabel(playerType),
+      move: null,
+      ...(prevThink && !prevThink.live
+        ? {
+          whiteDist: prevThink.whiteDist,
+          blackDist: prevThink.blackDist,
+          score: prevThink.score,
+          depth: prevThink.depth,
+          pv: prevThink.pv,
+          rootWinRate: prevThink.rootWinRate,
+          rootMoves: prevThink.rootMoves,
+        }
+        : {}),
+    });
+    this.liveSearch = {
+      playerType,
+      playerLabel: this.engineLabel(playerType),
+      mode: 'searching',
+      depthLog: [],
+    };
     this.onChange?.();
 
     engine.onBestMove = (action) => {
@@ -615,22 +947,41 @@ export class AppController {
           currentPlayerType,
           suggested: this.session.actionToLabel(action),
         });
+        this.aiThinking = false;
+        this.thinkingPlayerType = null;
+        this.onChange?.();
         return;
       }
 
       this.aiThinking = false;
       this.thinkingPlayerType = null;
-      if (this.session.winner) {
-        return;
-      }
+      this.liveSearch = null;
 
       const applied = this.session.applyAction(action);
       if (applied) {
         const plyNum = this.session.actions.length;
         const si = this.searchInfo[playerType] ?? {};
+        const moveLabel = this.session.actionToLabel(action);
+        const seat = this.seatIndexForPlayerType(playerType);
+        this.snapshotThinkSeat(seat, {
+          live: false,
+          move: moveLabel,
+          ply: plyNum,
+          depthLog: si.depthLog,
+          searchDepth: si.searchDepth,
+          whiteDist: si.whiteDist,
+          blackDist: si.blackDist,
+          rootScore: si.rootScore,
+          nodes: si.nodes,
+          simulations: si.simulations,
+          rootWinRate: si.rootWinRate,
+          stoppedBy: si.stoppedBy ?? si.mode ?? '?',
+          rootMoves: si.rootMoves,
+          engine: this.engineLabel(playerType),
+        });
         this.moveThinkLog.push({
           ply: plyNum,
-          move: this.session.actionToLabel(action),
+          move: moveLabel,
           engine: this.engineLabel(playerType),
           stoppedBy: si.stoppedBy ?? si.mode ?? '?',
           nodes: si.nodes ?? si.simulations ?? 0,
@@ -642,6 +993,10 @@ export class AppController {
           depthLog: si.depthLog ? [...si.depthLog] : [],
           rootMoves: si.rootMoves ? [...si.rootMoves] : [],
         });
+      }
+      if (this.session.winner) {
+        this.onChange?.();
+        return;
       }
       if (!applied) {
         const snapshot = this.session.getSnapshot();

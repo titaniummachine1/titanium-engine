@@ -1,0 +1,284 @@
+//! Build CAT heat from BFS distance fields on the pawn grid.
+
+use crate::cat::attention::CorridorAttention;
+use crate::cat::constants::{
+    BOTTLENECK_BONUS_CM, BOTTLENECK_CORRIDOR_DELTA, CAT_CORRIDOR_CM, MAX_RELEVANT_CORRIDOR_DELTA,
+};
+use crate::core::board::{Board, Player};
+use crate::path::distance::{fill_dist_from_sq, fill_dist_to_goal_row};
+use crate::path::masks::DirMasks;
+use crate::path::BfsScratch;
+use crate::util::grid::{flood_bit_sq, square_index, FLOOD_PLAYABLE};
+
+fn corridor_heat(delta: u16) -> u16 {
+    if delta > MAX_RELEVANT_CORRIDOR_DELTA {
+        return 0;
+    }
+    let denom = 1.0 + f32::from(delta) * f32::from(delta + 2).log2();
+    (f32::from(CAT_CORRIDOR_CM) / denom).round().max(1.0) as u16
+}
+
+/// Centi-percent (45–100): gentle linear fade along the race — near-pawn squares
+/// stay hottest, but mid-corridor wall zones keep meaningful heat for deeper play.
+fn pawn_path_weight(dist_from: u8, shortest_to_goal: u8) -> u16 {
+    if shortest_to_goal == 0 || shortest_to_goal == u8::MAX {
+        return 100;
+    }
+    const MIN_WEIGHT: u16 = 45;
+    const MAX_WEIGHT: u16 = 100;
+    let from = u32::from(dist_from.min(shortest_to_goal));
+    let total = u32::from(shortest_to_goal);
+    let remaining = total.saturating_sub(from);
+    MIN_WEIGHT + (u32::from(MAX_WEIGHT - MIN_WEIGHT) * remaining / total) as u16
+}
+
+fn neighbor_squares(sq: u8, masks: DirMasks, out: &mut [u8; 4]) -> usize {
+    let bit = flood_bit_sq(sq);
+    let mut n = 0usize;
+    if masks.north & bit != 0 {
+        out[n] = sq - 9;
+        n += 1;
+    }
+    if masks.south & bit != 0 {
+        out[n] = sq + 9;
+        n += 1;
+    }
+    if masks.east & bit != 0 {
+        out[n] = sq + 1;
+        n += 1;
+    }
+    if masks.west & bit != 0 {
+        out[n] = sq - 1;
+        n += 1;
+    }
+    n
+}
+
+fn corridor_delta(
+    sq: u8,
+    dist_from_pawn: &[u8; 81],
+    dist_to_goal: &[u8; 81],
+    shortest_to_goal: u8,
+) -> Option<u16> {
+    let from = dist_from_pawn[sq as usize];
+    let to = dist_to_goal[sq as usize];
+    if from == u8::MAX || to == u8::MAX || shortest_to_goal == u8::MAX {
+        return None;
+    }
+    Some((u16::from(from) + u16::from(to)).saturating_sub(u16::from(shortest_to_goal)))
+}
+
+fn reasonable_forward_continuations(
+    sq: u8,
+    masks: DirMasks,
+    dist_from_pawn: &[u8; 81],
+    dist_to_goal: &[u8; 81],
+    shortest_to_goal: u8,
+) -> u8 {
+    let from = dist_from_pawn[sq as usize];
+    let to = dist_to_goal[sq as usize];
+    if from == u8::MAX || to == 0 || to == u8::MAX {
+        return 0;
+    }
+    let mut neighbors = [0u8; 4];
+    let n = neighbor_squares(sq, masks, &mut neighbors);
+    let mut count = 0u8;
+    for &next in &neighbors[..n] {
+        let next_from = dist_from_pawn[next as usize];
+        let next_to = dist_to_goal[next as usize];
+        if next_from == from.saturating_add(1)
+            && next_to < to
+            && corridor_delta(next, dist_from_pawn, dist_to_goal, shortest_to_goal)
+                .is_some_and(|d| d <= MAX_RELEVANT_CORRIDOR_DELTA)
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn add_player_corridor_attention(
+    board: &Board,
+    player: Player,
+    masks: DirMasks,
+    out: &mut CorridorAttention,
+    dist_from_pawn: &mut [u8; 81],
+    dist_to_goal: &mut [u8; 81],
+) {
+    let (sr, sc) = board.pawn(player);
+    let start = square_index(sr, sc);
+
+    fill_dist_from_sq(start, masks, dist_from_pawn);
+    fill_dist_to_goal_row(player, masks, dist_to_goal);
+
+    let shortest_to_goal = dist_to_goal[start as usize];
+
+    for sq in 0u8..81 {
+        let Some(delta) = corridor_delta(sq, dist_from_pawn, dist_to_goal, shortest_to_goal) else {
+            continue;
+        };
+        let base = corridor_heat(delta);
+        if base == 0 {
+            continue;
+        }
+
+        let idx = sq as usize;
+        let from = dist_from_pawn[idx];
+        let weight = pawn_path_weight(from, shortest_to_goal);
+        let heat = (u32::from(base) * u32::from(weight) / 100) as u16;
+        if heat == 0 {
+            continue;
+        }
+
+        let flex = reasonable_forward_continuations(
+            sq,
+            masks,
+            dist_from_pawn,
+            dist_to_goal,
+            shortest_to_goal,
+        );
+        out.square_heat[idx] = out.square_heat[idx].saturating_add(heat);
+        out.route_flex[idx] = out.route_flex[idx].saturating_add(flex);
+        if delta <= BOTTLENECK_CORRIDOR_DELTA && flex <= 1 && dist_to_goal[idx] > 0 {
+            out.bottleneck_heat[idx] = out.bottleneck_heat[idx].saturating_add(BOTTLENECK_BONUS_CM);
+        }
+    }
+}
+
+/// Build combined two-player corridor attention for the current board.
+pub fn build_corridor_attention(scratch: &mut BfsScratch, board: &Board) -> CorridorAttention {
+    let masks = DirMasks::from_board(board);
+    let mut attention = CorridorAttention::default();
+    {
+        let (dist_from, dist_to) = scratch.dist_scratch_mut();
+        add_player_corridor_attention(
+            board,
+            Player::One,
+            masks,
+            &mut attention,
+            dist_from,
+            dist_to,
+        );
+    }
+    {
+        let (dist_from, dist_to) = scratch.dist_scratch_mut();
+        add_player_corridor_attention(
+            board,
+            Player::Two,
+            masks,
+            &mut attention,
+            dist_from,
+            dist_to,
+        );
+    }
+    attention
+}
+
+/// Count low-flex squares on exact/near-shortest corridors (caging heuristic).
+pub fn corridor_bottleneck_count(scratch: &mut BfsScratch, board: &Board, player: Player) -> u8 {
+    let masks = DirMasks::from_board(board);
+    let (sr, sc) = board.pawn(player);
+    let start = square_index(sr, sc);
+    let (dist_from, dist_to) = scratch.dist_scratch_mut();
+    fill_dist_from_sq(start, masks, dist_from);
+    fill_dist_to_goal_row(player, masks, dist_to);
+    let shortest_to_goal = dist_from[start as usize];
+    if shortest_to_goal == u8::MAX {
+        return 8;
+    }
+
+    let mut bottlenecks = 0u8;
+    for sq in 0u8..81 {
+        let Some(delta) = corridor_delta(sq, dist_from, dist_to, shortest_to_goal) else {
+            continue;
+        };
+        if delta > BOTTLENECK_CORRIDOR_DELTA || dist_to[sq as usize] == 0 {
+            continue;
+        }
+        let flex =
+            reasonable_forward_continuations(sq, masks, dist_from, dist_to, shortest_to_goal);
+        if flex <= 1 {
+            bottlenecks = bottlenecks.saturating_add(1);
+        }
+    }
+    bottlenecks.min(8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::board::WallOrientation;
+    use crate::util::grid::set_wall;
+
+    #[test]
+    fn center_hotter_than_corner_at_startpos() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        let center = cat.square_heat(4, 4);
+        let corner = cat.square_heat(0, 0);
+        assert!(center > corner);
+        assert_eq!(corner, 0);
+    }
+
+    #[test]
+    fn e_file_heat_peaks_at_pawns_not_uniform() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        let white_pawn = cat.square_heat(0, 4);
+        let center = cat.square_heat(4, 4);
+        let black_pawn = cat.square_heat(8, 4);
+        assert!(
+            white_pawn > center,
+            "e1 hotter than e5, {white_pawn} vs {center}"
+        );
+        assert!(
+            black_pawn > center,
+            "e9 hotter than e5, {black_pawn} vs {center}"
+        );
+        assert!(
+            white_pawn >= 190,
+            "pawn square near full corridor cm, got {white_pawn}"
+        );
+        assert!(black_pawn >= 190);
+        assert!(
+            center < white_pawn,
+            "pawn still hottest, pawn={white_pawn} center={center}"
+        );
+        assert!(
+            center > 100,
+            "mid-race corridor stays warm enough for wall search, center={center}"
+        );
+    }
+
+    #[test]
+    fn far_corridor_squares_cooler_than_near_pawn() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        assert!(cat.square_heat(0, 4) > cat.square_heat(2, 4));
+        assert!(cat.square_heat(8, 4) > cat.square_heat(6, 4));
+    }
+
+    #[test]
+    fn wall_heat_prefers_central_corridor() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        let central = cat.wall_edge_heat(3, 4, WallOrientation::Horizontal);
+        let passive = cat.wall_edge_heat(0, 0, WallOrientation::Horizontal);
+        assert!(central > passive);
+        assert!(passive <= 50);
+    }
+
+    #[test]
+    fn multiple_lanes_after_wall() {
+        let mut board = Board::new();
+        set_wall(&mut board, 3, 4, WallOrientation::Horizontal, true);
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        assert!(cat.square_heat(4, 3) > 0);
+        assert!(cat.square_heat(4, 5) > 0);
+    }
+}

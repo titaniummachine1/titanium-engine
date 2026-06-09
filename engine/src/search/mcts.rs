@@ -10,12 +10,13 @@ use std::time::Instant;
 
 use rand::Rng;
 
-use crate::board::{Board, Move, Player};
-use crate::grid::{is_goal, square_index};
-use crate::moves::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
-use crate::opening::BookHint;
-use crate::path::{BfsScratch, CorridorAttention};
-use crate::perft::format_move;
+use crate::cat::CorridorAttention;
+use crate::core::board::{Board, Move, Player};
+use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::opening::book::BookHint;
+use crate::path::BfsScratch;
+use crate::util::grid::{is_goal, pawn_geometrically_advances, square_index};
+use crate::util::perft::format_move;
 
 pub const DEFAULT_UCT: f64 = 0.2;
 pub const DEFAULT_TIME_MS: u64 = 10_000;
@@ -257,12 +258,15 @@ fn wall_disturbs_path(board: &mut Board, mv: Move, target: Player, bfs: &mut Bfs
 
 fn collect_shortest_pawn_moves(board: &mut Board, out: &mut [Move], bfs: &mut BfsScratch) -> usize {
     let stm = board.side();
+    let (from_row, _) = board.pawn(stm);
     let base = bfs.shortest_distance(board, stm).unwrap_or(255);
     let mut legal = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
     let n = generate_legal_moves_slice(board, &mut legal, bfs);
 
+    let mut scratch = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let mut scratch_n = 0usize;
     let mut best = base;
-    let mut out_n = 0usize;
+
     for i in 0..n {
         let mv = legal[i];
         let Move::Pawn { .. } = mv else { continue };
@@ -273,19 +277,42 @@ fn collect_shortest_pawn_moves(board: &mut Board, out: &mut [Move], bfs: &mut Bf
         let d = bfs.shortest_distance(board, stm).unwrap_or(255);
         board.unmake_move(undo);
 
-        if d <= best {
-            if d < best {
-                best = d;
-                out_n = 0;
-            }
-            out[out_n] = mv;
-            out_n += 1;
+        if d < best {
+            best = d;
+            scratch_n = 0;
+        }
+        if d == best {
+            scratch[scratch_n] = mv;
+            scratch_n += 1;
         }
     }
-    out_n
+
+    if scratch_n == 0 {
+        return 0;
+    }
+
+    let mut advancing_n = 0usize;
+    for i in 0..scratch_n {
+        let mv = scratch[i];
+        let Move::Pawn { row, .. } = mv else { continue };
+        if pawn_geometrically_advances(stm, from_row, row) {
+            out[advancing_n] = mv;
+            advancing_n += 1;
+        }
+    }
+    if advancing_n > 0 {
+        return advancing_n;
+    }
+
+    out[..scratch_n].copy_from_slice(&scratch[..scratch_n]);
+    scratch_n
 }
 
-fn allows_opponent_double_advance(board: &mut Board, candidate: Move, bfs: &mut BfsScratch) -> bool {
+fn allows_opponent_double_advance(
+    board: &mut Board,
+    candidate: Move,
+    bfs: &mut BfsScratch,
+) -> bool {
     let opp = board.side().opposite();
     let opp_before = bfs.shortest_distance(board, opp).unwrap_or(255);
     let undo_candidate = board.make_move(candidate);
@@ -343,7 +370,10 @@ fn wall_is_race_positive(
     }
     let our_dist = bfs.shortest_distance(board, stm).unwrap_or(255);
     let opp_dist = bfs.shortest_distance(board, opp).unwrap_or(255);
-    if our_dist >= opp_dist {
+    if our_dist > opp_dist {
+        return net >= 1;
+    }
+    if our_dist == opp_dist {
         return net >= 2;
     }
     opp_gain >= 1
@@ -415,7 +445,7 @@ fn rollout_in_place(
     board: &mut Board,
     bfs: &mut BfsScratch,
     rng: &mut impl Rng,
-    rollout_undo: &mut Vec<crate::board::Undo>,
+    rollout_undo: &mut Vec<crate::core::board::Undo>,
     next_p1: &mut [u8; 81],
     next_p2: &mut [u8; 81],
     legal: &mut [Move; MAX_LEGAL_MOVES],
@@ -457,7 +487,7 @@ fn rollout_in_place(
 
         if rng.gen_range(0..10) < 8 && next_sq != u8::MAX {
             // Advance one step along shortest path — no BFS needed.
-            let (nr, nc) = crate::grid::unpack_square(next_sq);
+            let (nr, nc) = crate::util::grid::unpack_square(next_sq);
             let mv = Move::Pawn { row: nr, col: nc };
             rollout_undo.push(board.make_move(mv));
             // Pawn move doesn't invalidate wall-based paths.
@@ -484,7 +514,7 @@ fn rollout_in_place(
     winner
 }
 
-fn undo_all(board: &mut Board, undo: &mut Vec<crate::board::Undo>) {
+fn undo_all(board: &mut Board, undo: &mut Vec<crate::core::board::Undo>) {
     while let Some(u) = undo.pop() {
         board.unmake_move(u);
     }
@@ -577,12 +607,6 @@ pub fn search_mcts(board: &mut Board, config: MctsConfig) -> Option<MctsReport> 
 
     let book_mv = config.book_hint.map(|h| h.mv);
 
-    // Find the sprint move: the pawn move that best advances us toward the goal.
-    // This is given a huge weight in expansion so the tree always explores it first.
-    let mut sprint_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let sprint_n = collect_shortest_pawn_moves(board, &mut sprint_buf, &mut bfs);
-    let sprint_mv: Option<Move> = if sprint_n > 0 { Some(sprint_buf[0]) } else { None };
-
     // Build corridor attention once at the root when bridge mode is requested.
     // Using root attention throughout is a slight approximation (walls change it),
     // but in the early game with few walls the drift is minimal.
@@ -595,6 +619,16 @@ pub fn search_mcts(board: &mut Board, config: MctsConfig) -> Option<MctsReport> 
     let white_dist = bfs.shortest_distance(board, Player::One).unwrap_or(255);
     let black_dist = bfs.shortest_distance(board, Player::Two).unwrap_or(255);
     let our_dist = bfs.shortest_distance(board, stm).unwrap_or(255);
+    let opp_dist = bfs.shortest_distance(board, stm.opposite()).unwrap_or(255);
+
+    // Sprint bias only while tied or ahead — when behind, explore walls too.
+    let mut sprint_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let sprint_n = collect_shortest_pawn_moves(board, &mut sprint_buf, &mut bfs);
+    let sprint_mv: Option<Move> = if sprint_n > 0 && our_dist <= opp_dist {
+        Some(sprint_buf[0])
+    } else {
+        None
+    };
     let started = Instant::now();
     let deadline = started + std::time::Duration::from_millis(config.time_ms);
     let mut tree = MctsTree::new(config.uct);
@@ -603,9 +637,9 @@ pub fn search_mcts(board: &mut Board, config: MctsConfig) -> Option<MctsReport> 
     let mut last_log = Instant::now();
     let batch = 32usize;
     // Reuse undo-path buffer across all simulations — no heap alloc per sim.
-    let mut undo_path: Vec<crate::board::Undo> = Vec::with_capacity(64);
+    let mut undo_path: Vec<crate::core::board::Undo> = Vec::with_capacity(64);
     // Reuse rollout undo buffer too; avoids clone per simulation.
-    let mut rollout_undo: Vec<crate::board::Undo> = Vec::with_capacity(64);
+    let mut rollout_undo: Vec<crate::core::board::Undo> = Vec::with_capacity(64);
     // Reuse rollout scratch buffers across simulations.
     let mut rollout_next_p1 = [u8::MAX; 81];
     let mut rollout_next_p2 = [u8::MAX; 81];

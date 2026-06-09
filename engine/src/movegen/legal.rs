@@ -1,7 +1,7 @@
 //! Legal move generation — pawn jumps + wall placements with path validation.
 
-use crate::board::{Board, Move, Player, WallOrientation};
-use crate::grid::{can_step, goal_row, has_wall, set_wall, square_index, unpack_square};
+use crate::core::board::{Board, Move, Player, WallOrientation};
+use crate::util::grid::{can_step, goal_row, has_wall, set_wall, square_index, unpack_square};
 use crate::path::BfsScratch;
 
 const DIRS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];

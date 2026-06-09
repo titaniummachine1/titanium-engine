@@ -1,7 +1,7 @@
 //! One-ply greedy search — maximize (opp_dist - our_dist) after each legal move.
 
-use crate::board::{Board, Move, Player};
-use crate::moves::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::core::board::{Board, Move, Player};
+use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::path::BfsScratch;
 
 const DIST_PENALTY: u8 = 255;

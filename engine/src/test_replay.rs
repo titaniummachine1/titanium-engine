@@ -1,9 +1,9 @@
 //! Test specific replay for illegal moves
 
-use crate::board::{Board, Move, WallOrientation};
-use crate::moves::generate_legal_moves_slice;
+use crate::core::board::{Board, Move, WallOrientation};
+use crate::movegen::generate_legal_moves_slice;
 use crate::path::BfsScratch;
-use crate::perft::format_move;
+use crate::util::perft::format_move;
 
 fn parse_algebraic(move_str: &str) -> Option<Move> {
     let chars: Vec<char> = move_str.chars().collect();
@@ -46,7 +46,7 @@ fn g1v_correctly_rejected_after_replay_prefix() {
     ];
     let mut board = Board::new();
     let mut bfs = BfsScratch::new();
-    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::moves::MAX_LEGAL_MOVES];
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::movegen::MAX_LEGAL_MOVES];
 
     for move_str in prefix {
         let mv = parse_algebraic(move_str).unwrap();
@@ -75,7 +75,7 @@ fn test_replay_legality() {
 
     let mut board = Board::new();
     let mut bfs = BfsScratch::new();
-    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::moves::MAX_LEGAL_MOVES];
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::movegen::MAX_LEGAL_MOVES];
 
     for (i, move_str) in moves.iter().enumerate() {
         let legal_count = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);

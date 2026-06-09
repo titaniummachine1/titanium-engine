@@ -4,8 +4,8 @@ use std::env;
 use std::time::Instant;
 
 use titanium::{
-    generate_legal_moves, genmove_algebraic, perft_divide, Board, Engine, GenmoveConfig,
-    GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
+    cat_snapshot_json, generate_legal_moves, genmove_algebraic, perft_divide, Board, Engine,
+    GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
     MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT,
 };
 
@@ -25,6 +25,7 @@ fn main() {
         "thread-bench" => run_thread_bench(&args),
         "moves" => run_moves(),
         "genmove" => run_genmove(&args),
+        "cat" => run_cat(&args),
         _ => print_usage(),
     }
 }
@@ -41,6 +42,7 @@ fn print_usage() {
     println!("  titanium genmove [moves...] [--engine mcts|minimax|greedy] [--cat]");
     println!("              [--time SEC] [--sims N] [--uct F] [--nodes N] [--log]");
     println!("              — default: Gorisanson-style MCTS in Rust");
+    println!("  titanium cat [moves...]                — CAT v3 heatmap JSON for current position");
 }
 
 const DEFAULT_PERFT_DEPTH: u32 = 3;
@@ -326,6 +328,17 @@ fn parse_genmove_config(args: &[String]) -> (GenmoveConfig, Vec<String>) {
     }
 
     (config, moves)
+}
+
+fn run_cat(args: &[String]) {
+    let mut board = Board::new();
+    for mv in args.iter().skip(2) {
+        if mv.starts_with("--") {
+            break;
+        }
+        board.apply_algebraic(mv);
+    }
+    println!("{}", cat_snapshot_json(&mut board));
 }
 
 fn run_genmove(args: &[String]) {

@@ -1,27 +1,23 @@
-//! `genmove` entry — three-phase Titanium hybrid pipeline.
+//! Titanium move pipeline — book PV hints, phase routing, engine selection.
 //!
-//! ## Phase 1 — Theory (ply ≤ 10)
-//! Opening book hints steer MCTS while the board is still wide open.
-//!
-//! ## Optional bridge — Solidification (ply 11–20, &lt; 4 walls)
-//! CAT-guided MCTS bridge is kept behind `TITANIUM_BRIDGE=1`.
-//!
-//! ## Phase 2 — Annihilation (ply &gt; 10 by default)
-//! Deep alpha-beta minimax + corridor attention pruning once corridors exist.
-//!
-//! Override: `TITANIUM_BRIDGE=1` enables the old ply 11–20 bridge.
+//! `genmove` is only the public name for this; routing lives here so search and
+//! movegen stay single-purpose.
 
-use crate::board::Board;
-use crate::greedy::choose_greedy_move;
-use crate::mcts::{genmove_algebraic as mcts_algebraic, MctsConfig, DEFAULT_TIME_MS};
-use crate::opening::{self, BOOK_MAX_PLY};
-use crate::perft::format_move;
-use crate::search::{genmove_algebraic as minimax_algebraic, SearchConfig, DEFAULT_MAX_NODES};
+use crate::core::board::Board;
+use crate::opening::book::{self, BOOK_MAX_PLY};
+use crate::path::BfsScratch;
+use crate::search::alphabeta::genmove_algebraic as minimax_algebraic;
+use crate::search::genmove::{GenmoveConfig, GenmoveEngine};
+use crate::search::greedy::choose_greedy_move;
+use crate::search::mcts::{genmove_algebraic as mcts_algebraic, MctsConfig};
+use crate::util::perft::format_move;
 
 /// Walls on board before minimax is preferred over MCTS (topology is concrete).
 const BRIDGE_WALL_THRESHOLD: u8 = 4;
 /// Last ply where CAT-MCTS bridge may run (after book window).
 const BRIDGE_MAX_PLY: u32 = 20;
+/// Once any wall is on the board, hybrid uses minimax — MCTS rollouts misread structure.
+const OPENING_MINIMAX_WALLS: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchPhase {
@@ -29,20 +25,19 @@ pub enum SearchPhase {
     Book,
     /// Ply 11–20, open board — CAT-guided MCTS.
     Bridge,
-    /// Ply &gt; 20 or enough walls — minimax + corridor attention.
+    /// Ply > 20 or enough walls — minimax + corridor attention.
     Minimax,
 }
 
-fn walls_placed(board: &Board) -> u8 {
+pub fn walls_placed(board: &Board) -> u8 {
     20u8.saturating_sub(board.walls_remaining[0].saturating_add(board.walls_remaining[1]))
 }
 
 pub fn search_phase(board: &Board) -> SearchPhase {
-    // Enough walls on board → corridors exist; CAT-backed minimax wins immediately.
     if walls_placed(board) >= BRIDGE_WALL_THRESHOLD {
         return SearchPhase::Minimax;
     }
-    let ply = opening::ply_number(board);
+    let ply = book::ply_number(board);
     if ply <= BOOK_MAX_PLY {
         SearchPhase::Book
     } else if std::env::var("TITANIUM_BRIDGE").is_ok_and(|v| v == "1") && ply <= BRIDGE_MAX_PLY {
@@ -54,6 +49,14 @@ pub fn search_phase(board: &Board) -> SearchPhase {
 
 fn use_bridge(board: &Board) -> bool {
     matches!(search_phase(board), SearchPhase::Bridge)
+}
+
+/// True when STM has a longer shortest-path race than the opponent.
+fn losing_race(board: &Board, bfs: &mut BfsScratch) -> bool {
+    let us = board.side();
+    let our = bfs.shortest_distance(board, us).unwrap_or(u8::MAX);
+    let opp = bfs.shortest_distance(board, us.opposite()).unwrap_or(u8::MAX);
+    our > opp
 }
 
 fn log_phase(phase: SearchPhase) {
@@ -68,53 +71,15 @@ fn log_phase(phase: SearchPhase) {
     eprintln!("info phase {label}");
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GenmoveEngine {
-    Mcts,
-    Minimax,
-    Greedy,
-}
-
-impl Default for GenmoveEngine {
-    fn default() -> Self {
-        Self::Mcts
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GenmoveConfig {
-    pub engine: GenmoveEngine,
-    pub mcts: MctsConfig,
-    pub minimax: SearchConfig,
-}
-
-impl Default for GenmoveConfig {
-    fn default() -> Self {
-        Self {
-            engine: GenmoveEngine::Mcts,
-            mcts: MctsConfig::default(),
-            minimax: SearchConfig {
-                time_ms: DEFAULT_TIME_MS,
-                max_nodes: DEFAULT_MAX_NODES,
-                log: false,
-                book_hint: None,
-            },
-        }
-    }
-}
-
-pub fn genmove_algebraic(board: &mut Board, config: GenmoveConfig) -> Option<String> {
+/// Select the best move for the current position (CLI / web entry).
+pub fn select_move(board: &mut Board, config: GenmoveConfig) -> Option<String> {
     let phase = search_phase(board);
     log_phase(phase);
 
-    let book_hint = opening::book_hint(board);
-    if phase == SearchPhase::Book {
-        if let Some(hint) = book_hint {
-            if hint.priority >= 100 {
-                return Some(format_move(hint.mv));
-            }
-        }
-    }
+    // Book lines are PV hints for move ordering and aspiration bias — search always runs.
+    let book_hint = book::book_hint(board);
+    let mut race_bfs = BfsScratch::new();
+    let behind_in_race = losing_race(board, &mut race_bfs);
 
     match config.engine {
         GenmoveEngine::Mcts => {
@@ -126,9 +91,8 @@ pub fn genmove_algebraic(board: &mut Board, config: GenmoveConfig) -> Option<Str
             let mut minimax_cfg = config.minimax;
             minimax_cfg.book_hint = book_hint;
             if phase == SearchPhase::Book {
-                // Once walls are on the board the opening is tactical, not exploratory.
-                // MCTS rollouts over-rate walls that trade our path for +1 on theirs.
-                if walls_placed(board) >= 2 {
+                // MCTS rollouts sprint pawns; once losing the race, switch to AB for walls.
+                if walls_placed(board) >= OPENING_MINIMAX_WALLS || behind_in_race {
                     minimax_algebraic(board, minimax_cfg)
                 } else {
                     let mut opening = config.mcts;
@@ -151,22 +115,20 @@ pub fn genmove_algebraic(board: &mut Board, config: GenmoveConfig) -> Option<Str
                 minimax_algebraic(board, minimax_cfg)
             }
         }
-        GenmoveEngine::Greedy => greedy_algebraic(board),
+        GenmoveEngine::Greedy => {
+            let mut scratch = crate::path::BfsScratch::new();
+            choose_greedy_move(board, &mut scratch).map(format_move)
+        }
     }
 }
-
-fn greedy_algebraic(board: &mut Board) -> Option<String> {
-    let mut scratch = crate::path::BfsScratch::new();
-    choose_greedy_move(board, &mut scratch).map(format_move)
-}
-
-pub use crate::mcts::DEFAULT_MAX_SIMULATIONS as MCTS_DEFAULT_MAX_SIMULATIONS;
-pub use crate::mcts::DEFAULT_UCT as MCTS_DEFAULT_UCT;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perft::format_move;
+    use crate::opening::book as opening;
+    use crate::search::alphabeta::SearchConfig;
+    use crate::search::genmove::{GenmoveConfig, GenmoveEngine};
+    use crate::search::mcts::MctsConfig;
 
     fn replay(moves: &[&str]) -> Board {
         let mut board = Board::new();
@@ -214,44 +176,45 @@ mod tests {
             board.apply_algebraic("d2h");
             board.apply_algebraic("d8h");
         }
-        assert!(walls_placed(&board) >= BRIDGE_WALL_THRESHOLD);
+        assert!(walls_placed(&board) >= 4);
         assert_eq!(search_phase(&board), SearchPhase::Minimax);
     }
 
     #[test]
-    fn book_hint_avoids_free_jump_at_center_reply() {
+    fn hybrid_prefers_edge_wall_at_ply7() {
         let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6"]);
         let hint = opening::book_hint(&mut board).expect("book hint");
-        let reply = format_move(hint.mv);
+        let mv = format_move(hint.mv);
         assert!(
-            matches!(reply.as_str(), "e3v" | "d3v" | "c3v"),
-            "expected Standard/Shiller vertical wall, got {reply}"
+            matches!(mv.as_str(), "h3h" | "a3h"),
+            "expected anti-Gorisanson edge wall PV, got {mv}"
         );
     }
 
     #[test]
-    fn hybrid_avoids_e5v_trap_after_d4h() {
-        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "e3v", "d4h"]);
-        assert!(walls_placed(&board) >= 2);
+    fn hybrid_blocks_when_losing_sprint_race() {
+        let mut board = replay(&[
+            "e2", "e8", "d2", "e7", "d3", "e6", "d4", "e5", "c4", "e4",
+        ]);
         let cfg = GenmoveConfig {
             engine: GenmoveEngine::Minimax,
             mcts: MctsConfig {
-                time_ms: 500,
+                time_ms: 2000,
                 max_simulations: 50_000,
                 log: false,
                 ..MctsConfig::default()
             },
             minimax: SearchConfig {
-                time_ms: 500,
-                max_nodes: 200_000,
+                time_ms: 2000,
+                max_nodes: 500_000,
                 log: false,
                 book_hint: None,
             },
         };
-        let mv = genmove_algebraic(&mut board, cfg).expect("move");
-        assert_ne!(
-            mv, "e5v",
-            "hybrid should not repeat the e5v wall trap after d4h, got {mv}"
+        let mv = select_move(&mut board, cfg).expect("move");
+        assert!(
+            mv.ends_with('h') || mv.ends_with('v'),
+            "expected a wall to slow black's e-file sprint, got {mv}"
         );
     }
 
@@ -261,27 +224,6 @@ mod tests {
         let mut cfg = config(GenmoveEngine::Minimax);
         cfg.minimax.time_ms = 1;
         cfg.mcts.max_simulations = 1;
-        assert!(genmove_algebraic(&mut board, cfg).is_some());
-    }
-
-    #[test]
-    fn book_hint_present_at_ply_11_e3h_e5h() {
-        // After e3h (White) + e5h (Black, boxing White at e5), book hint should be d5.
-        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "e3h", "e5h"]);
-        assert_eq!(opening::ply_number(&board), 11);
-        let hint = opening::book_hint(&mut board).expect("book hint at ply 11");
-        assert_eq!(format_move(hint.mv), "d5");
-    }
-
-    #[test]
-    fn book_hint_absent_deep_midgame() {
-        // At ply 13 with arbitrary position, lookup should find nothing.
-        let mut board = replay(&[
-            "e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "d3h", "f4", "e6", "d3",
-        ]);
-        assert!(opening::ply_number(&board) > BOOK_MAX_PLY);
-        // sprint guard fires until move_number 10 (ply ≤ 20); non-book position
-        // still gets a guard hint from advancing_pawn_move so just ensure no panic.
-        let _ = opening::book_hint(&mut board);
+        assert!(select_move(&mut board, cfg).is_some());
     }
 }

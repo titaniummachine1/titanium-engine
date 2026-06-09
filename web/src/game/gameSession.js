@@ -21,6 +21,7 @@ export class GameSession {
     this.winner = null;
     this.lastAction = null;
     this.historyIndex = null;
+    this.futureActions = [];
   }
 
   subscribe(listener) {
@@ -46,6 +47,7 @@ export class GameSession {
       wallsRemaining: this.board._wallsRemaining.map((count) => count),
       validActions: this.board.validActions(),
       isTerminal: this.winner !== null,
+      canRedo: this.futureActions.length > 0,
     };
   }
 
@@ -90,6 +92,10 @@ export class GameSession {
     this.board.takeAction(action);
     this.actions.push(structuredClone(action));
     this.lastAction = structuredClone(action);
+    if (!this._skipClearFuture) {
+      this.futureActions = [];
+    }
+    this._skipClearFuture = false;
 
     if (isWallAction(action)) {
       this.wallsByPlayer.push([
@@ -110,11 +116,29 @@ export class GameSession {
 
   undo() {
     if (this.actions.length === 0) {
-      return;
+      return false;
     }
 
+    const removed = this.actions[this.actions.length - 1];
+    this.futureActions.push(structuredClone(removed));
     this.rebuildFromActions(this.actions.slice(0, -1));
     this.notify();
+    return true;
+  }
+
+  redo() {
+    if (this.futureActions.length === 0) {
+      return false;
+    }
+
+    const action = this.futureActions.pop();
+    this._skipClearFuture = true;
+    const ok = this.applyAction(action);
+    if (!ok) {
+      this._skipClearFuture = false;
+      this.futureActions.push(action);
+    }
+    return ok;
   }
 
   rebuildFromActions(actions) {
@@ -123,6 +147,7 @@ export class GameSession {
     this.wallsByPlayer = [];
     this.winner = null;
     this.lastAction = null;
+    this.futureActions = [];
 
     for (const action of actions) {
       const actingPlayer = this.board.playerToMove();

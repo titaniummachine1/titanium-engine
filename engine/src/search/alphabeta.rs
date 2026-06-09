@@ -2,35 +2,28 @@
 
 use std::time::Instant;
 
-use crate::board::{Board, Move, Player, WallOrientation};
-use crate::grid::{has_wall, is_goal, square_index, unpack_square, wall_touch_squares};
-use crate::moves::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
-use crate::opening::BookHint;
-use crate::path::{BfsScratch, CorridorAttention};
-use crate::perft::format_move;
+use crate::cat::constants::{CAT_COLD_CM, CAT_HOT_CM, DIST_PENALTY};
+use crate::cat::prune::{
+    self, collect_search_moves, get_shortest_path, is_tactical_move, move_corridor_attention,
+    move_immediate_gain, order_moves, path_distance,
+};
+use crate::cat::CorridorAttention;
+use crate::core::board::{Board, Move, Player, WallOrientation};
+use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::opening::book::BookHint;
+use crate::path::BfsScratch;
+use crate::util::grid::{has_wall, is_goal, square_index, unpack_square, wall_touch_squares};
+use crate::util::perft::format_move;
 
 const MATE: i32 = 20_000;
 const MATE_WINDOW: i32 = 500;
 const MAX_PLY: u32 = 64;
-const DIST_PENALTY: u8 = 255;
 const CM_PER_SQUARE: i32 = 100;
 const MAX_EVAL: i32 = 10_000;
 const WALL_INVENTORY_CM: i32 = 12;
 const PAWN_PROGRESS_CM: i32 = 6;
 const RACE_LEAD_CM: i32 = 15;
 const LOW_WALL_TRAP_CM: i32 = 18;
-/// Wasted turn: opponent gets to improve on reply.
-const TEMPO_PENALTY: i32 = -10;
-// Corridor attention thresholds — calibrated against the focused route heat range.
-// Combined two-player maxima: on-path=400, delta=1=200, delta=2≈100, delta=3≈60, floor=20.
-// HOT  (≥160): on-path for ≥1 player, or delta=1 for both  → never reduce/prune.
-// COLD (<60):  delta≥3 for both players, or near floor      → apply extra LMR reduction.
-const CAT_HOT_CM: u16 = 160;
-const CAT_COLD_CM: u16 = 60;
-/// Tiny ordering nudge for cross-gap walls (centi-units, not eval).
-const WALL_CROSS_GAP_CM: i32 = 40;
-/// Slightly weaker nudge for shifted blocks beside a cross-gap slot.
-const WALL_CROSS_BLOCK_CM: i32 = 35;
 
 const LMR_MIN_DEPTH: u32 = 2;
 // Full-depth moves before LMR kicks in — 4 protects the critical 4th move
@@ -105,6 +98,8 @@ pub struct DepthLogEntry {
     pub depth: u32,
     pub score: i32,
     pub nodes: u64,
+    /// Principal variation from this depth (algebraic, space-separated).
+    pub pv: String,
 }
 
 /// Per-root-move diagnostic snapshot captured at the last completed search depth.
@@ -360,9 +355,15 @@ fn eval_stm(board: &Board, stm: Player, bfs: &mut BfsScratch) -> i32 {
     let their = distance_cm(Some(opp_steps));
     let distance_score = their - our;
 
+    let wall_hoard_cm = if our_steps > opp_steps && opp_steps <= 4 {
+        // Opponent is close to goal and ahead — hoarding walls is suicidal.
+        WALL_INVENTORY_CM / 4
+    } else {
+        WALL_INVENTORY_CM
+    };
     let wall_score = (i32::from(board.walls_remaining[stm as usize])
         - i32::from(board.walls_remaining[opp as usize]))
-        * WALL_INVENTORY_CM;
+        * wall_hoard_cm;
 
     let (our_row, _) = board.pawn(stm);
     let (opp_row, _) = board.pawn(opp);
@@ -449,464 +450,6 @@ fn terminal_score(ply: u32) -> i32 {
     -MATE + ply as i32
 }
 
-fn wall_blocks_path_step(mv: Move, sq1: u8, sq2: u8) -> bool {
-    let Move::Wall {
-        row,
-        col,
-        orientation,
-    } = mv
-    else {
-        return false;
-    };
-    let (r1, c1) = unpack_square(sq1);
-    let (r2, c2) = unpack_square(sq2);
-    match orientation {
-        WallOrientation::Horizontal => {
-            if c1 == c2 && r1.abs_diff(r2) == 1 {
-                let min_r = r1.min(r2);
-                min_r == row && (c1 == col || c1 == col + 1)
-            } else {
-                false
-            }
-        }
-        WallOrientation::Vertical => {
-            if r1 == r2 && c1.abs_diff(c2) == 1 {
-                let min_c = c1.min(c2);
-                min_c == col && (r1 == row || r1 == row + 1)
-            } else {
-                false
-            }
-        }
-    }
-}
-
-fn wall_intersects_path(mv: Move, path: &[u8], len: usize) -> bool {
-    if len <= 1 {
-        return false;
-    }
-    for i in 0..(len - 1) {
-        if wall_blocks_path_step(mv, path[i], path[i + 1]) {
-            return true;
-        }
-    }
-    false
-}
-
-fn get_shortest_path(
-    board: &Board,
-    player: Player,
-    bfs: &mut BfsScratch,
-    path_out: &mut [u8; 81],
-) -> usize {
-    let mut next_out = [u8::MAX; 81];
-    bfs.fill_next_toward_goal(board, player, &mut next_out);
-
-    let (pr, pc) = board.pawn(player);
-    let mut current = square_index(pr, pc);
-    let mut len = 0;
-    while current != u8::MAX {
-        path_out[len] = current;
-        len += 1;
-        if len >= 81 {
-            break;
-        }
-        current = next_out[current as usize];
-    }
-    len
-}
-
-fn path_distance(player: Player, path: &[u8], len: usize) -> u8 {
-    if len == 0 {
-        return DIST_PENALTY;
-    }
-    let last_sq = path[len - 1];
-    let (r, _) = unpack_square(last_sq);
-    if is_goal(player, r) {
-        (len - 1) as u8
-    } else {
-        DIST_PENALTY
-    }
-}
-
-fn opp_path_gain(board: &mut Board, mv: Move, opp_dist: u8, bfs: &mut BfsScratch) -> i32 {
-    let Move::Wall { .. } = mv else {
-        return 0;
-    };
-    let opp = board.side().opposite();
-    let undo = board.make_move(mv);
-    let new_opp = bfs.shortest_distance(board, opp).unwrap_or(DIST_PENALTY);
-    board.unmake_move(undo);
-    i32::from(new_opp.saturating_sub(opp_dist))
-}
-
-fn our_path_gain(board: &mut Board, mv: Move, our_dist: u8, bfs: &mut BfsScratch) -> i32 {
-    let Move::Pawn { .. } = mv else {
-        return 0;
-    };
-    let us = board.side();
-    let undo = board.make_move(mv);
-    let new_our = bfs.shortest_distance(board, us).unwrap_or(DIST_PENALTY);
-    board.unmake_move(undo);
-    i32::from(our_dist.saturating_sub(new_our))
-}
-
-fn move_immediate_gain(
-    board: &mut Board,
-    mv: Move,
-    our_dist: u8,
-    opp_dist: u8,
-    bfs: &mut BfsScratch,
-) -> i32 {
-    match mv {
-        Move::Pawn { .. } => {
-            let g = our_path_gain(board, mv, our_dist, bfs);
-            if g > 0 {
-                g
-            } else {
-                TEMPO_PENALTY
-            }
-        }
-        Move::Wall { .. } => {
-            let g = opp_path_gain(board, mv, opp_dist, bfs);
-            if g > 0 {
-                g
-            } else {
-                TEMPO_PENALTY
-            }
-        }
-    }
-}
-
-fn is_tactical_move(
-    board: &mut Board,
-    mv: Move,
-    our_dist: u8,
-    opp_dist: u8,
-    bfs: &mut BfsScratch,
-) -> bool {
-    match mv {
-        Move::Pawn { .. } => our_path_gain(board, mv, our_dist, bfs) > 0,
-        Move::Wall { .. } => opp_path_gain(board, mv, opp_dist, bfs) > 0,
-    }
-}
-
-#[inline]
-fn wall_coord_in_bounds(row: u8, col: u8) -> bool {
-    row <= 7 && col <= 7
-}
-
-/// Perpendicular wall placed through the one-row gap between two parallel walls.
-fn is_cross_gap_wall(board: &Board, row: u8, col: u8, orientation: WallOrientation) -> bool {
-    if !wall_coord_in_bounds(row, col) || has_wall(board, row, col, orientation) {
-        return false;
-    }
-    match orientation {
-        WallOrientation::Horizontal => {
-            row >= 1
-                && row <= 6
-                && has_wall(board, row - 1, col, WallOrientation::Vertical)
-                && has_wall(board, row + 1, col, WallOrientation::Vertical)
-        }
-        WallOrientation::Vertical => {
-            col >= 1
-                && col <= 6
-                && has_wall(board, row, col - 1, WallOrientation::Horizontal)
-                && has_wall(board, row, col + 1, WallOrientation::Horizontal)
-        }
-    }
-}
-
-/// Shifted beside a cross-gap slot, denying the perpendicular door without filling it.
-fn blocks_cross_gap_wall(
-    board: &Board,
-    row: u8,
-    col: u8,
-    orientation: WallOrientation,
-) -> bool {
-    if is_cross_gap_wall(board, row, col, orientation) || !wall_coord_in_bounds(row, col) {
-        return false;
-    }
-    match orientation {
-        WallOrientation::Horizontal => {
-            for dc in [-1i8, 1i8] {
-                let gap_col = col as i8 + dc;
-                if !(1..=6).contains(&gap_col) {
-                    continue;
-                }
-                let gc = gap_col as u8;
-                if row >= 1
-                    && row <= 6
-                    && has_wall(board, row - 1, gc, WallOrientation::Vertical)
-                    && has_wall(board, row + 1, gc, WallOrientation::Vertical)
-                {
-                    return true;
-                }
-            }
-        }
-        WallOrientation::Vertical => {
-            for dr in [-1i8, 1i8] {
-                let gap_row = row as i8 + dr;
-                if !(1..=6).contains(&gap_row) {
-                    continue;
-                }
-                let gr = gap_row as u8;
-                if col >= 1
-                    && col <= 6
-                    && has_wall(board, gr, col - 1, WallOrientation::Horizontal)
-                    && has_wall(board, gr, col + 1, WallOrientation::Horizontal)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn wall_shape_local_heat(
-    cat: &CorridorAttention,
-    row: u8,
-    col: u8,
-    orientation: WallOrientation,
-) -> u16 {
-    let edge = cat.wall_edge_heat(row, col, orientation);
-    let touch = wall_touch_squares(row, col, orientation)
-        .iter()
-        .map(|&(r, c)| cat.square_heat(r, c))
-        .max()
-        .unwrap_or(0);
-    edge.max(touch)
-}
-
-fn wall_shape_attention_bonus(board: &Board, mv: Move, cat: &CorridorAttention) -> i32 {
-    let Move::Wall {
-        row,
-        col,
-        orientation,
-    } = mv
-    else {
-        return 0;
-    };
-    if wall_shape_local_heat(cat, row, col, orientation) < CAT_HOT_CM {
-        return 0;
-    }
-    if is_cross_gap_wall(board, row, col, orientation) {
-        WALL_CROSS_GAP_CM
-    } else if blocks_cross_gap_wall(board, row, col, orientation) {
-        WALL_CROSS_BLOCK_CM
-    } else {
-        0
-    }
-}
-
-fn wall_in_dead_zone(mv: Move, reachable: u128) -> bool {
-    let Move::Wall {
-        row,
-        col,
-        orientation,
-    } = mv
-    else {
-        return false;
-    };
-    for (r, c) in wall_touch_squares(row, col, orientation) {
-        if reachable & (1u128 << square_index(r, c)) != 0 {
-            return false;
-        }
-    }
-    true
-}
-
-/// Whether a wall is worth searching.
-///
-/// Prune fully enclosed T-walls with zero corridor heat and no race effect.
-/// Keep half-protruding corridor walls and mouth blocks that deny opponent
-/// useful protruding placements (hot edge or hot touched square).
-fn wall_should_search(
-    mv: Move,
-    cat: &CorridorAttention,
-    reachable: u128,
-    board: &mut Board,
-    opp_dist: u8,
-    opp_path: &[u8],
-    opp_path_len: usize,
-    bfs: &mut BfsScratch,
-) -> bool {
-    if wall_in_dead_zone(mv, reachable) {
-        return false;
-    }
-    let Move::Wall {
-        row,
-        col,
-        orientation,
-    } = mv
-    else {
-        return false;
-    };
-
-    if cat.wall_edge_heat(row, col, orientation) >= CAT_COLD_CM {
-        return true;
-    }
-    if opp_path_gain(board, mv, opp_dist, bfs) > 0 {
-        return true;
-    }
-    if wall_intersects_path(mv, opp_path, opp_path_len) {
-        return true;
-    }
-    // Hot touched square: denies opponent a half-protruding anchor on the corridor.
-    for (r, c) in wall_touch_squares(row, col, orientation) {
-        if cat.square_heat(r, c) >= CAT_COLD_CM {
-            return true;
-        }
-    }
-    false
-}
-
-fn collect_moves(
-    board: &mut Board,
-    buf: &mut [Move],
-    bfs: &mut BfsScratch,
-    tactical_only: bool,
-    allow_walls: bool,
-) -> usize {
-    let mut scratch = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let full = generate_legal_moves_slice(board, &mut scratch, bfs);
-    if full == 0 {
-        return 0;
-    }
-
-    let mut opp_dist = DIST_PENALTY;
-    let mut opp_path = [0u8; 81];
-    let mut opp_path_len = 0usize;
-    let cat = if allow_walls {
-        let opp = board.side().opposite();
-        opp_dist = bfs.shortest_distance(board, opp).unwrap_or(DIST_PENALTY);
-        opp_path_len = get_shortest_path(board, opp, bfs, &mut opp_path);
-        bfs.build_corridor_attention(board)
-    } else {
-        CorridorAttention::default()
-    };
-    let our_dist = bfs
-        .shortest_distance(board, board.side())
-        .unwrap_or(DIST_PENALTY);
-    let reachable = bfs.both_reachable_mask(board);
-
-    let mut n = 0usize;
-
-    for i in 0..full {
-        let mv = scratch[i];
-        match mv {
-            Move::Pawn { .. } => {
-                if tactical_only && our_path_gain(board, mv, our_dist, bfs) <= 0 {
-                    continue;
-                }
-                buf[n] = mv;
-                n += 1;
-            }
-            Move::Wall { .. } => {
-                if !allow_walls {
-                    continue;
-                }
-                if !wall_should_search(
-                    mv,
-                    &cat,
-                    reachable,
-                    board,
-                    opp_dist,
-                    &opp_path,
-                    opp_path_len,
-                    bfs,
-                ) {
-                    continue;
-                }
-                buf[n] = mv;
-                n += 1;
-            }
-        }
-    }
-
-    if n == 0 && !tactical_only {
-        buf[..full].copy_from_slice(&scratch[..full]);
-        return full;
-    }
-    if n == 0 && tactical_only {
-        for i in 0..full {
-            if matches!(scratch[i], Move::Pawn { .. }) {
-                buf[n] = scratch[i];
-                n += 1;
-            }
-        }
-    }
-    n
-}
-
-fn cat_score_for_move(mv: Move, cat: &CorridorAttention) -> i32 {
-    match mv {
-        Move::Pawn { row, col } => i32::from(cat.square_heat(row, col)),
-        Move::Wall {
-            row,
-            col,
-            orientation,
-        } => i32::from(cat.wall_edge_heat(row, col, orientation)),
-    }
-}
-
-fn move_corridor_attention(board: &Board, mv: Move, cat: &CorridorAttention) -> i32 {
-    cat_score_for_move(mv, cat) + wall_shape_attention_bonus(board, mv, cat)
-}
-
-fn move_order_score(
-    board: &mut Board,
-    mv: Move,
-    tt_best: Option<Move>,
-    book_hint: Option<BookHint>,
-    our_dist: u8,
-    opp_dist: u8,
-    bfs: &mut BfsScratch,
-    cat: &CorridorAttention,
-) -> i32 {
-    if tt_best == Some(mv) {
-        return 10_000;
-    }
-    if let Some(hint) = book_hint {
-        if hint.mv == mv {
-            let bias = i32::from(hint.stm_bias) / 2;
-            return 12_000 + i32::from(hint.priority) + bias;
-        }
-    }
-    let gain = move_immediate_gain(board, mv, our_dist, opp_dist, bfs);
-    if gain > 0 {
-        1000 + gain * 100
-    } else {
-        move_corridor_attention(board, mv, cat) + TEMPO_PENALTY
-    }
-}
-
-fn order_moves(
-    board: &mut Board,
-    moves: &mut [Move],
-    n: usize,
-    tt_best: Option<Move>,
-    book_hint: Option<BookHint>,
-    scores: &mut [i32; MAX_LEGAL_MOVES],
-    our_dist: u8,
-    opp_dist: u8,
-    bfs: &mut BfsScratch,
-    cat: &CorridorAttention,
-) {
-    for i in 0..n {
-        scores[i] = move_order_score(
-            board, moves[i], tt_best, book_hint, our_dist, opp_dist, bfs, cat,
-        );
-    }
-    let mut order: [usize; MAX_LEGAL_MOVES] = core::array::from_fn(|i| i);
-    order[..n].sort_unstable_by(|&a, &b| scores[b].cmp(&scores[a]));
-    let mut tmp = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    tmp[..n].copy_from_slice(&moves[..n]);
-    for i in 0..n {
-        moves[i] = tmp[order[i]];
-    }
-}
-
 fn quiescence(
     state: &mut SearchState<'_>,
     board: &mut Board,
@@ -935,7 +478,7 @@ fn quiescence(
     }
 
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_moves(board, &mut buf, state.bfs, true, true);
+    let n = collect_search_moves(board, &mut buf, state.bfs, true, true);
     if n == 0 {
         return alpha;
     }
@@ -989,7 +532,7 @@ fn quiescence(
 
 fn make_null_move(board: &mut Board) -> u64 {
     let old_hash = board.hash;
-    crate::zobrist::xor_side(&mut board.hash);
+    crate::core::zobrist::xor_side(&mut board.hash);
     board.side_to_move = board.side_to_move.opposite();
     if board.side_to_move == Player::One {
         board.move_number += 1;
@@ -1113,7 +656,7 @@ fn negamax(
         ply > 0 && futility_depth <= 2 && !is_mate_score(static_eval) && !is_mate_score(alpha);
 
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_moves(board, &mut buf, state.bfs, false, true);
+    let n = collect_search_moves(board, &mut buf, state.bfs, false, true);
     if n == 0 {
         return eval_stm(board, board.side(), state.bfs);
     }
@@ -1233,7 +776,7 @@ fn negamax(
             let extra = if matches!(mv, Move::Wall { .. }) && cat_cm == 0 {
                 2u32
             } else if matches!(mv, Move::Wall { .. })
-                && !wall_intersects_path(mv, &opp_path, opp_path_len)
+                && !prune::wall_intersects_path(mv, &opp_path, opp_path_len)
                 && !corridor_relevant
             {
                 1u32
@@ -1304,7 +847,7 @@ fn negamax(
 
         if ply == 0 {
             state.root_moves.push(RootMoveInfo {
-                mv: crate::perft::format_move(mv),
+                mv: crate::util::perft::format_move(mv),
                 score,
                 white_dist_after: root_w_dist,
                 black_dist_after: root_b_dist,
@@ -1385,6 +928,25 @@ fn negamax(
 }
 
 /// Walk TT PV — if root claims mate, line must reach a real terminal within distance.
+fn extract_pv_algebraic(board: &Board, tt: &SearchTt, max_ply: u32) -> String {
+    let mut copy = board.clone();
+    let mut parts = Vec::new();
+    for _ in 0..max_ply {
+        if copy.is_terminal().is_some() {
+            break;
+        }
+        let Some(entry) = tt.probe(copy.hash) else {
+            break;
+        };
+        let Some(mv) = unpack_move(entry.best) else {
+            break;
+        };
+        parts.push(format_move(mv));
+        let _ = copy.make_move(mv);
+    }
+    parts.join(" ")
+}
+
 fn verify_pv_mate(board: &Board, tt: &SearchTt, claimed_score: i32) -> bool {
     let Some(m_dist) = mate_distance(claimed_score) else {
         return true;
@@ -1487,20 +1049,46 @@ fn log_depth(state: &SearchState<'_>, depth: u32, score: i32) {
     );
 }
 
+fn format_depth_log_json(depth_log: &[DepthLogEntry]) -> String {
+    let mut depth_json = String::new();
+    for (i, e) in depth_log.iter().enumerate() {
+        if i > 0 {
+            depth_json.push(',');
+        }
+        let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
+        depth_json.push_str(&format!(
+            "{{\"depth\":{},\"score\":{},\"nodes\":{},\"pv\":\"{}\"}}",
+            e.depth, e.score, e.nodes, pv
+        ));
+    }
+    depth_json
+}
+
+fn emit_search_progress(
+    state: &SearchState,
+    config: &SearchConfig,
+    white_dist: u8,
+    black_dist: u8,
+) {
+    if !config.log {
+        return;
+    }
+    let depth_json = format_depth_log_json(&state.depth_log);
+    eprintln!(
+        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"whiteDist\":{},\"blackDist\":{},\"depthLog\":[{}]}}",
+        state.search_depth,
+        state.nodes,
+        white_dist,
+        black_dist,
+        depth_json
+    );
+}
+
 fn emit_json_report(report: &SearchReport, log: bool) {
     if !log {
         return;
     }
-    let mut depth_json = String::new();
-    for (i, e) in report.depth_log.iter().enumerate() {
-        if i > 0 {
-            depth_json.push(',');
-        }
-        depth_json.push_str(&format!(
-            "{{\"depth\":{},\"score\":{},\"nodes\":{}}}",
-            e.depth, e.score, e.nodes
-        ));
-    }
+    let depth_json = format_depth_log_json(&report.depth_log);
     let mut root_json = String::new();
     for (i, r) in report.root_moves.iter().enumerate() {
         if i > 0 {
@@ -1520,7 +1108,7 @@ fn emit_json_report(report: &SearchReport, log: bool) {
         ));
     }
     eprintln!(
-        "info json {{\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"aspirationFails\":{},\"lmrReSearches\":{},\"mateExtensions\":{},\"pvMateFailures\":{},\"elapsedMs\":{},\"depthLog\":[{}],\"rootMoves\":[{}]}}",
+        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"aspirationFails\":{},\"lmrReSearches\":{},\"mateExtensions\":{},\"pvMateFailures\":{},\"elapsedMs\":{},\"depthLog\":[{}],\"rootMoves\":[{}]}}",
         report.search_depth,
         report.nodes,
         report.root_score,
@@ -1638,7 +1226,8 @@ pub fn search_best_move(board: &mut Board, config: SearchConfig) -> Option<Searc
 
     let static_eval = eval_stm(board, root_side, state.bfs);
     let mut prev_score = if let Some(hint) = config.book_hint {
-        static_eval.saturating_add(i32::from(hint.stm_bias) / 2)
+        // Soft aspiration toward book PV — search can refute if eval disagrees.
+        static_eval.saturating_add(i32::from(hint.stm_bias) / 4)
     } else {
         static_eval
     };
@@ -1693,12 +1282,15 @@ pub fn search_best_move(board: &mut Board, config: SearchConfig) -> Option<Searc
         completed_depth = depth;
         state.search_depth = depth;
 
+        let pv = extract_pv_algebraic(board, state.tt, depth);
         state.depth_log.push(DepthLogEntry {
             depth,
             score: verified,
             nodes: state.nodes,
+            pv,
         });
         log_depth(&state, depth, verified);
+        emit_search_progress(&state, &config, white_dist, black_dist);
 
         if should_stop_forced_outcome(verified, depth, board, state.tt, state.our_root_dist) {
             if state.log {
@@ -1709,27 +1301,6 @@ pub fn search_best_move(board: &mut Board, config: SearchConfig) -> Option<Searc
 
         if state.should_stop() {
             break;
-        }
-    }
-
-    // If the search didn't go deep enough to be trusted, fall back to the book move.
-    // Shallow searches (especially depth 1 trapped in quiescence) can be misled by
-    // tactical noise and override good opening theory.
-    const BOOK_TRUST_MIN_DEPTH: u32 = 3;
-    if let Some(hint) = config.book_hint {
-        if completed_depth < BOOK_TRUST_MIN_DEPTH
-            && hint.priority >= 100
-            && buf[..n].contains(&hint.mv)
-        {
-            if config.log {
-                eprintln!(
-                    "info book fallback: depth {} < {}, using book hint {}",
-                    completed_depth,
-                    BOOK_TRUST_MIN_DEPTH,
-                    format_move(hint.mv)
-                );
-            }
-            best_mv = hint.mv;
         }
     }
 
@@ -1761,8 +1332,8 @@ pub fn genmove_algebraic(board: &mut Board, config: SearchConfig) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{Board, Player};
-    use crate::perft::format_move;
+    use crate::core::board::{Board, Player};
+    use crate::util::perft::format_move;
 
     #[test]
     fn startpos_eval_is_bounded() {
@@ -1852,236 +1423,6 @@ mod tests {
             "expected move that shortens our path or lengthens theirs, got {} (score {})",
             format_move(report.best_move),
             report.root_score
-        );
-    }
-
-    #[test]
-    fn wall_search_prunes_enclosed_t_keeps_corridor_blocks() {
-        use crate::grid::set_wall;
-
-        let board = Board::new();
-        let mut bfs = BfsScratch::new();
-        let cat = bfs.build_corridor_attention(&board);
-        let reachable = bfs.both_reachable_mask(&board);
-        let opp_dist = bfs
-            .shortest_distance(&board, Player::Two)
-            .unwrap_or(DIST_PENALTY);
-        let mut opp_path = [0u8; 81];
-        let opp_path_len = get_shortest_path(&board, Player::Two, &mut bfs, &mut opp_path);
-
-        let passive_corner = Move::Wall {
-            row: 0,
-            col: 0,
-            orientation: WallOrientation::Horizontal,
-        };
-        let mut passive_board = board.clone();
-        assert!(
-            !wall_should_search(
-                passive_corner,
-                &cat,
-                reachable,
-                &mut passive_board,
-                opp_dist,
-                &opp_path,
-                opp_path_len,
-                &mut bfs,
-            ),
-            "passive corner T-wall should be pruned"
-        );
-
-        let corridor_wall = Move::Wall {
-            row: 3,
-            col: 4,
-            orientation: WallOrientation::Horizontal,
-        };
-        let mut corridor_board = board.clone();
-        assert!(
-            wall_should_search(
-                corridor_wall,
-                &cat,
-                reachable,
-                &mut corridor_board,
-                opp_dist,
-                &opp_path,
-                opp_path_len,
-                &mut bfs,
-            ),
-            "central corridor wall should stay searchable"
-        );
-
-        // Mouth block: enclosure with a hot corridor square on the boundary.
-        let mut pocket = Board::new();
-        for &(row, col, orient) in &[
-            (1, 0, WallOrientation::Vertical),
-            (1, 1, WallOrientation::Horizontal),
-            (2, 0, WallOrientation::Horizontal),
-        ] {
-            set_wall(&mut pocket, row, col, orient, true);
-        }
-        let cat_pocket = bfs.build_corridor_attention(&pocket);
-        let reachable_pocket = bfs.both_reachable_mask(&pocket);
-        let opp_dist_pocket = bfs
-            .shortest_distance(&pocket, Player::Two)
-            .unwrap_or(DIST_PENALTY);
-        let mut opp_path_pocket = [0u8; 81];
-        let opp_path_len_pocket =
-            get_shortest_path(&pocket, Player::Two, &mut bfs, &mut opp_path_pocket);
-
-        let inner_t = Move::Wall {
-            row: 0,
-            col: 0,
-            orientation: WallOrientation::Vertical,
-        };
-        let mut inner_board = pocket.clone();
-        assert!(
-            !wall_should_search(
-                inner_t,
-                &cat_pocket,
-                reachable_pocket,
-                &mut inner_board,
-                opp_dist_pocket,
-                &opp_path_pocket,
-                opp_path_len_pocket,
-                &mut bfs,
-            ),
-            "fully buried inner T-wall should be pruned"
-        );
-
-        let mouth_block = Move::Wall {
-            row: 1,
-            col: 2,
-            orientation: WallOrientation::Vertical,
-        };
-        if cat_pocket.wall_edge_heat(1, 2, WallOrientation::Vertical) >= CAT_COLD_CM
-            || wall_touch_squares(1, 2, WallOrientation::Vertical)
-                .iter()
-                .any(|&(r, c)| cat_pocket.square_heat(r, c) >= CAT_COLD_CM)
-        {
-            let mut mouth_board = pocket.clone();
-            assert!(
-                wall_should_search(
-                    mouth_block,
-                    &cat_pocket,
-                    reachable_pocket,
-                    &mut mouth_board,
-                    opp_dist_pocket,
-                    &opp_path_pocket,
-                    opp_path_len_pocket,
-                    &mut bfs,
-                ),
-                "mouth block on hot corridor should stay searchable"
-            );
-        }
-    }
-
-    #[test]
-    fn cross_gap_wall_detects_perpendicular_through_gap() {
-        use crate::grid::set_wall;
-
-        let mut board = Board::new();
-        set_wall(&mut board, 2, 4, WallOrientation::Vertical, true);
-        set_wall(&mut board, 4, 4, WallOrientation::Vertical, true);
-        assert!(is_cross_gap_wall(
-            &board,
-            3,
-            4,
-            WallOrientation::Horizontal
-        ));
-        assert!(!is_cross_gap_wall(
-            &board,
-            3,
-            4,
-            WallOrientation::Vertical
-        ));
-    }
-
-    #[test]
-    fn cross_gap_ignores_adjacent_chain_t_junction() {
-        use crate::grid::set_wall;
-
-        let mut board = Board::new();
-        set_wall(&mut board, 2, 4, WallOrientation::Vertical, true);
-        set_wall(&mut board, 3, 4, WallOrientation::Vertical, true);
-        assert!(!is_cross_gap_wall(
-            &board,
-            3,
-            4,
-            WallOrientation::Horizontal
-        ));
-    }
-
-    #[test]
-    fn blocks_cross_gap_detects_shifted_prevention() {
-        use crate::grid::set_wall;
-
-        let mut board = Board::new();
-        set_wall(&mut board, 2, 4, WallOrientation::Vertical, true);
-        set_wall(&mut board, 4, 4, WallOrientation::Vertical, true);
-        assert!(blocks_cross_gap_wall(
-            &board,
-            3,
-            3,
-            WallOrientation::Horizontal
-        ));
-        assert!(blocks_cross_gap_wall(
-            &board,
-            3,
-            5,
-            WallOrientation::Horizontal
-        ));
-        assert!(!blocks_cross_gap_wall(
-            &board,
-            3,
-            4,
-            WallOrientation::Horizontal
-        ));
-    }
-
-    #[test]
-    fn wall_shape_bonus_only_for_hot_cross_gap() {
-        use crate::grid::set_wall;
-
-        let mut board = Board::new();
-        set_wall(&mut board, 2, 4, WallOrientation::Vertical, true);
-        set_wall(&mut board, 4, 4, WallOrientation::Vertical, true);
-        let cold_cat = CorridorAttention::default();
-        let cross = Move::Wall {
-            row: 3,
-            col: 4,
-            orientation: WallOrientation::Horizontal,
-        };
-        assert_eq!(
-            wall_shape_attention_bonus(&board, cross, &cold_cat),
-            0,
-            "cold CAT should not revive unrelated shape bonus"
-        );
-
-        let mut bfs = BfsScratch::new();
-        let hot_cat = bfs.build_corridor_attention(&board);
-        assert!(
-            wall_shape_attention_bonus(&board, cross, &hot_cat) >= WALL_CROSS_GAP_CM,
-            "hot corridor cross-gap should get a tiny ordering nudge"
-        );
-    }
-
-    #[test]
-    fn useless_t_junction_gets_no_shape_bonus() {
-        use crate::grid::set_wall;
-
-        let mut board = Board::new();
-        set_wall(&mut board, 0, 5, WallOrientation::Vertical, true);
-        set_wall(&mut board, 1, 5, WallOrientation::Vertical, true);
-        let mut bfs = BfsScratch::new();
-        let cat = bfs.build_corridor_attention(&board);
-        let t_junction = Move::Wall {
-            row: 1,
-            col: 5,
-            orientation: WallOrientation::Horizontal,
-        };
-        assert_eq!(
-            wall_shape_attention_bonus(&board, t_junction, &cat),
-            0,
-            "far-side T junction should not get shape attention"
         );
     }
 

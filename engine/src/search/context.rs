@@ -7,7 +7,7 @@
 //! ```
 
 use crate::path::BfsScratch;
-use crate::tt::TranspositionTable;
+use crate::search::tt::TranspositionTable;
 
 /// Shared across workers — transposition table today, search metadata later.
 pub struct SharedState {

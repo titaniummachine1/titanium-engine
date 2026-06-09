@@ -1,8 +1,8 @@
 //! `Engine` — coordinates perft today, αβ + Lazy SMP tomorrow.
 
-use crate::board::Board;
-use crate::context::{EngineLimits, SharedState, ThreadBenchResult, WorkerContext};
-use crate::perft::{perft_fast_ctx, perft_iterative as perft_iterative_inner, perft_parallel_root};
+use crate::core::board::Board;
+use crate::search::context::{EngineLimits, SharedState, ThreadBenchResult, WorkerContext};
+use crate::util::perft::{perft_fast_ctx, perft_iterative as perft_iterative_inner, perft_parallel_root};
 
 /// Titanium entry point — perft now, search later on the same layout.
 pub struct Engine {
@@ -119,7 +119,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perft::PERFT3_STARTPOS;
+    use crate::util::perft::PERFT3_STARTPOS;
 
     #[test]
     fn default_limits_single_thread() {

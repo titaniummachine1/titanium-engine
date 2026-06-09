@@ -193,10 +193,56 @@ function runGenmoveSync(moves, options) {
   return { algebraic: match[1], ...meta };
 }
 
+function runCatSync(moves) {
+  const bin = resolveBinary();
+  const args = ['cat', ...moves];
+  const result = spawnSync(bin, args, {
+    encoding: 'utf8',
+    cwd: repoRoot,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    throw new Error(`Titanium binary not found at ${bin}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || `titanium cat exited ${result.status}`);
+  }
+
+  const line = (result.stdout || '').trim();
+  return JSON.parse(line);
+}
+
 export function titaniumProxyPlugin() {
   return {
     name: 'titanium-rust-proxy',
     configureServer(server) {
+      server.middlewares.use('/api/titanium/cat', (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.end('POST only');
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+        });
+        req.on('end', () => {
+          try {
+            const payload = JSON.parse(body || '{}');
+            const moves = Array.isArray(payload.moves) ? payload.moves.map(String) : [];
+            const result = runCatSync(moves);
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: err.message ?? String(err) }));
+          }
+        });
+      });
+
       server.middlewares.use('/api/titanium/genmove', (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405;

@@ -1,6 +1,6 @@
 //! Zobrist hashing — incremental position keys for TT and search.
 
-use crate::board::{Board, Player, WallOrientation};
+use crate::core::board::{Board, Player, WallOrientation};
 
 pub struct ZobristKeys {
     pub pawn: [[u64; 81]; 2],

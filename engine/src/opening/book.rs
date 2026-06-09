@@ -6,10 +6,10 @@
 
 use std::sync::OnceLock;
 
-use crate::board::{Board, Move, Player, WallOrientation};
-use crate::grid::goal_row;
-use crate::moves::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::core::board::{Board, Move, Player, WallOrientation};
+use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::path::BfsScratch;
+use crate::util::grid::goal_row;
 
 const DISABLE_BOOK_ENV: &str = "TITANIUM_DISABLE_BOOK";
 /// Phase 1 — theory window: book + guard only, no deep search.
@@ -65,11 +65,8 @@ struct BookEntry {
 }
 
 const BOOK_LINES: &[BookLine] = &[
-    // Orthodox center development into Standard/Shiller structure.  The key
-    // transcript correction is ply 7: after e2 e8 e3 e7 e4 e6, do NOT play e5.
-    // It donates a free forward jump to e4.  Instead anchor a vertical center
-    // wall. e3v is the main Standard/Shiller weapon: it keeps W/B distances
-    // balanced at 5/5 while splitting the board into committed lanes.
+    // Center development.  Book = principle variation for search ordering only.
+    // Ply 7 after e4 e6: prefer h3h/a3h over e3v (mined vs strong opponents).
     BookLine {
         name: "center-start",
         prefix: &[],
@@ -112,16 +109,30 @@ const BOOK_LINES: &[BookLine] = &[
         priority: 100,
         stm_bias: 0,
     },
+    // Mined anti-Gorisanson ply-7 walls — higher priority than center e3v.
+    BookLine {
+        name: "mined-ply7-h3h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
+        reply: "h3h",
+        priority: 150,
+        stm_bias: 0,
+    },
+    BookLine {
+        name: "mined-ply7-a3h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
+        reply: "a3h",
+        priority: 150,
+        stm_bias: 0,
+    },
+    // Shiller center vertical — kept as a documented PV but demoted: d4h+c3v refutes.
     BookLine {
         name: "standard-shiller-center-vertical",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
         reply: "e3v",
-        priority: 150,
+        priority: 125,
         stm_bias: 0,
     },
-    // Shiller alternatives from the same center tabiya. They are deliberately
-    // lower priority than e3v, but stay in the book as explicit analyzed
-    // fallbacks and as documentation of the accepted vertical-wall family.
+    // Shiller alternatives from the same center tabiya.
     BookLine {
         name: "shiller-d3v",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
@@ -268,22 +279,6 @@ const BOOK_LINES: &[BookLine] = &[
         priority: 115,
         stm_bias: 0,
     },
-    // Ishtar Medium self-play (40 games, Jun 2026) — center through e6 is universal;
-    // ply 7 splits evenly between h3h and a3h.  e5 stays higher priority (our tempo).
-    BookLine {
-        name: "mined-ply7-h3h",
-        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
-        reply: "h3h",
-        priority: 118,
-        stm_bias: 0,
-    },
-    BookLine {
-        name: "mined-ply7-a3h",
-        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
-        reply: "a3h",
-        priority: 118,
-        stm_bias: 0,
-    },
     BookLine {
         name: "mined-h3h-d6h",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "h3h"],
@@ -400,7 +395,7 @@ fn book_entry_better(candidate: &BookEntry, current: &BookEntry) -> bool {
 }
 
 fn format_move_key(mv: Move) -> String {
-    crate::perft::format_move(mv)
+    crate::util::perft::format_move(mv)
 }
 
 fn book_entries() -> &'static [BookEntry] {
@@ -633,7 +628,7 @@ fn is_passive_back_rank_wall(stm: Player, row: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perft::format_move;
+    use crate::util::perft::format_move;
 
     fn replay(moves: &[&str]) -> Board {
         let mut board = Board::new();
@@ -647,8 +642,8 @@ mod tests {
         lookup(board).map(format_move)
     }
 
-    fn is_standard_shiller(reply: Option<&str>) -> bool {
-        matches!(reply, Some("e3v" | "d3v" | "c3v"))
+    fn is_anti_gorisanson_ply7(reply: Option<&str>) -> bool {
+        matches!(reply, Some("h3h" | "a3h" | "e3v" | "d3v" | "c3v"))
     }
 
     fn is_center_anti_jump(reply: Option<&str>) -> bool {
@@ -669,8 +664,18 @@ mod tests {
         let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6"]);
         let reply = lookup_text(&mut board);
         assert!(
-            is_standard_shiller(reply.as_deref()),
-            "expected Standard/Shiller vertical wall, got {reply:?}"
+            is_anti_gorisanson_ply7(reply.as_deref()),
+            "expected ply-7 wall PV, got {reply:?}"
+        );
+    }
+
+    #[test]
+    fn book_has_no_instant_d4_after_d4h() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "e3v", "d4h"]);
+        assert_ne!(
+            lookup_text(&mut board).as_deref(),
+            Some("d4"),
+            "d4 is refuted by c3v — must not be book PV"
         );
     }
 

@@ -9,6 +9,14 @@ import { parseAlgebraic, toAlgebraic } from './gameLogic.js';
 
 const PREFIX = 'tq1';
 
+/** `ve1` / `hf8` / `hh8` (prefix) → `e1v` / `f8h` / `h8h` for our parser. */
+function normalizeReplayToken(token) {
+  if (token.length === 3 && (token[0] === 'h' || token[0] === 'v')) {
+    return `${token.slice(1)}${token[0]}`;
+  }
+  return token;
+}
+
 export function encodeReplayFromAlgebraic(algebraicMoves, meta = null) {
   const body = algebraicMoves.join(' ');
   if (!meta || Object.keys(meta).length === 0) {
@@ -47,8 +55,9 @@ export function decodeReplayCode(text) {
     return decodeReplayCode(codeLine);
   }
 
-  const matches = movesPart.match(/\b[a-i][1-9][hv]?\b/gi) ?? [];
-  const tokens = matches.map((token) => token.toLowerCase());
+  const matches =
+    movesPart.match(/\b[hv][a-i][1-9]\b|\b[a-i][1-9][hv]\b|\b[a-i][1-9]\b/gi) ?? [];
+  const tokens = matches.map((token) => normalizeReplayToken(token.toLowerCase()));
   if (tokens.length === 0) {
     throw new Error('No moves in replay');
   }

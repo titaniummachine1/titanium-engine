@@ -1,4 +1,5 @@
 import { formatCoordinate, toAlgebraic } from '../lib/gameLogic.js';
+import { encodeReplayFromActions } from '../lib/replayCode.js';
 import { playerColorName } from '../lib/playerColors.js';
 
 export function renderGameFooter(container, state) {
@@ -6,11 +7,8 @@ export function renderGameFooter(container, state) {
     winner,
     playerToMove,
     actions,
-    liveSearch,
-    aiThinking,
     replay,
     uiMode,
-    playReplayCode,
     moveThinkLog,
   } = state;
 
@@ -24,88 +22,49 @@ export function renderGameFooter(container, state) {
   }
 
   const moveText =
-    actions.length === 0
-      ? '—'
-      : actions.map((action, index) => `${index + 1}. ${toAlgebraic(action)}`).join('  ');
+    actions.length === 0 ? '—' : actions.map((action) => toAlgebraic(action)).join(' ');
 
-  let liveLine = '';
-  if (aiThinking && liveSearch) {
-    const who = liveSearch.playerLabel ?? 'AI';
-    const modeLabel = formatSearchMode(liveSearch.mode);
-    if (liveSearch.mode) {
-      liveLine = `${who}: ${modeLabel}`;
-      if (liveSearch.searchDepth) {
-        liveLine += ` depth=${liveSearch.searchDepth}`;
-      }
-      if (liveSearch.nodes) {
-        liveLine += ` · ${liveSearch.nodes.toLocaleString()} nodes`;
-      } else if (liveSearch.simulations) {
-        liveLine += ` · ${liveSearch.simulations.toLocaleString()} sims`;
-      }
-      if (liveSearch.depthLog?.length) {
-        const last = liveSearch.depthLog[liveSearch.depthLog.length - 1];
-        liveLine += ` · eval=${formatEngineScore(last.score)}`;
-      } else if (liveSearch.rootWinRate != null) {
-        liveLine += ` · wr ${(liveSearch.rootWinRate * 100).toFixed(0)}%`;
-      }
-      if (liveSearch.bestMove) {
-        liveLine += ` · best=${liveSearch.bestMove}`;
-      }
-    } else if (liveSearch.simulations) {
-      liveLine = `${who}: thinking… ${liveSearch.simulations.toLocaleString()} sims`;
-    } else {
-      liveLine = `${who}: thinking…`;
-    }
-  }
-
-  const replayBlock =
-    playReplayCode && uiMode === 'play'
-      ? `<div class="game-footer__replay"><span class="game-footer__replay-label">Replay code (paste in Replay tab):</span> <code class="game-footer__replay-code">${escapeHtml(playReplayCode)}</code></div>`
-      : '';
-
-  const wasOpen = container.querySelector('details.think-chain')?.open ?? false;
+  const hasMoves = actions.length > 0;
+  const hasReport = hasMoves || moveThinkLog?.length > 0;
 
   container.innerHTML = `
     <div class="game-footer__row game-footer__row--turn">
       <strong>${turnText}</strong>
-      ${liveLine ? `<span class="game-footer__live">${escapeHtml(liveLine)}</span>` : ''}
     </div>
     <div class="game-footer__moves" title="${escapeHtml(moveText)}">${escapeHtml(moveText)}</div>
-    ${replayBlock}
-    ${buildThinkChainBlock(moveThinkLog, wasOpen)}
+    <div class="game-footer__actions">
+      <button type="button" class="btn btn--small" data-action="copy-game-code" ${hasMoves ? '' : 'disabled'}>Copy game</button>
+      <button type="button" class="btn btn--small" data-action="copy-full-report" ${hasReport ? '' : 'disabled'}>Copy game report</button>
+    </div>
   `;
 
-  const copyBtn = container.querySelector('[data-action="copy-think-chain"]');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', () => {
-      const text = buildGameExportText(state);
-      navigator.clipboard.writeText(text).catch(() => {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      });
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => { copyBtn.textContent = 'Copy game report'; }, 1500);
-    });
-  }
+  wireCopyButton(container, '[data-action="copy-game-code"]', () => buildGameCodeText(state), 'Copy game');
+  wireCopyButton(container, '[data-action="copy-full-report"]', () => buildGameExportText(state), 'Copy game report');
 }
 
-function formatSearchMode(mode) {
-  const labels = {
-    searching: 'searching',
-    mcts: 'MCTS',
-    minimax: 'αβ+LMR',
-    hybrid: 'hybrid',
-    race: 'win path',
-    trivial: 'instant',
-    converged: 'MCTS ✓',
-    visits: 'MCTS cap',
-    time: 'MCTS',
-  };
-  return labels[mode] ?? mode;
+function wireCopyButton(container, selector, getText, label) {
+  const btn = container.querySelector(selector);
+  if (!btn) {
+    return;
+  }
+  btn.addEventListener('click', () => {
+    copyText(getText());
+    btn.textContent = 'Copied!';
+    setTimeout(() => {
+      btn.textContent = label;
+    }, 1500);
+  });
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  });
 }
 
 function escapeHtml(text) {
@@ -134,8 +93,11 @@ function formatEngineScore(score) {
 
 function formatDepthLog(depthLog) {
   return depthLog
-    .map((e) => `d${e.depth}=${formatEngineScore(e.score)}`)
-    .join(' ');
+    .map((e) => {
+      const pv = e.pv ? ` pv:${e.pv}` : '';
+      return `d${e.depth}=${formatEngineScore(e.score)}${pv}`;
+    })
+    .join(' | ');
 }
 
 function isTitaniumThinkEntry(entry) {
@@ -315,6 +277,29 @@ function buildGameHeader(state) {
   return lines.join('\n');
 }
 
+export function buildGameCodeText(state) {
+  const { actions, winner } = state;
+  if (!actions?.length) {
+    return '';
+  }
+  const meta =
+    winner != null
+      ? {
+        winner: winner === 1 ? 'white' : 'black',
+        plies: actions.length,
+      }
+      : null;
+  return encodeReplayFromActions(actions, meta);
+}
+
+export function buildThinkLogText(state) {
+  const log = state.moveThinkLog;
+  if (!log?.length) {
+    return '';
+  }
+  return log.map(formatThinkEntry).join('\n');
+}
+
 export function buildGameExportText(state) {
   const header = buildGameHeader(state);
   const log = state.moveThinkLog;
@@ -324,20 +309,24 @@ export function buildGameExportText(state) {
   return `${header}\n\n--- Think chain ---\n${log.map(formatThinkEntry).join('\n')}`;
 }
 
-function buildThinkChainBlock(log, keepOpen = false) {
+export function renderThinkLogPanel(log) {
   if (!log?.length) {
     return '';
   }
   const rows = log
-    .map((entry) => `<div class="think-chain__row">${escapeHtml(formatThinkEntry(entry))}</div>`)
+    .map((entry) => `<div class="think-log__row">${escapeHtml(formatThinkEntry(entry))}</div>`)
     .join('');
   return `
-    <details class="think-chain"${keepOpen ? ' open' : ''}>
-      <summary class="think-chain__summary">
-        Think chain (${log.length} ply)
-        <button type="button" class="btn btn--small" data-action="copy-think-chain">Copy game report</button>
-      </summary>
-      <div class="think-chain__log">${rows}</div>
-    </details>
+    <div class="think-log">
+      <div class="think-log__header">Think log <span class="think-log__count">${log.length}</span></div>
+      <div class="think-log__body" data-think-log-body>${rows}</div>
+    </div>
   `;
+}
+
+export function pinThinkLogScroll(container, scrollTop) {
+  const body = container.querySelector('[data-think-log-body]');
+  if (body && scrollTop > 0) {
+    body.scrollTop = scrollTop;
+  }
 }

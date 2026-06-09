@@ -10,14 +10,15 @@ import { playMatch } from './lib/match_engine.mjs';
 import { RUST_TITANIUM_ID, GORISANSON_ID } from './lib/engine_ids.mjs';
 
 function parseArgs(argv) {
-  const opts = { games: 4, timeSec: 10, gorisansonTimeSec: 3, quiet: true };
+  const opts = { games: 4, timeSec: 10, gorisansonTimeSec: 3, quiet: true, disableBook: false };
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--games' && argv[i + 1]) opts.games = Number(argv[++i]);
     else if (arg === '--time' && argv[i + 1]) opts.timeSec = Number(argv[++i]);
     else if (arg === '--gorisanson-time' && argv[i + 1]) {
       opts.gorisansonTimeSec = Number(argv[++i]);
-    } else if (arg === '--verbose' || arg === '-v') opts.quiet = false;
+    } else if (arg === '--no-book') opts.disableBook = true;
+    else if (arg === '--verbose' || arg === '-v') opts.quiet = false;
     else if (arg === '--label' && argv[i + 1]) opts.label = argv[++i];
   }
   return opts;
@@ -32,7 +33,12 @@ async function main() {
     maxSimulations: Number(process.env.TITANIUM_MAX_NODES ?? 2_000_000_000),
   };
 
-  const titanium = { id: RUST_TITANIUM_ID, engine: 'minimax', timeSec: opts.timeSec };
+  const titanium = {
+    id: RUST_TITANIUM_ID,
+    engine: 'minimax',
+    timeSec: opts.timeSec,
+    disableBook: opts.disableBook,
+  };
   const gorisanson = { id: GORISANSON_ID, timeSec: opts.gorisansonTimeSec };
 
   if (!opts.quiet && opts.label) {
@@ -43,6 +49,7 @@ async function main() {
   const match = await playMatch(titanium, gorisanson, opts.games, {
     ...budget,
     engine: 'minimax',
+    disableBook: opts.disableBook,
     quiet: opts.quiet,
     logMoves: !opts.quiet,
     logReplay: false,

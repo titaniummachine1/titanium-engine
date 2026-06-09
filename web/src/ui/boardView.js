@@ -1,5 +1,11 @@
 import { WallType, formatCoordinate, toAlgebraic } from '../lib/gameLogic.js';
 import { playerColorName } from '../lib/playerColors.js';
+import {
+  catSquareOverlay,
+  catWallOutlineColor,
+  catSquareIndex,
+  isSquareSkipped,
+} from '../lib/catHeatmap.js';
 import './board.css';
 
 const SQUARE_TRACK = '9fr';
@@ -34,6 +40,7 @@ export function renderBoard(container, state, controller) {
     engineErrors,
     aiThinking,
     uiMode,
+    catViz,
   } = state;
 
   const numRows = board.numRows();
@@ -46,7 +53,13 @@ export function renderBoard(container, state, controller) {
   }
 
   const lastKey = state.lastAction ? toAlgebraic(state.lastAction) : null;
-  const isHumanTurn = uiMode !== 'replay' && controller.session.isHumanTurn(settings.players);
+  const freePlay = uiMode === 'analysis';
+  const canInteract =
+    !winner &&
+    !aiThinking &&
+    uiMode !== 'replay' &&
+    (freePlay || controller.session.isHumanTurn(settings.players));
+  const showCat = settings.showCatVision && catViz && uiMode !== 'replay';
   const showCoords = settings.displayCoordinates;
   const showWallCounts = settings.displayRemainingWalls;
   const isRotated = settings.rotateBoard;
@@ -55,18 +68,22 @@ export function renderBoard(container, state, controller) {
   container.className = 'board-panel';
 
   const boardShell = document.createElement('div');
-  boardShell.className = 'board' + (isRotated ? ' board--rotate' : '');
+  boardShell.className =
+    'board' +
+    (isRotated ? ' board--rotate' : '') +
+    (showCat ? ' board--cat' : '') +
+    (freePlay ? ' board--freeplay' : '');
 
   const engineStateP1 = document.createElement('div');
   engineStateP1.className = 'engine-state engine-state--p1';
   engineStateP1.appendChild(
-    renderTurnIndicator(1, playerToMove, settings.players[0], engineStatus, engineErrors, aiThinking, winner),
+    renderTurnIndicator(1, playerToMove, settings.players[0], engineStatus, engineErrors, aiThinking, winner, freePlay),
   );
 
   const engineStateP2 = document.createElement('div');
   engineStateP2.className = 'engine-state engine-state--p2';
   engineStateP2.appendChild(
-    renderTurnIndicator(2, playerToMove, settings.players[1], engineStatus, engineErrors, aiThinking, winner),
+    renderTurnIndicator(2, playerToMove, settings.players[1], engineStatus, engineErrors, aiThinking, winner, freePlay),
   );
 
   const coordLabelsRow = renderCoordinateLabels('row', numRows, showCoords, controller);
@@ -92,8 +109,9 @@ export function renderBoard(container, state, controller) {
           validKeys,
           wallOwners,
           lastKey,
-          isHumanTurn,
+          canInteract,
           playerToMove,
+          catViz: showCat ? catViz : null,
         }),
       );
     }
@@ -118,8 +136,7 @@ export function renderBoard(container, state, controller) {
   }
 
   boardShell.addEventListener('click', (event) => {
-    const target = event.target;
-    const actionNode = target.querySelector?.('[data-action]') || target.closest?.('[data-action]');
+    const actionNode = event.target.closest?.('[data-action]');
     if (!actionNode) {
       return;
     }
@@ -154,8 +171,9 @@ function renderBoardCell({
   validKeys,
   wallOwners,
   lastKey,
-  isHumanTurn,
+  canInteract,
   playerToMove,
+  catViz,
 }) {
   const row = numRows - Math.floor(p / 2);
   const col = Math.floor(h / 2) + 1;
@@ -183,15 +201,42 @@ function renderBoardCell({
     const pawnPlayer = playerPositions.findIndex(
       (pos) => pos.row === coordinate.row && pos.column === coordinate.column,
     );
-    const isValid = validKeys.has(key) && isHumanTurn && pawnPlayer < 0;
+    const isValid = validKeys.has(key) && canInteract && pawnPlayer < 0;
     const isPrev = lastKey === key;
+    const engineRow = row - 1;
+    const engineCol = col - 1;
+    const sqIdx = catSquareIndex(engineRow, engineCol);
+    const heat = catViz?.squares?.[sqIdx] ?? 0;
+    const reachable =
+      catViz?.reachable == null ? true : catViz.reachable[sqIdx] === true;
+    const skipped = catViz && isSquareSkipped(reachable);
+    const overlay = catViz ? catSquareOverlay(heat, reachable, catViz.maxCm) : null;
 
     const square = document.createElement('div');
     square.className = 'board-cell__square';
     square.classList.toggle('board-cell__square--prev', isPrev);
     square.classList.toggle('board-cell__square--valid', isValid);
+    if (catViz) {
+      square.classList.add('board-cell__square--cat');
+      if (skipped) {
+        square.classList.add('board-cell__square--skipped');
+      }
+      if (overlay) {
+        const tint = document.createElement('div');
+        tint.className = 'board-cell__cat-tint';
+        tint.style.backgroundColor = overlay.fill;
+        square.appendChild(tint);
+      }
+    }
     square.dataset.action = key;
     square.dataset.isValid = String(isValid);
+    if (catViz) {
+      square.title = skipped
+        ? 'Skipped — unreachable void'
+        : heat > 0
+          ? `CAT ${heat} cm`
+          : 'Cold — LMR depth only';
+    }
 
     if (pawnPlayer >= 0) {
       const pawn = document.createElement('div');
@@ -211,8 +256,9 @@ function renderBoardCell({
     const wallType = cellType === 'horizontalWall' ? WallType.Horizontal : WallType.Vertical;
     const key = toAlgebraic({ coordinate, wallType });
     const owner = wallOwners.get(key);
-    const isValid = validKeys.has(key) && isHumanTurn;
+    const isValid = validKeys.has(key) && canInteract;
     const isPrev = lastKey === key;
+    const wallCat = catViz?.wallIndex?.get(key);
 
     const wall = document.createElement('div');
     wall.className = 'board-cell__wall';
@@ -232,6 +278,19 @@ function renderBoardCell({
     }
 
     cell.appendChild(wall);
+
+    if (catViz && wallCat?.search && !wallCat.skip && !owner) {
+      const hint = document.createElement('div');
+      hint.className = 'board-cell__cat-wall-hint';
+      hint.classList.add(
+        cellType === 'horizontalWall'
+          ? 'board-cell__cat-wall-hint--h'
+          : 'board-cell__cat-wall-hint--v',
+      );
+      hint.style.setProperty('--cat-wall-color', catWallOutlineColor(wallCat.heat, catViz.maxCm));
+      hint.title = `CAT ${wallCat.heat} cm`;
+      cell.appendChild(hint);
+    }
   }
 
   return cell;
@@ -294,7 +353,7 @@ function parseCoord(text) {
   return { column: text[0], row: Number.parseInt(text[1], 10) };
 }
 
-function renderTurnIndicator(playerNum, playerToMove, playerType, engineStatus, engineErrors, aiThinking, winner) {
+function renderTurnIndicator(playerNum, playerToMove, playerType, engineStatus, engineErrors, aiThinking, winner, freePlay) {
   const wrap = document.createElement('div');
   wrap.className = 'turn-indicator';
 
@@ -302,7 +361,7 @@ function renderTurnIndicator(playerNum, playerToMove, playerType, engineStatus, 
     return wrap;
   }
 
-  if (playerType === 'human') {
+  if (freePlay || playerType === 'human') {
     const dot = document.createElement('div');
     dot.className = `turn-dot turn-dot--player${playerNum}`;
     dot.title = 'Your turn';

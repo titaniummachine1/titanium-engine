@@ -15,12 +15,15 @@ function parseArgs(argv) {
   const opts = {
     games: 4,
     verbose: false,
+    disableBook: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--games' && argv[i + 1]) {
       opts.games = Number(argv[++i]);
+    } else if (arg === '--no-book') {
+      opts.disableBook = true;
     } else if (arg === '--verbose' || arg === '-v') {
       opts.verbose = true;
     }
@@ -33,7 +36,7 @@ async function main() {
   const opts = parseArgs(process.argv);
   const budget = { timeSec: BENCH_TIME_SEC, maxSimulations: BENCH_MAX_SIMULATIONS };
 
-  const titanium = { id: RUST_TITANIUM_ID, engine: 'minimax' };
+  const titanium = { id: RUST_TITANIUM_ID, engine: 'minimax', disableBook: opts.disableBook };
   const gorisanson = { id: GORISANSON_ID };
 
   const live = {
@@ -56,11 +59,14 @@ async function main() {
   });
 
   console.log('Rust Titanium vs Gorisanson MCTS');
-  console.log(`games=${opts.games}  budget=${formatThinkBudget(budget)} (both sides)`);
+  console.log(
+    `games=${opts.games}  budget=${formatThinkBudget(budget)} (both sides)  book=${opts.disableBook ? 'off' : 'pv-hints'}`,
+  );
 
   const started = performance.now();
   const match = await playMatch(titanium, gorisanson, opts.games, {
     ...budget,
+    disableBook: opts.disableBook,
     verbose: opts.verbose,
     onGameStart: ({ gameIndex, whiteId, blackId }) => {
       live.gameIndex = gameIndex;

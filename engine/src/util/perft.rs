@@ -8,13 +8,13 @@ pub const PERFT3_STARTPOS: u64 = 2_062_264;
 /// Startpos perft(4) — Ishtar / Canta oracle (2025).
 pub const PERFT4_STARTPOS: u64 = 247_569_030;
 
-use crate::board::{Board, Move};
-use crate::context::{SharedState, WorkerContext};
-use crate::moves::{generate_legal_moves_into, generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::core::board::{Board, Move};
+use crate::movegen::{generate_legal_moves_into, generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::path::BfsScratch;
+use crate::search::context::{SharedState, WorkerContext};
 use std::collections::BTreeMap;
 
-/// Back-compat name — prefer [`WorkerContext`] + [`SharedState`] or [`crate::context::Engine`].
+/// Back-compat name — prefer [`WorkerContext`] + [`SharedState`] or [`crate::search::context::Engine`].
 pub type PerftContext = WorkerContext;
 
 pub fn perft_fast_ctx(
@@ -122,9 +122,9 @@ pub fn perft_naive(board: &Board, depth: u32) -> u64 {
     nodes
 }
 
-/// Default perft entry — single-thread [`crate::engine::Engine`].
+/// Default perft entry — single-thread [`crate::search::runtime::Engine`].
 pub fn perft(board: &Board, depth: u32) -> u64 {
-    crate::engine::Engine::new().perft(board, depth)
+    crate::search::runtime::Engine::new().perft(board, depth)
 }
 
 pub fn perft_divide(board: &Board, depth: u32) -> (u64, BTreeMap<String, u64>) {
@@ -155,8 +155,8 @@ pub fn format_move(mv: Move) -> String {
             orientation,
         } => {
             let suffix = match orientation {
-                crate::board::WallOrientation::Horizontal => 'h',
-                crate::board::WallOrientation::Vertical => 'v',
+                crate::core::board::WallOrientation::Horizontal => 'h',
+                crate::core::board::WallOrientation::Vertical => 'v',
             };
             format!("{}{}{}", Board::column_char(col), row + 1, suffix)
         }
@@ -166,8 +166,8 @@ pub fn format_move(mv: Move) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::Engine;
-    use crate::moves::generate_legal_moves;
+    use crate::movegen::generate_legal_moves;
+    use crate::search::runtime::Engine;
 
     #[test]
     fn perft_depth1_start() {
