@@ -94,11 +94,13 @@ Rust gives runway. **Smarts spend it.** That's what [gorisanson](https://github.
 
 ---
 
-## What we're NOT doing yet
+## What changed since this script was written (Jun 2026)
 
-- No αβ / MCTS (gorisanson's thing) — Phase 2
-- No pruning “stupid” walls in perft — correctness first
-- No make/unmake — we clone the board (fine for perft depth 2–3, painful at depth 4)
+- **αβ search ships** — ID negamax + CAT prune + adaptive LMR (MCTS deprecated in Rust engine)
+- **Make/unmake + TT + flood fill** — perft d4 **~3.4s** (247M nodes), not minutes
+- **Perft still full legality** — wall pruning is for search only
+
+*The narration below is still valid for early episodes; update live demos to `perft 3` or timed `perft 4` (~3s).*
 
 ---
 

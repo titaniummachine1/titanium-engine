@@ -7,11 +7,12 @@ Save this file. Record in any order; episodes are checkpointed in git.
 1. Scraped a Quoridor site — AI is on a server, not in the bundle
 2. Built **Titanium Engine** in Rust — rules first, speed second
 3. Perft caught our first real bug — fixed with divide debugging
-4. **Plot twist:** Rust crushes perft 3, but perft 4 still hurts — compute isn't enough without make/unmake + pruning + TT
+4. **Plot twist:** Rust crushes perft 3; perft 4 needed make/unmake + TT + flood fill — now **~3.4s** (not minutes)
 5. Threading prep — `Engine` layout + root-parallel perft bench (`thread-bench`)
-6. Hybrid search — MCTS ↔ minimax, LMR, terminal bench vs Ka
-7. **Search hardening** — perft was fine; negamax stop/tie-break/qsearch/CAT gap bugs; raw CAT overlay on web
-8. Next: BFS cache per node, killer/history, depth-4 search @ 3s midgame
+6. ~~Hybrid MCTS~~ → **pure αβ + adaptive LMR** (MCTS deprecated, routes to negamax)
+7. **Search hardening** — negamax stop/tie-break/qsearch/CAT gap bugs; raw CAT overlay on web
+8. **Perft closure** — timed d4 regression test; incremental board masks tried and rejected
+9. **Next:** eval quality, BFS cache in search, opening depth vs Gorisanson
 
 ## Episode list
 
@@ -25,7 +26,7 @@ Save this file. Record in any order; episodes are checkpointed in git.
 | 06  | [06-threading-prep.md](06-threading-prep.md)             | Titanium vs Titanium               |
 | 07  | [07-ai-opponents.md](07-ai-opponents.md)                 | Gorisanson local boss              |
 | 08  | [08-greedy-ui-lab.md](08-greedy-ui-lab.md)               | Testing lab UI + greedy `genmove`  |
-| 10  | [10-hybrid-search.md](10-hybrid-search.md)               | MCTS↔minimax bridge                |
+| 10  | [10-hybrid-search.md](10-hybrid-search.md)               | ~~MCTS↔minimax~~ (historical; MCTS deprecated) |
 | 11  | [11-search-hardening.md](11-search-hardening.md)         | Weird moves, gaps, qsearch, CAT UI |
 | —   | [00-HOW-THE-ENGINE-WORKS.md](00-HOW-THE-ENGINE-WORKS.md) | Narration script                   |
 | —   | [CAT-VIEW-UI.md](CAT-VIEW-UI.md)                         | Debug overlay spec                 |
@@ -46,7 +47,9 @@ See [README.md](README.md) for branch names and commit hashes.
 | [pavlosdais/Quoridor](https://github.com/pavlosdais/Quoridor)       | C αβ competition engine; wall geometry |
 | quoridor-ai.netlify.app                                             | Rules oracle (scraped)                 |
 
-## Do NOT run in videos
+## Do NOT run in videos (outdated warnings)
 
-- `perft 4` from startpos — **minutes**, looks like a hang
-- Use `perft-race 3` or `perft 3` instead
+- ~~`perft 4` takes minutes~~ — **obsolete.** Release build: **~3.4s**, 247M nodes. Safe for demos on idle CPU.
+- Still prefer **`perft 3`** or **`perft-race 3`** for quick correctness beats (2M nodes, instant).
+- Do **not** run perft under heavy parallel `cargo build` — CPU contention inflates times (~10× false regression).
+- Use `cargo test --release perft_depth4 -- --ignored --nocapture` for timed regression with 10s cap.

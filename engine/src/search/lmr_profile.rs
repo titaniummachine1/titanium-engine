@@ -1,7 +1,7 @@
 //! Adaptive LMR profile and mate-zone controller for iterative deepening.
 
-use crate::search::pipeline::walls_placed;
 use crate::core::board::Board;
+use crate::search::pipeline::walls_placed;
 
 pub const HOT_CM_OPENING: u16 = 60;
 pub const HOT_CM_MID: u16 = 40;
@@ -12,8 +12,7 @@ pub const MATE_REFINE_SLACK: u32 = 4;
 pub const MATE_SPIN_MAX_MARGINAL_NODES: u64 = 15_000;
 pub const MATE_MAX_TRUSTED_DIST: u32 = 64;
 
-/// Non-mate: stop ID when score is flat and each depth costs almost nothing (ply38 d53 case).
-pub const EVAL_SPIN_MAX_MARGINAL_NODES: u64 = 20_000;
+/// Non-mate: stop ID when root score is flat for several depths (ply37 d53 spin case).
 pub const EVAL_SPIN_STABLE_ITERS: u32 = 3;
 /// Centipawns (×100 cm) — max root-score change to count as "stable".
 pub const EVAL_STABLE_SCORE_DELTA: i32 = 200;
@@ -243,9 +242,7 @@ impl MateZoneState {
             return Some(MateStopReason::RefineCeiling);
         }
 
-        if self.stable_iters >= 2
-            && marginal_nodes < MATE_SPIN_MAX_MARGINAL_NODES
-            && depth >= dist
+        if self.stable_iters >= 2 && marginal_nodes < MATE_SPIN_MAX_MARGINAL_NODES && depth >= dist
         {
             return Some(MateStopReason::MateSpin);
         }
@@ -287,12 +284,7 @@ pub fn apply_depth_feedback(
 }
 
 impl EvalZoneState {
-    pub fn update_after_depth(
-        &mut self,
-        verified: i32,
-        depth: u32,
-        marginal_nodes: u64,
-    ) -> bool {
+    pub fn update_after_depth(&mut self, verified: i32, depth: u32, marginal_nodes: u64) -> bool {
         if is_mate_score(verified) {
             self.last_score = None;
             self.stable_iters = 0;
@@ -310,9 +302,8 @@ impl EvalZoneState {
         }
         self.last_score = Some(verified);
 
-        self.stable_iters >= EVAL_SPIN_STABLE_ITERS
-            && marginal_nodes < EVAL_SPIN_MAX_MARGINAL_NODES
-            && depth >= 12
+        let _ = marginal_nodes;
+        self.stable_iters >= EVAL_SPIN_STABLE_ITERS && depth >= 12
     }
 }
 
@@ -344,7 +335,10 @@ mod tests {
         let board = Board::new();
         let long_race = compute_stage_t(&board, 12, 12, 200, 80);
         let short_race = compute_stage_t(&board, 4, 4, 200, 80);
-        assert!(long_race < short_race, "long={long_race} short={short_race}");
+        assert!(
+            long_race < short_race,
+            "long={long_race} short={short_race}"
+        );
     }
 
     #[test]
@@ -353,7 +347,10 @@ mod tests {
         let t = compute_stage_t(&board, 8, 8, 0, 0);
         assert!((0.0..=1.0).contains(&t));
         let flat = compute_stage_t(&board, 8, 8, 200, 200);
-        assert!(flat > t, "flat heat spread should increase t; guard={t} flat={flat}");
+        assert!(
+            flat > t,
+            "flat heat spread should increase t; guard={t} flat={flat}"
+        );
     }
 
     #[test]
@@ -382,6 +379,24 @@ mod tests {
             }
         }
         assert!(stopped);
+    }
+
+    #[test]
+    fn eval_zone_stops_even_when_depth_is_expensive() {
+        let mut zone = EvalZoneState::default();
+        let score = -169;
+        let mut stopped = false;
+        for depth in 1..=40 {
+            if zone.update_after_depth(score, depth, 800_000) {
+                stopped = true;
+                assert!(depth >= 12);
+                break;
+            }
+        }
+        assert!(
+            stopped,
+            "stable eval should stop ID even when each depth is costly"
+        );
     }
 
     #[test]

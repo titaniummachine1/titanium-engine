@@ -17,7 +17,8 @@
 
 ```bash
 cd engine
-cargo test                              # includes perft_depth3_matches_js_oracle
+cargo test --release                    # includes perft_depth3_matches_js_oracle
+cargo test --release perft_depth4 -- --ignored --nocapture   # timed d1..d4, 10s cap on d4
 cargo run --release -- perft            # same as perft 3
 cargo run --release -- perft-id 3       # iterative deepening 0..3
 cargo run --release -- divide           # divide at depth 3
@@ -73,7 +74,9 @@ We moved to Rust expecting to “just go deeper.” Reality:
 | Serious perft depth | 6+          | **3** (2M nodes)               |
 | Depth 4             | routine     | **~250M nodes** even optimized |
 
-**Rust + make/unmove made depth 3 trivial and depth 4 tractable (~7s).** Depth 5+ is still exponential — search will need pruning, not more perft tricks.
+**Rust + make/unmove + flood fill made depth 3 trivial and depth 4 ~3.4s.** Depth 5+ is still exponential — search needs pruning, not more perft tricks.
+
+**Build pitfall:** stale `target-bench/` or `CARGO_TARGET_DIR` env → false ~40s d4 readings. Always benchmark `engine/target/release/titanium.exe` after `cargo build --release`.
 
 For **search** (not correctness perft), the same rule applies: raw move gen × naive tree walk dies. That’s why gorisanson [prunes walls in MCTS](https://github.com/gorisanson/quoridor-ai) and pavlosdais uses αβ + TT — not because JS/C is slow, but because **dumb full trees are impossible**.
 

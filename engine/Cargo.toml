@@ -22,6 +22,7 @@ rand = "0.8"
 rayon = "1.10"
 
 [dev-dependencies]
+core_affinity = "0.8"
 criterion = "0.5"
 
 [[bench]]

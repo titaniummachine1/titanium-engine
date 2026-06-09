@@ -58,7 +58,7 @@ e2 e8 e3 e7 e4 e6 d1h d6h f1h e5 e6 f6h d6 c5v d5 d4 c1v c4 d4 c3 b2h b5h b3v e1
 | 39  | h4   | **d31** | +30.37 | PV frozen d17–d28; d29–31 tweak wall order only |
 | 41  | i4   | **d31** | +31.89 | Same class                                      |
 
-→ Symmetric bug to Game A ply38 **d53 @ -3.63**: stable eval + cheap marginal depths. **Eval-spin guard should fire here** (3+ stable iters, marginal < 20k).
+→ Symmetric bug to Game A ply38 **d53 @ -3.63**: stable eval + cheap marginal depths. **Fixed in engine:** eval-zone stop at `stable_iters ≥ 3 && depth ≥ 12` (no marginal_nodes gate) — **re-validate on replay**.
 
 **Mate sequence (ply 43–55):** Mate scores appear; search stops early:
 

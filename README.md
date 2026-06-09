@@ -1,6 +1,6 @@
 # Titanium Quoridor
 
-**Titanium Engine** — hybrid Quoridor AI (αβ + guided MCTS) with a reverse-engineered play UI.
+**Titanium Engine** — Quoridor AI (**iterative-deepening αβ + CAT corridor pruning**) with a reverse-engineered play UI. Legacy MCTS path is deprecated (routes to negamax).
 
 Repo: [github.com/titaniummachine1/titanium-quoridor](https://github.com/titaniummachine1/titanium-quoridor)
 
@@ -48,10 +48,10 @@ node benchmark/titanium_vs_ishtar.mjs --games 1
 
 ## Engine roadmap
 
-1. **Phase 1** — Board, eval (dual BFS), iterative deepening αβ, Zobrist TT, aspiration windows
-2. **Phase 2** — Gorisanson-style guided MCTS, seeded from Phase 1 PV
-3. **Hybrid** — Time-split tactical + rollout phases
-4. **Bench** — vs MCTS JS, vs Ishtar@Short (external exam)
+1. **Phase 1** — Board, eval (dual BFS), iterative deepening αβ, Zobrist TT, aspiration windows ✅
+2. **Phase 2 (current)** — Adaptive LMR, mate/eval zone ID stops, CAT v3 prune, opening depth
+3. ~~Guided MCTS hybrid~~ — **deprecated** (`search/deprecated/mcts.rs`); all `genmove` routes to negamax
+4. **Bench** — vs Gorisanson MCTS JS, vs Ishtar@Short (external exam)
 
 ## Documentation
 

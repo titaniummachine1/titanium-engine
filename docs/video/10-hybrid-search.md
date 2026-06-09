@@ -1,5 +1,7 @@
 # Episode 10 — Hybrid search (MCTS ↔ minimax)
 
+> **Status (Jun 2026):** Historical episode for the **JS Gorisanson lab** hybrid. The **Rust Titanium engine** deprecated MCTS — all `genmove` routes to pure negamax + adaptive LMR. Keep this doc for the web-worker arc; do not describe Rust as MCTS-hybrid in new recordings.
+
 - **branch:** _(checkpoint when ready)_
 - **commit:** _(update after tag)_
 - **tag:** `checkpoint-10-hybrid-search`

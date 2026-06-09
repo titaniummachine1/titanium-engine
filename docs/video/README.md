@@ -19,6 +19,10 @@ After each checkpoint commit, update the `commit:` line with `git rev-parse --sh
 
 **Perft debug:** `node benchmark/perft_diff.mjs 2` — divide diff vs JS oracle.
 
+**Perft regression (Rust):** `cargo test --release perft_depth4 -- --ignored --nocapture` — timed d1..d4, ~3.5s total on idle CPU.
+
+**Outdated:** "perft 4 takes minutes" — release d4 is **~3.4s** (see `PERFT-BENCHMARKS.md`).
+
 **CAT overlay:** [CAT-VIEW-UI.md](CAT-VIEW-UI.md) · spec [CAT-SPEC.md](CAT-SPEC.md) · wall shape [CAT-v3-wall-shape.md](CAT-v3-wall-shape.md)
 
 **Future Elo ladder:** [TOURNAMENT-ROADMAP.md](TOURNAMENT-ROADMAP.md) · machine list: `benchmark/checkpoints.json`

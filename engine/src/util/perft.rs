@@ -8,6 +8,12 @@ pub const PERFT3_STARTPOS: u64 = 2_062_264;
 /// Startpos perft(4) — Ishtar / Canta oracle (2025).
 pub const PERFT4_STARTPOS: u64 = 247_569_030;
 
+/// Max wall time for perft(4) in the ignored regression test.
+pub const PERFT4_TEST_TIMEOUT_SECS: u64 = 10;
+
+/// Per-depth timeout floor — each depth runs in its own thread; budget is `2×` previous depth.
+pub const PERFT_DEPTH_TIMEOUT_FLOOR_MS: u64 = 250;
+
 use crate::core::board::{Board, Move};
 use crate::movegen::{
     generate_legal_moves_into, generate_legal_moves_slice, generate_legal_moves_slice_mode,
@@ -200,6 +206,160 @@ mod tests {
     use super::*;
     use crate::movegen::generate_legal_moves;
     use crate::search::runtime::Engine;
+    use core_affinity::CoreId;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct TimedPerftResult {
+        nodes: u64,
+        worker_elapsed: Duration,
+        wall_elapsed: Duration,
+        worker_core: usize,
+        timer_core: usize,
+    }
+
+    const PERFT_ORACLE: [(u32, u64); 5] = [
+        (0, 1),
+        (1, 131),
+        (2, 16_677),
+        (3, PERFT3_STARTPOS),
+        (4, PERFT4_STARTPOS),
+    ];
+
+    fn oracle_nodes(depth: u32) -> u64 {
+        PERFT_ORACLE
+            .iter()
+            .find(|(d, _)| *d == depth)
+            .map(|(_, n)| *n)
+            .unwrap_or_else(|| panic!("no oracle for perft depth {depth}"))
+    }
+
+    fn core_ids() -> Vec<CoreId> {
+        core_affinity::get_core_ids().unwrap_or_else(|| vec![CoreId { id: 0 }])
+    }
+
+    /// P-core-ish slot — last logical core is often an E-core on hybrid CPUs.
+    fn perft_worker_core() -> CoreId {
+        let ids = core_ids();
+        if ids.len() >= 4 {
+            ids[2]
+        } else if ids.len() >= 2 {
+            ids[1]
+        } else {
+            ids[0]
+        }
+    }
+
+    fn perft_timer_core() -> CoreId {
+        let ids = core_ids();
+        if ids.len() >= 8 {
+            *ids.last().unwrap_or(&ids[0])
+        } else if ids.len() > 1 {
+            ids[1]
+        } else {
+            ids[0]
+        }
+    }
+
+    fn pin_current_to_core(core: CoreId) -> usize {
+        let id = core.id;
+        if !core_affinity::set_for_current(core) {
+            eprintln!("warning: could not pin to core {id}");
+        }
+        id
+    }
+
+    fn run_perft_depth_timed(depth: u32, timeout: Duration) -> Result<TimedPerftResult, ()> {
+        let (done_tx, done_rx) = mpsc::channel::<(u64, Duration)>();
+        let (watch_tx, watch_rx) = mpsc::sync_channel::<Result<TimedPerftResult, ()>>(1);
+
+        let worker_core = perft_worker_core();
+        let timer_core = perft_timer_core();
+        let worker_core_id = worker_core.id;
+        let timer_core_id = timer_core.id;
+
+        let worker_handle = std::thread::Builder::new()
+            .name(format!("perft-d{depth}-worker"))
+            .spawn(move || {
+                pin_current_to_core(worker_core);
+                let board = Board::new();
+                let mut fast_board = board.clone();
+                let t0 = Instant::now();
+                let nodes = perft_fast(&mut fast_board, depth);
+                let _ = done_tx.send((nodes, t0.elapsed()));
+            })
+            .expect("spawn perft worker");
+
+        let _watcher_handle = std::thread::Builder::new()
+            .name(format!("perft-d{depth}-timer"))
+            .spawn(move || {
+                pin_current_to_core(timer_core);
+                let wall_start = Instant::now();
+                let outcome = match done_rx.recv_timeout(timeout) {
+                    Ok((nodes, worker_elapsed)) => Ok(TimedPerftResult {
+                        nodes,
+                        worker_elapsed,
+                        wall_elapsed: wall_start.elapsed(),
+                        worker_core: worker_core_id,
+                        timer_core: timer_core_id,
+                    }),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                    | Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+                };
+                let _ = watch_tx.send(outcome);
+            })
+            .expect("spawn perft timer");
+
+        let result = watch_rx.recv().expect("perft timer thread");
+
+        match &result {
+            Ok(_) => {
+                worker_handle.join().ok();
+            }
+            Err(()) => {
+                std::mem::forget(worker_handle);
+            }
+        }
+
+        result
+    }
+
+    fn log_partial_perft(results: &[(u32, u64, Duration, Duration)]) {
+        eprintln!("--- perft partial results ---");
+        for (depth, nodes, worker_ms, wall_ms) in results {
+            eprintln!(
+                "perft {depth} {nodes} worker_ms={:.1} wall_ms={:.1}",
+                worker_ms.as_secs_f64() * 1000.0,
+                wall_ms.as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    fn fail_perft_timeout(
+        depth: u32,
+        budget: Duration,
+        completed: &[(u32, u64, Duration, Duration)],
+    ) {
+        log_partial_perft(completed);
+        eprintln!(
+            "perft({depth}) TIMEOUT after {:.0}ms — aborting (worker left detached)",
+            budget.as_secs_f64() * 1000.0
+        );
+        std::process::exit(1);
+    }
+
+    fn depth_timeout_budget(depth: u32, prev_elapsed: Duration) -> Duration {
+        if depth == 4 {
+            return Duration::from_secs(PERFT4_TEST_TIMEOUT_SECS);
+        }
+        let min = match depth {
+            1 => Duration::from_millis(500),
+            2 => Duration::from_millis(500),
+            3 => Duration::from_secs(2),
+            _ => Duration::from_millis(PERFT_DEPTH_TIMEOUT_FLOOR_MS),
+        };
+        prev_elapsed.saturating_mul(2).max(min)
+    }
 
     #[test]
     fn perft_depth1_start() {
@@ -261,12 +421,33 @@ mod tests {
         assert_eq!(lines.last().map(|x| x.1), Some(PERFT3_STARTPOS));
     }
 
-    /// Full-tree regression — run with `cargo test --release perft_depth4 -- --ignored`.
+    /// Depths 1→4: worker on a P-core, timer on another; d4 budget 10s; `exit(1)` on timeout.
     #[test]
-    #[ignore = "slow in debug; run: cargo test --release perft_depth4 -- --ignored"]
+    #[ignore = "slow; release: cargo test --release perft_depth4 -- --ignored --nocapture"]
     fn perft_depth4_matches_oracle() {
-        let board = Board::new();
-        let mut fast_board = board.clone();
-        assert_eq!(perft_fast(&mut fast_board, 4), PERFT4_STARTPOS);
+        let mut completed: Vec<(u32, u64, Duration, Duration)> = Vec::with_capacity(4);
+        let mut prev_elapsed = Duration::from_millis(PERFT_DEPTH_TIMEOUT_FLOOR_MS);
+
+        for depth in 1..=4 {
+            let budget = depth_timeout_budget(depth, prev_elapsed);
+            match run_perft_depth_timed(depth, budget) {
+                Ok(r) => {
+                    eprintln!(
+                        "perft {depth} {} worker_ms={:.1} wall_ms={:.1} budget_ms={:.0} \
+                         cores worker={} timer={}",
+                        r.nodes,
+                        r.worker_elapsed.as_secs_f64() * 1000.0,
+                        r.wall_elapsed.as_secs_f64() * 1000.0,
+                        budget.as_secs_f64() * 1000.0,
+                        r.worker_core,
+                        r.timer_core,
+                    );
+                    assert_eq!(r.nodes, oracle_nodes(depth), "perft({depth}) node mismatch");
+                    prev_elapsed = r.worker_elapsed;
+                    completed.push((depth, r.nodes, r.worker_elapsed, r.wall_elapsed));
+                }
+                Err(()) => fail_perft_timeout(depth, budget, &completed),
+            }
+        }
     }
 }

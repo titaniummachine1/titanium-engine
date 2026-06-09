@@ -276,6 +276,42 @@ perft_diff → only d8v and e8v subtrees differ
 
 ---
 
+## 22. Incremental `DirMasks` on `Board` regressed perft ~12×
+
+**Symptom:** After wiring `dir_masks` into `set_wall` + `Board`, d4 jumped **~3.4s → ~20–40s** (same node count).
+
+**Cause:** Patching masks on every wall make/unmake in the perft tree dominates; wall edges ≫ movegen nodes. One `DirMasks::from_board` per node (scratch hash cache) is cheaper.
+
+**Fix:** Reverted on-board incremental masks. Kept `BfsScratch` hash-keyed cache + `ShiftCanStep` pawns.
+
+**Lesson:** Perft optimizations must account for **wall branching in the tree**, not just movegen at each node.
+
+---
+
+## 23. Eval-zone ID spin (ply37 d53 @ -1.69)
+
+**Symptom:** Game A ply37: eval flat at **-1.69**, ID spun **d36→d57** burning full 10s budget.
+
+**Cause:** `EvalZoneState` required `marginal_nodes < 20_000` per depth — deep cheap iterations never triggered stop.
+
+**Fix:** Stop when `stable_iters ≥ 3 && depth ≥ 12` regardless of marginal node cost.
+
+**Lesson:** "Cheap depth" is relative; stable eval means **stop**, not "keep going because nodes are small."
+
+---
+
+## 24. False perft regression from stale `target-bench` + E-core pinning
+
+**Symptom:** d4 appeared ~40s or timed out at 10s while CLI on `target/release` showed ~3.4s.
+
+**Cause:** (1) `CARGO_TARGET_DIR=target-bench` stale binary. (2) Timed test pinned worker to last logical core (E-core on hybrid CPUs).
+
+**Fix:** Benchmark `target/release`; pin worker to core 2 in timed test.
+
+**Lesson:** Always verify binary path and CPU core class before claiming a perf regression.
+
+---
+
 ## Oracle stack (for cross-platform debugging)
 
 1. **Primary:** scraped `web/src/lib/gameLogic.js` (netlify UI rules)

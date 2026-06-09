@@ -102,6 +102,30 @@ Depth 4 matches Ishtar/Canta oracle. Regression: `PERFT4_STARTPOS` test (`cargo 
 
 ---
 
+## Layer 5 — Pawn `ShiftCanStep` + timed regression (Jun 2026)
+
+| Change | Why |
+| ------ | --- |
+| `PawnGenMode::ShiftCanStep` default | No `DirMasks` table per pawn node — blind shift + `can_step` wall check |
+| Smart perft test `perft_depth4_matches_oracle` | Depths 1→4 sequential, per-depth timeout, core pinning, `exit(1)` on hang |
+| `core_affinity` dev-dep | Pin worker to P-core (not last logical E-core on hybrid CPUs) |
+
+**Measured:** d4 **~3.2–3.4s** on idle CPU; timed test passes in ~3.5s wall.
+
+---
+
+## Layer 5b — Incremental `DirMasks` on `Board` (REJECTED)
+
+**Idea:** Patch masks in `set_wall`; read `board.dir_masks` in BFS instead of scratch `from_board`.
+
+**Result:** perft d4 **~3s → ~20–40s** (~12× regression).
+
+**Why:** Perft explores every wall edge in the tree — patching on each wall make/unmake costs more than one `DirMasks::from_board` per movegen node. The existing **`BfsScratch` hash-keyed cache** is the correct tradeoff.
+
+**Lesson:** Incremental topology on `Board` may help search (fewer wall plies after pruning), not correctness perft.
+
+---
+
 ## What we deliberately did NOT do (yet)
 
 | Idea                                      | Why wait                                                      |
@@ -109,7 +133,8 @@ Depth 4 matches Ishtar/Canta oracle. Regression: `PERFT4_STARTPOS` test (`cargo 
 | Probable-wall pruning                     | Breaks full perft legality — for **search** only (gorisanson) |
 | Parallel perft                            | Correctness/debug pain; search parallelism comes later        |
 | `Move` as `u16` packing                   | Nice, but not the bottleneck                                  |
-| Reachability cache on `Board`             | Invalidation complexity; revisit for eval in search           |
+| Incremental `DirMasks` on `Board`         | **Tried — regressed perft ~12×** (see Layer 5b)               |
+| Reachability cache on `Board`             | Invalidation complexity; revisit for **eval in search**       |
 | Skip wall gen when `walls_remaining == 0` | Already done                                                  |
 
 ---
