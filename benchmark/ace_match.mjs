@@ -9,11 +9,20 @@
  */
 
 import { chooseTitaniumMove } from './lib/titanium_ai.mjs';
+import { randomOpeningMoves } from './lib/quoridor_v3_ai.mjs';
 
 const MAX_PLIES = 250;
 
 function parseArgs(argv) {
-  const opts = { white: 'ace', black: 'ace-cat', games: 6, timeSec: 1, workers: 3 };
+  const opts = {
+    white: 'ace',
+    black: 'ace-cat',
+    games: 6,
+    timeSec: 1,
+    workers: 3,
+    openPlies: 4,
+    seed: 1,
+  };
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--white' && argv[i + 1]) opts.white = argv[++i];
@@ -21,6 +30,8 @@ function parseArgs(argv) {
     else if (arg === '--games' && argv[i + 1]) opts.games = Number(argv[++i]);
     else if (arg === '--time' && argv[i + 1]) opts.timeSec = Number(argv[++i]);
     else if (arg === '--workers' && argv[i + 1]) opts.workers = Number(argv[++i]);
+    else if (arg === '--open-plies' && argv[i + 1]) opts.openPlies = Number(argv[++i]);
+    else if (arg === '--seed' && argv[i + 1]) opts.seed = Number(argv[++i]);
   }
   return opts;
 }
@@ -31,10 +42,10 @@ function goalReached(move, ply) {
   return isWhitePly ? move[1] === '9' : move[1] === '1';
 }
 
-async function playGame(gameIndex, whiteEngine, blackEngine, timeSec) {
-  const history = [];
+async function playGame(gameIndex, whiteEngine, blackEngine, timeSec, opening = []) {
+  const history = [...opening];
   const depths = { [whiteEngine]: [], [blackEngine]: [] };
-  for (let ply = 1; ply <= MAX_PLIES; ply++) {
+  for (let ply = history.length + 1; ply <= MAX_PLIES; ply++) {
     const engine = ply % 2 === 1 ? whiteEngine : blackEngine;
     const { move, meta } = await chooseTitaniumMove(history, {
       engine,
@@ -80,8 +91,13 @@ async function main() {
     const swap = i % 2 === 1;
     const whiteEngine = swap ? opts.black : opts.white;
     const blackEngine = swap ? opts.white : opts.black;
+    // one opening per color-swapped pair
+    const opening =
+      opts.openPlies > 0
+        ? randomOpeningMoves(opts.openPlies, opts.seed + Math.floor(i / 2))
+        : [];
     tasks.push(async () => {
-      const r = await playGame(i + 1, whiteEngine, blackEngine, opts.timeSec);
+      const r = await playGame(i + 1, whiteEngine, blackEngine, opts.timeSec, opening);
       const winnerEngine =
         r.winner === 'draw' ? 'draw' : r.winner === 'white' ? whiteEngine : blackEngine;
       console.log(

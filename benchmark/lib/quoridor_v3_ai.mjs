@@ -34,6 +34,33 @@ function loadEngine() {
  * @param {string[]} algebraicHistory
  * @param {{ timeMs?: number, maxDepth?: number }} [opts]
  */
+/**
+ * Seeded random opening — pawn-biased legal moves, for match variety.
+ * Same seed → same opening, so color-swapped pairs share positions.
+ */
+export function randomOpeningMoves(plies = 4, seed = 1) {
+  loadEngine();
+  let s = (seed >>> 0) || 1;
+  const rnd = () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5; s >>>= 0;
+    return s / 4294967296;
+  };
+  const game = new Quoridor();
+  const out = [];
+  for (let i = 0; i < plies; i++) {
+    const legal = game.legalMoves();
+    const pawns = legal.filter((m) => m < 100);
+    const walls = legal.filter((m) => m >= 100);
+    const pool = walls.length === 0 || rnd() < 0.7 ? pawns : walls;
+    const pick = pool[Math.floor(rnd() * pool.length)];
+    out.push(v3MoveToAlgebraic(pick));
+    game.makeMove(pick);
+  }
+  return out;
+}
+
 export function chooseQuoridorV3Move(algebraicHistory = [], opts = {}) {
   loadEngine();
   const timeMs = opts.timeMs ?? 500;
