@@ -11,7 +11,8 @@ import {
   winnerIndex,
 } from './gorisanson_ai.mjs';
 import { chooseTitaniumMove } from './titanium_ai.mjs';
-import { RUST_TITANIUM_ID, GORISANSON_ID, assertRustTitaniumId } from './engine_ids.mjs';
+import { chooseQuoridorV3Move } from './quoridor_v3_ai.mjs';
+import { RUST_TITANIUM_ID, GORISANSON_ID, QUORIDOR_V3_ID, assertRustTitaniumId } from './engine_ids.mjs';
 import { encodeReplayFromAlgebraic, formatReplayBlock } from './replay_code.mjs';
 import { termLine, termThinking } from './terminal_log.mjs';
 import { printPlyCompact, printFinalPosition, printSearchDepth } from './terminal_reporter.mjs';
@@ -37,6 +38,11 @@ export function defaultPlayerConfigs({ timeSec = 10, gorisansonTimeSec = 10 } = 
       timeSec: gorisansonTimeSec,
       maxSimulations: Number(process.env.GORISANSON_MAX_VISITS ?? GORISANSON_MAX_VISITS),
     },
+    quoridorV3: {
+      id: QUORIDOR_V3_ID,
+      timeSec: 0.5,
+      maxDepth: 24,
+    },
   };
 }
 
@@ -47,6 +53,9 @@ function engineLabel(cfg, budget) {
   if (cfg.id === RUST_TITANIUM_ID) {
     const mode = cfg.engine === 'minimax' ? 'Minimax' : 'MCTS';
     return `Rust Titanium ${mode} (${budget.timeSec}s/${formatSimsCap(budget.maxSimulations)})`;
+  }
+  if (cfg.id === QUORIDOR_V3_ID) {
+    return `Quoridor v3 αβ (${budget.timeMs}ms/d${cfg.maxDepth ?? 24})`;
   }
   return cfg.id;
 }
@@ -141,6 +150,25 @@ async function chooseMove(game, algebraicHistory, playerConfig, ply, options) {
         : undefined,
     });
     const elapsedMs = performance.now() - started;
+    return {
+      move: actionToGorisansonMove(parseAlgebraic(algebraic)),
+      meta,
+      elapsedMs,
+    };
+  }
+
+  if (playerConfig.id === QUORIDOR_V3_ID) {
+    const started = performance.now();
+    const { move: algebraic, meta } = chooseQuoridorV3Move(algebraicHistory, {
+      timeMs: budget.timeMs,
+      maxDepth: playerConfig.maxDepth ?? 24,
+    });
+    const elapsedMs = performance.now() - started;
+    if (logMoves && meta.searchDepth != null) {
+      termLine(
+        `      ply ${ply} v3 depth ${meta.searchDepth} nodes ${formatSims(meta.nodes ?? 0)} · ${(elapsedMs / 1000).toFixed(2)}s`,
+      );
+    }
     return {
       move: actionToGorisansonMove(parseAlgebraic(algebraic)),
       meta,

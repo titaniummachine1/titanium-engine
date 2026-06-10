@@ -931,12 +931,8 @@ fn negamax_inner(
         //   (b) Disturbs the opponent's shortest path (wall).
         // Tactical moves are NEVER reduced or pruned.
         let cat_cm = move_corridor_attention(board, mv, &cat);
-        let heat_ratio_hot = prune::is_lmr_heat_hot(
-            cat_cm,
-            cat_max,
-            profile.cold_cm,
-            profile.hot_ratio_pct,
-        );
+        let heat_ratio_hot =
+            prune::is_lmr_heat_hot(cat_cm, cat_max, profile.cold_cm, profile.hot_ratio_pct);
         let corridor_relevant = cat_cm >= i32::from(profile.cold_cm);
         let is_tactical = if moves_searched == 0 || depth < LMR_MIN_DEPTH {
             true
@@ -959,6 +955,20 @@ fn negamax_inner(
                 moves_searched += 1;
                 continue;
             }
+        }
+
+        // Frontier LMP (quoridor v3) — skip cold late walls at shallow depth when we already have a line.
+        if ply > 0
+            && depth <= 2
+            && i >= 10
+            && matches!(mv, Move::Wall { .. })
+            && cat_cm < i32::from(profile.cold_cm)
+            && !corridor_relevant
+            && !is_tactical
+            && best_score > -MATE + 200
+        {
+            moves_searched += 1;
+            continue;
         }
 
         // [LMR_BLOCK_START]
@@ -1007,6 +1017,8 @@ fn negamax_inner(
         let mut re_searched = false;
         let child_depth_used = if moves_searched == 0 {
             child_depth
+        } else if ply == 0 {
+            cat_child.max(1).min(child_depth)
         } else {
             child_depth.saturating_sub(reduction)
         };
@@ -1019,12 +1031,19 @@ fn negamax_inner(
             } else {
                 search_child(state, board, reduced, alpha, alpha + 1, ply)
             };
-            if s > alpha && (reduction > 0 || s < beta) {
-                if reduction > 0 {
-                    state.lmr_re_searches += 1;
-                    re_searched = true;
+            if s > alpha {
+                let null_fail_low = s < beta;
+                let cat_reresearch = heat_ratio_hot
+                    || is_tactical
+                    || corridor_relevant
+                    || matches!(mv, Move::Pawn { .. });
+                if null_fail_low || (reduction > 0 && cat_reresearch) {
+                    if reduction > 0 {
+                        state.lmr_re_searches += 1;
+                        re_searched = true;
+                    }
+                    s = search_child(state, board, child_depth, alpha, beta, ply);
                 }
-                s = search_child(state, board, child_depth, alpha, beta, ply);
             }
             s
         };

@@ -613,7 +613,12 @@ pub struct CatHeatRefs {
     pub pawns: u16,
 }
 
-pub fn cat_heat_refs(buf: &[Move], n: usize, board: &Board, cat: &CorridorAttention) -> CatHeatRefs {
+pub fn cat_heat_refs(
+    buf: &[Move],
+    n: usize,
+    board: &Board,
+    cat: &CorridorAttention,
+) -> CatHeatRefs {
     let mut refs = CatHeatRefs::default();
     for i in 0..n {
         let cm = move_corridor_attention(board, buf[i], cat).max(0) as u16;
@@ -648,11 +653,16 @@ pub fn cat_heat_child_depth(
         return 1.min(child_depth_full);
     }
     let heat_t = cat_heat_fraction(cat_cm, cat_ref_max, cold_cm);
-    let mut used = (heat_t.powf(1.45) * child_depth_full as f32).round().max(1.0) as u32;
-    if heat_t < 0.12 {
+    // Steep curve — 245cm peak keeps ~full depth; 98cm fringe gets 1–2 plies (not flat 4% nodes).
+    let mut used = (heat_t.powf(2.35) * child_depth_full as f32)
+        .round()
+        .max(1.0) as u32;
+    if heat_t < 0.08 {
+        used = 1;
+    } else if heat_t < 0.18 {
         used = used.min(2);
-    } else if heat_t < 0.30 {
-        used = used.min((child_depth_full / 2).max(2));
+    } else if heat_t < 0.35 {
+        used = used.min((child_depth_full / 3).max(2));
     }
     used.min(child_depth_full)
 }

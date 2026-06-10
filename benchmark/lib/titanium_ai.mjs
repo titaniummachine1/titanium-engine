@@ -4,6 +4,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BENCH_MAX_SIMULATIONS, BENCH_TIME_SEC } from './bench_limits.mjs';
@@ -11,10 +12,20 @@ import { BENCH_MAX_SIMULATIONS, BENCH_TIME_SEC } from './bench_limits.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const BIN_NAME = process.platform === 'win32' ? 'titanium.exe' : 'titanium';
 const DEFAULT_BIN = path.join(ROOT, 'engine', 'target', 'release', BIN_NAME);
+const ALT_BINS = [
+  path.join(ROOT, 'engine', 'target-alt2', 'release', BIN_NAME),
+  path.join(ROOT, 'engine', 'target-alt', 'release', BIN_NAME),
+  DEFAULT_BIN,
+];
 
 function resolveBinary() {
   if (process.env.TITANIUM_BIN) {
     return process.env.TITANIUM_BIN;
+  }
+  for (const candidate of ALT_BINS) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
   return DEFAULT_BIN;
 }
