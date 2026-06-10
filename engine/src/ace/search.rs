@@ -610,11 +610,18 @@ impl AceSearch {
                 self.g.turn ^= 1;
                 self.g.hash_lo ^= z.turn_lo;
                 self.g.hash_hi ^= z.turn_hi;
+                if let Some(bridge) = self.cat.as_mut() {
+                    // keep the mirrored board's side in sync (wall accounting)
+                    bridge.board.side_to_move = bridge.board.side_to_move.opposite();
+                }
                 let res = self.ab(depth - 3, -beta, -beta + 1, ply + 1, false, 0);
                 let z = &ZOBRIST;
                 self.g.turn ^= 1;
                 self.g.hash_lo ^= z.turn_lo;
                 self.g.hash_hi ^= z.turn_hi;
+                if let Some(bridge) = self.cat.as_mut() {
+                    bridge.board.side_to_move = bridge.board.side_to_move.opposite();
+                }
                 self.dist0_idx = nd0;
                 self.dist1_idx = nd1;
                 self.cached_stamp = nst;
