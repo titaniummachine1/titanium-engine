@@ -11,6 +11,7 @@
 //! opening/  book
 //! ```
 
+pub mod ace;
 pub mod cat;
 pub mod core;
 pub mod eval;

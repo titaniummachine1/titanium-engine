@@ -1,0 +1,713 @@
+//! ACE v7 search — 1:1 port of the JS `Search` object.
+//!
+//! Iterative-deepening αβ with aspiration windows, typed TT, killers/history/
+//! countermoves, null move, graduated LMR, frontier LMP, reverse futility,
+//! lazy wall legality, repetition detection, wall-stamp dist caching,
+//! easy-move early stop, HalfPW net eval. Mirrors the JS node-for-node.
+
+use std::time::{Duration, Instant};
+
+use crate::ace::game::{AceGame, ZOBRIST};
+use crate::ace::net::{net, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
+
+pub const MATE: i32 = 100_000;
+pub const MAX_PLY: usize = 64;
+const INF: i32 = 2 * MATE;
+
+const TT_BITS: usize = 20;
+const TT_SIZE: usize = 1 << TT_BITS;
+const TT_MASK: u32 = (TT_SIZE - 1) as u32;
+
+/// Time-abort marker — propagates like the JS `throw "time"`.
+pub struct TimeUp;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ThinkResult {
+    pub mv: i16,
+    pub score: i32,
+    pub depth: i32,
+    pub nodes: u64,
+    pub ms: u64,
+}
+
+pub struct AceSearch {
+    pub g: AceGame,
+    tt_key_hi: Vec<u32>,
+    tt_key_lo: Vec<u32>,
+    tt_meta: Vec<i32>, // move | flag<<10 | depth<<12, 0 = empty
+    tt_score: Vec<i32>,
+    history_tbl: [i32; 512],
+    cm: [i16; 512], // countermove table
+    killers: [[i16; 2]; MAX_PLY],
+    path_lo: [u32; MAX_PLY],
+    path_hi: [u32; MAX_PLY],
+    d0: [[u8; 81]; MAX_PLY],
+    d1: [[u8; 81]; MAX_PLY],
+    dist0_idx: usize, // active ply slot in d0 (JS: this.dist0 array ref)
+    dist1_idx: usize,
+    cached_stamp: i32,
+    // HalfPW accumulator cache
+    np_acc0: [f64; NET_H],
+    np_acc1: [f64; NET_H],
+    np_hw: [u8; 64],
+    np_vw: [u8; 64],
+    np_b0: i32,
+    np_b1v: i32,
+    np_stamp: i32,
+    net: &'static Net,
+    pub nodes: u64,
+    deadline: Instant,
+    root_best: i16,
+    root_score: i32,
+}
+
+impl AceSearch {
+    pub fn new(g: AceGame) -> Box<Self> {
+        Box::new(Self {
+            g,
+            tt_key_hi: vec![0; TT_SIZE],
+            tt_key_lo: vec![0; TT_SIZE],
+            tt_meta: vec![0; TT_SIZE],
+            tt_score: vec![0; TT_SIZE],
+            history_tbl: [0; 512],
+            cm: [0; 512],
+            killers: [[0; 2]; MAX_PLY],
+            path_lo: [0; MAX_PLY],
+            path_hi: [0; MAX_PLY],
+            d0: [[0; 81]; MAX_PLY],
+            d1: [[0; 81]; MAX_PLY],
+            dist0_idx: 0,
+            dist1_idx: 0,
+            cached_stamp: -1,
+            np_acc0: [0.0; NET_H],
+            np_acc1: [0.0; NET_H],
+            np_hw: [0; 64],
+            np_vw: [0; 64],
+            np_b0: -1,
+            np_b1v: -1,
+            np_stamp: -1,
+            net: net(),
+            nodes: 0,
+            deadline: Instant::now(),
+            root_best: 0,
+            root_score: 0,
+        })
+    }
+
+    #[inline(always)]
+    fn check_time(&self) -> Result<(), TimeUp> {
+        if (self.nodes & 1023) == 0 && Instant::now() > self.deadline {
+            return Err(TimeUp);
+        }
+        Ok(())
+    }
+
+    fn refresh_dist(&mut self, ply: usize) {
+        let stamp = self.g.wall_stamp;
+        if self.cached_stamp == stamp {
+            return; // refs already valid for these walls
+        }
+        if self.cached_stamp == stamp - 1 && self.g.hist_len > 0 {
+            // exactly one wall added since the cached config: slots hold its dists.
+            // recompute a player's field only if the wall cuts a shortest-path edge
+            // (|dist diff| === 1); equal-dist edges lie on no shortest path.
+            let m = self.g.hist_m[self.g.hist_len - 1];
+            if m >= 100 {
+                let slot = (m % 100) as usize;
+                let a = (slot >> 3) * 9 + (slot & 7);
+                let (b2, c2, e2) = if m < 200 {
+                    (a + 9, a + 1, a + 10) // hw: two vertical edges
+                } else {
+                    (a + 1, a + 9, a + 10) // vw: two horizontal edges
+                };
+                let d0 = &self.d0[self.dist0_idx];
+                if d0[a] != d0[b2] || d0[c2] != d0[e2] {
+                    self.dist0_idx = ply; // redirect first: never write an ancestor's array
+                    self.g.compute_dist(0, &mut self.d0[ply]);
+                }
+                let d1 = &self.d1[self.dist1_idx];
+                if d1[a] != d1[b2] || d1[c2] != d1[e2] {
+                    self.dist1_idx = ply;
+                    self.g.compute_dist(1, &mut self.d1[ply]);
+                }
+                self.cached_stamp = stamp;
+                return;
+            }
+        }
+        self.dist0_idx = ply; // own arrays: ancestors stay intact
+        self.dist1_idx = ply;
+        self.g.compute_dist(0, &mut self.d0[ply]);
+        self.g.compute_dist(1, &mut self.d1[ply]);
+        self.cached_stamp = stamp;
+    }
+
+    fn evaluate(&mut self) -> i32 {
+        let me = self.g.turn;
+        let opp = 1 - me;
+        let d_me_u = if me == 0 {
+            self.d0[self.dist0_idx][self.g.pawn[0]]
+        } else {
+            self.d1[self.dist1_idx][self.g.pawn[1]]
+        };
+        let d_opp_u = if opp == 0 {
+            self.d0[self.dist0_idx][self.g.pawn[0]]
+        } else {
+            self.d1[self.dist1_idx][self.g.pawn[1]]
+        };
+        let w_me_i = self.g.wl[me];
+        let w_opp_i = self.g.wl[opp];
+        let d_me_i = d_me_u as i32;
+        let d_opp_i = d_opp_u as i32;
+        if w_me_i == 0 && w_opp_i == 0 {
+            // pure race
+            if d_me_i <= d_opp_i {
+                return 3000 + (d_opp_i - d_me_i) * 50 - d_me_i;
+            }
+            return -3000 - (d_me_i - d_opp_i) * 50 + d_opp_i;
+        }
+
+        let d_me = d_me_i as f64;
+        let d_opp = d_opp_i as f64;
+        let w_me = w_me_i as f64;
+        let w_opp = w_opp_i as f64;
+        let nw = self.net;
+        let ws = &nw.ws;
+
+        let pd = d_opp - d_me;
+        let wd = w_me - w_opp;
+        let mut out = ws[0]
+            + ws[1] * pd
+            + ws[2] * wd
+            + ws[3] * d_me
+            + ws[4] * d_opp
+            + ws[9] * pd * (w_me + w_opp) / 20.0
+            + ws[10] * wd * (d_me + d_opp) / 16.0;
+        if w_opp_i == 0 {
+            out += ws[6];
+            if d_me <= d_opp {
+                out += ws[5];
+            }
+        } else if w_me_i == 0 {
+            out += ws[8];
+            if d_opp <= d_me - 1.0 {
+                out += ws[7];
+            }
+        }
+        if d_opp <= 4.0 {
+            out += ws[11] * if w_me < 3.0 { w_me } else { 3.0 };
+        }
+        if d_me <= 4.0 {
+            out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
+        }
+
+        let b0 = NET_BKT[self.g.pawn[0]] as i32;
+        let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
+        let rb0 = b0 != self.np_b0;
+        let rb1 = b1 != self.np_b1v;
+        if rb0 || rb1 {
+            // bucket crossing: rebuild that perspective from scratch
+            if rb0 {
+                self.np_acc0.fill(0.0);
+            }
+            if rb1 {
+                self.np_acc1.fill(0.0);
+            }
+            for s in 0..64 {
+                if self.g.hw[s] != 0 {
+                    if rb0 {
+                        let o = (b0 as usize * 128 + s) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += nw.w1c[o + j];
+                        }
+                    }
+                    if rb1 {
+                        let o = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc1[j] += nw.w1c[o + j];
+                        }
+                    }
+                }
+                if self.g.vw[s] != 0 {
+                    if rb0 {
+                        let o = (b0 as usize * 128 + 64 + s) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += nw.w1c[o + j];
+                        }
+                    }
+                    if rb1 {
+                        let o = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc1[j] += nw.w1c[o + j];
+                        }
+                    }
+                }
+            }
+            if rb0 {
+                self.np_b0 = b0;
+            }
+            if rb1 {
+                self.np_b1v = b1;
+            }
+            self.np_hw.copy_from_slice(&self.g.hw);
+            self.np_vw.copy_from_slice(&self.g.vw);
+            self.np_stamp = self.g.wall_stamp;
+        } else if self.np_stamp != self.g.wall_stamp {
+            // wall diff: one row add per change
+            for s in 0..64 {
+                if self.g.hw[s] != self.np_hw[s] {
+                    let sg = if self.g.hw[s] != 0 { 1.0 } else { -1.0 };
+                    let o0 = (b0 as usize * 128 + s) * NET_H;
+                    let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
+                    for j in 0..NET_H {
+                        self.np_acc0[j] += sg * nw.w1c[o0 + j];
+                        self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                    }
+                    self.np_hw[s] = self.g.hw[s];
+                }
+                if self.g.vw[s] != self.np_vw[s] {
+                    let sg = if self.g.vw[s] != 0 { 1.0 } else { -1.0 };
+                    let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
+                    let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
+                    for j in 0..NET_H {
+                        self.np_acc0[j] += sg * nw.w1c[o0 + j];
+                        self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                    }
+                    self.np_vw[s] = self.g.vw[s];
+                }
+            }
+            self.np_stamp = self.g.wall_stamp;
+        }
+
+        let mut hid = [0.0f64; NET_H];
+        if me == 0 {
+            for j in 0..NET_H {
+                hid[j] = nw.b1[j] + self.np_acc0[j];
+            }
+            let o0 = self.g.pawn[0] * NET_H;
+            for j in 0..NET_H {
+                hid[j] += nw.po[o0 + j];
+            }
+            let o1 = self.g.pawn[1] * NET_H;
+            for j in 0..NET_H {
+                hid[j] += nw.px[o1 + j];
+            }
+        } else {
+            for j in 0..NET_H {
+                hid[j] = nw.b1[j] + self.np_acc1[j];
+            }
+            let o0 = NET_MIRC[self.g.pawn[1]] * NET_H;
+            for j in 0..NET_H {
+                hid[j] += nw.po[o0 + j];
+            }
+            let o1 = NET_MIRC[self.g.pawn[0]] * NET_H;
+            for j in 0..NET_H {
+                hid[j] += nw.px[o1 + j];
+            }
+        }
+        for j in 0..NET_H {
+            let a2 = hid[j].clamp(0.0, 1.0);
+            out += nw.w2[j] * a2 * 200.0;
+        }
+        out as i32
+    }
+
+    fn gen_moves(&mut self, check_legal: bool, out: &mut [i16; 160]) -> usize {
+        let mut n = self.g.gen_pawn_moves(out, 0);
+        if self.g.wl[self.g.turn] > 0 {
+            for slot in 0..64 {
+                if check_legal {
+                    if self.g.wall_legal(0, slot) {
+                        out[n] = 100 + slot as i16;
+                        n += 1;
+                    }
+                    if self.g.wall_legal(1, slot) {
+                        out[n] = 200 + slot as i16;
+                        n += 1;
+                    }
+                } else {
+                    // lazy: geometry only; path-seal checked when the move is searched
+                    if self.g.wall_fits(0, slot) {
+                        out[n] = 100 + slot as i16;
+                        n += 1;
+                    }
+                    if self.g.wall_fits(1, slot) {
+                        out[n] = 200 + slot as i16;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    fn order_moves(&self, ply: usize, moves: &mut [i16], tt_move: i16, cm_move: i16) {
+        let dist_me = if self.g.turn == 0 {
+            &self.d0[self.dist0_idx]
+        } else {
+            &self.d1[self.dist1_idx]
+        };
+        let k = &self.killers[ply];
+        let n = moves.len();
+        let mut sc = [0i32; 160];
+        for i in 0..n {
+            let m = moves[i];
+            sc[i] = if m == tt_move {
+                2_000_000_000
+            } else if m < 100 {
+                1_000_000 - dist_me[m as usize] as i32 * 1000
+            } else if m == k[0] {
+                900_000
+            } else if m == cm_move {
+                870_000
+            } else if m == k[1] {
+                850_000
+            } else {
+                self.history_tbl[m as usize]
+            };
+        }
+        // stable insertion sort, descending — must match JS tie order exactly
+        for a in 1..n {
+            let mv = moves[a];
+            let ms = sc[a];
+            let mut b = a as isize - 1;
+            while b >= 0 && sc[b as usize] < ms {
+                moves[(b + 1) as usize] = moves[b as usize];
+                sc[(b + 1) as usize] = sc[b as usize];
+                b -= 1;
+            }
+            moves[(b + 1) as usize] = mv;
+            sc[(b + 1) as usize] = ms;
+        }
+    }
+
+    fn ab(
+        &mut self,
+        depth: i32,
+        mut alpha: i32,
+        beta: i32,
+        ply: usize,
+        allow_null: bool,
+        prev_move: i16,
+    ) -> Result<i32, TimeUp> {
+        self.nodes += 1;
+        self.check_time()?;
+        let prev = 1 - self.g.turn;
+        if (prev == 0 && self.g.pawn[0] < 9) || (prev == 1 && self.g.pawn[1] >= 72) {
+            return Ok(-(MATE - ply as i32));
+        }
+        if ply >= MAX_PLY - 1 {
+            return Ok(0);
+        }
+        self.path_lo[ply] = self.g.hash_lo;
+        self.path_hi[ply] = self.g.hash_hi;
+        if ply > 0 {
+            // repetition: search line, then game history back to last wall
+            for ri in (0..ply).rev() {
+                if self.path_lo[ri] == self.g.hash_lo && self.path_hi[ri] == self.g.hash_hi {
+                    return Ok(0);
+                }
+            }
+            let lwp = self.g.last_wall_ply as isize;
+            let mut gi = self.g.hist_len as isize * 2 - 4;
+            while gi >= lwp * 2 {
+                if self.g.hashes_u[gi as usize] == self.g.hash_lo
+                    && self.g.hashes_u[gi as usize + 1] == self.g.hash_hi
+                {
+                    return Ok(0);
+                }
+                gi -= 2;
+            }
+        }
+
+        self.refresh_dist(ply);
+        let nd0 = self.dist0_idx; // restored on every unmake
+        let nd1 = self.dist1_idx;
+        let nst = self.cached_stamp;
+        if depth <= 0 {
+            return Ok(self.evaluate());
+        }
+
+        // TT probe (typed, always-replace)
+        let idx = (self.g.hash_lo & TT_MASK) as usize;
+        let mut tt_move: i16 = 0;
+        let meta = self.tt_meta[idx];
+        if meta != 0 && self.tt_key_hi[idx] == self.g.hash_hi && self.tt_key_lo[idx] == self.g.hash_lo
+        {
+            tt_move = (meta & 1023) as i16;
+            let tdepth = meta >> 12;
+            let tflag = (meta >> 10) & 3;
+            if tdepth >= depth && ply > 0 {
+                let mut es = self.tt_score[idx]; // mate scores stored node-relative
+                if es > MATE - 2 * MAX_PLY as i32 {
+                    es -= ply as i32;
+                } else if es < -(MATE - 2 * MAX_PLY as i32) {
+                    es += ply as i32;
+                }
+                if tflag == 0 {
+                    return Ok(es);
+                }
+                if tflag == 1 && es >= beta {
+                    return Ok(es);
+                }
+                if tflag == 2 && es <= alpha {
+                    return Ok(es);
+                }
+            }
+        }
+
+        // reverse futility: hopeless to fall below beta at shallow depth
+        if depth <= 4 && beta > -2000 && beta < 2000 {
+            let sev = self.evaluate();
+            if sev - 90 * depth >= beta {
+                return Ok(sev);
+            }
+        }
+
+        // null move
+        if allow_null && depth >= 3 && ply > 0 {
+            let ev = self.evaluate();
+            if ev >= beta {
+                let z = &ZOBRIST;
+                self.g.turn ^= 1;
+                self.g.hash_lo ^= z.turn_lo;
+                self.g.hash_hi ^= z.turn_hi;
+                let res = self.ab(depth - 3, -beta, -beta + 1, ply + 1, false, 0);
+                let z = &ZOBRIST;
+                self.g.turn ^= 1;
+                self.g.hash_lo ^= z.turn_lo;
+                self.g.hash_hi ^= z.turn_hi;
+                self.dist0_idx = nd0;
+                self.dist1_idx = nd1;
+                self.cached_stamp = nst;
+                let ns = -res?;
+                if ns >= beta && ns < MATE - 200 {
+                    return Ok(beta);
+                }
+            }
+        }
+
+        let mut moves = [0i16; 160];
+        let n = self.gen_moves(ply == 0, &mut moves);
+        if n == 0 {
+            return Ok(self.evaluate());
+        }
+        let cm_move = if prev_move > 0 {
+            self.cm[prev_move as usize]
+        } else {
+            0
+        };
+        self.order_moves(ply, &mut moves[..n], tt_move, cm_move);
+
+        let mut best = i32::MIN; // JS -Infinity
+        let mut best_move: i16 = 0;
+        let mut flag = 2;
+
+        for i in 0..n {
+            let m = moves[i];
+            // frontier LMP
+            if depth <= 2
+                && ply > 0
+                && i >= 10
+                && m >= 100
+                && m != tt_move
+                && self.history_tbl[m as usize] <= 0
+                && best > -MATE + 200
+            {
+                continue;
+            }
+            if m >= 100 && ply > 0 {
+                let wt = if m < 200 { 0 } else { 1 };
+                let slot = (m % 100) as usize;
+                if self.g.wall_needs_path_check(wt, slot) {
+                    self.g.set_wall_bits(wt, slot, true);
+                    let paths_ok = self.g.has_path(0) && self.g.has_path(1);
+                    self.g.set_wall_bits(wt, slot, false);
+                    if !paths_ok {
+                        continue; // sealing wall: pseudo-legal only
+                    }
+                }
+            }
+            self.g.make_move(m);
+            let new_depth = depth - 1;
+            let result = if i >= 4 && depth >= 3 && m >= 100 && m != tt_move {
+                // graduated LMR
+                let red = 1
+                    + if i >= 12 { 1 } else { 0 }
+                    + if depth >= 6 && i >= 24 { 1 } else { 0 };
+                let rd = (new_depth - red).max(0);
+                match self.ab(rd, -alpha - 1, -alpha, ply + 1, true, m) {
+                    Ok(s) => {
+                        let mut score = -s;
+                        if score > alpha {
+                            match self.ab(new_depth, -beta, -alpha, ply + 1, true, m) {
+                                Ok(s2) => score = -s2,
+                                Err(e) => {
+                                    self.unwind_move(nd0, nd1, nst);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Ok(score)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else if i > 0 {
+                match self.ab(new_depth, -alpha - 1, -alpha, ply + 1, true, m) {
+                    Ok(s) => {
+                        let mut score = -s;
+                        if score > alpha && score < beta {
+                            match self.ab(new_depth, -beta, -alpha, ply + 1, true, m) {
+                                Ok(s2) => score = -s2,
+                                Err(e) => {
+                                    self.unwind_move(nd0, nd1, nst);
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        Ok(score)
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                self.ab(new_depth, -beta, -alpha, ply + 1, true, m).map(|s| -s)
+            };
+            self.g.unmake_move();
+            self.dist0_idx = nd0;
+            self.dist1_idx = nd1;
+            self.cached_stamp = nst;
+            let score = result?;
+
+            if score > best {
+                best = score;
+                best_move = m;
+                if score > alpha {
+                    alpha = score;
+                    flag = 0;
+                    if ply == 0 {
+                        self.root_best = m;
+                        self.root_score = score;
+                    }
+                    if alpha >= beta {
+                        flag = 1;
+                        if m >= 100 {
+                            if self.killers[ply][0] != m {
+                                self.killers[ply][1] = self.killers[ply][0];
+                                self.killers[ply][0] = m;
+                            }
+                            self.history_tbl[m as usize] += depth * depth;
+                            if self.history_tbl[m as usize] > 100_000_000 {
+                                for h in self.history_tbl.iter_mut() {
+                                    *h >>= 1;
+                                }
+                            }
+                        }
+                        if prev_move > 0 {
+                            self.cm[prev_move as usize] = m;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if best == i32::MIN {
+            return Ok(self.evaluate()); // all pseudo-legal moves were sealing walls
+        }
+        let mut ts = best; // store mate scores node-relative
+        if ts > MATE - 2 * MAX_PLY as i32 {
+            ts += ply as i32;
+        } else if ts < -(MATE - 2 * MAX_PLY as i32) {
+            ts -= ply as i32;
+        }
+        self.tt_key_hi[idx] = self.g.hash_hi;
+        self.tt_key_lo[idx] = self.g.hash_lo;
+        self.tt_meta[idx] = best_move as i32 | (flag << 10) | (depth << 12);
+        self.tt_score[idx] = ts;
+        Ok(best)
+    }
+
+    /// Restore after a time abort mid-move (JS `finally` semantics).
+    fn unwind_move(&mut self, nd0: usize, nd1: usize, nst: i32) {
+        self.g.unmake_move();
+        self.dist0_idx = nd0;
+        self.dist1_idx = nd1;
+        self.cached_stamp = nst;
+    }
+
+    /// Entry: iterative deepening within `time_ms`. `full` disables the easy-move stop.
+    pub fn think(&mut self, time_ms: u64, max_depth: i32, full: bool) -> ThinkResult {
+        let t0 = Instant::now();
+        self.deadline = t0 + Duration::from_millis(time_ms);
+        self.nodes = 0;
+        self.root_best = 0;
+        self.root_score = 0;
+        let mut last_best: i16 = 0;
+        let mut last_score = 0;
+        let mut last_depth = 0;
+        let mut stable = 0;
+        let max_depth = if max_depth > 0 { max_depth } else { 30 };
+
+        for d in 1..=max_depth {
+            let result = if d >= 4 && last_score > -2000 && last_score < 2000 {
+                // aspiration
+                let mut lo = last_score - 75;
+                let mut hi = last_score + 75;
+                loop {
+                    match self.ab(d, lo, hi, 0, true, 0) {
+                        Ok(sc) => {
+                            if sc <= lo {
+                                lo = -INF;
+                            } else if sc >= hi {
+                                hi = INF;
+                            } else {
+                                break Ok(sc);
+                            }
+                        }
+                        Err(e) => break Err(e),
+                    }
+                }
+            } else {
+                self.ab(d, -INF, INF, 0, true, 0)
+            };
+            match result {
+                Ok(sc) => {
+                    stable = if self.root_best == last_best { stable + 1 } else { 0 };
+                    last_best = self.root_best;
+                    last_score = sc;
+                    last_depth = d;
+                    if sc > MATE - 200 || sc < -(MATE - 200) {
+                        break; // forced result
+                    }
+                    if !full
+                        && d >= 6
+                        && stable >= 2
+                        && t0.elapsed().as_millis() as u64 > time_ms / 10
+                    {
+                        break; // easy move
+                    }
+                }
+                Err(TimeUp) => break, // state already restored by unwinding unmakes
+            }
+            if t0.elapsed().as_millis() as f64 > time_ms as f64 * 0.6 {
+                break;
+            }
+        }
+
+        if last_best == 0 {
+            self.refresh_dist(0);
+            let mut moves = [0i16; 160];
+            let n = self.gen_moves(true, &mut moves);
+            if n > 0 {
+                last_best = moves[0];
+            }
+        }
+
+        ThinkResult {
+            mv: last_best,
+            score: last_score,
+            depth: last_depth,
+            nodes: self.nodes,
+            ms: t0.elapsed().as_millis() as u64,
+        }
+    }
+}

@@ -25,6 +25,7 @@ fn main() {
         "thread-bench" => run_thread_bench(&args),
         "moves" => run_moves(),
         "genmove" => run_genmove(&args),
+        "ace-bench" => run_ace_bench(&args),
         "cat" => run_cat(&args),
         "lmr" => run_lmr(&args),
         "session" => run_session_stdio(),
@@ -393,6 +394,10 @@ fn run_lmr(args: &[String]) {
 }
 
 fn run_genmove(args: &[String]) {
+    if is_ace_engine(args) {
+        run_genmove_ace(args);
+        return;
+    }
     let (config, moves) = parse_genmove_config(args);
     let mut board = Board::new();
     for mv in moves {
@@ -403,4 +408,82 @@ fn run_genmove(args: &[String]) {
         Some(algebraic) => println!("bestmove {}", algebraic),
         None => println!("bestmove (none)"),
     }
+}
+
+// ── ACE v7 port (pure) ───────────────────────────────────────────────────────
+
+fn is_ace_engine(args: &[String]) -> bool {
+    args.windows(2)
+        .any(|w| w[0] == "--engine" && w[1] == "ace")
+}
+
+fn run_genmove_ace(args: &[String]) {
+    let mut params = titanium::ace::AceParams::default();
+    let mut moves = Vec::new();
+    let mut i = 2usize;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--time" {
+            if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                params.time_ms = (sec * 1000.0) as u64;
+                i += 2;
+                continue;
+            }
+        } else if arg == "--depth" {
+            if let Some(d) = args.get(i + 1).and_then(|s| s.parse::<i32>().ok()) {
+                params.max_depth = d;
+                i += 2;
+                continue;
+            }
+        } else if arg == "--full" {
+            params.full = true;
+            i += 1;
+            continue;
+        } else if arg == "--engine" {
+            i += 2;
+            continue;
+        } else if arg.starts_with("--") {
+            // unknown flag with value (e.g. --sims N from the shared harness)
+            if let Some(next) = args.get(i + 1) {
+                if !next.starts_with("--") && !looks_like_algebraic_move(next) {
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        } else if looks_like_algebraic_move(arg) {
+            moves.push(arg.clone());
+        }
+        i += 1;
+    }
+
+    match titanium::ace::ace_genmove(&moves, params) {
+        Some((algebraic, info)) => {
+            eprintln!(
+                "info json {{\"engine\":\"ace\",\"rootScore\":{},\"searchDepth\":{},\"nodes\":{},\"elapsedMs\":{}}}",
+                info.score, info.depth, info.nodes, info.ms
+            );
+            println!("bestmove {}", algebraic);
+        }
+        None => println!("bestmove (none)"),
+    }
+}
+
+/// Parity harness vs the JS reference — fixed depth, ACE numeric moves.
+fn run_ace_bench(args: &[String]) {
+    let depth: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+    let mut g = titanium::ace::AceGame::new();
+    for arg in args.iter().skip(3) {
+        if let Ok(m) = arg.parse::<i16>() {
+            g.make_move(m);
+        }
+    }
+    println!("hash {} {}", g.hash_lo, g.hash_hi);
+    let mut search = titanium::ace::AceSearch::new(g);
+    let r = search.think(1_000_000_000, depth, true);
+    println!(
+        "{{\"move\":{},\"score\":{},\"depth\":{},\"nodes\":{},\"ms\":{}}}",
+        r.mv, r.score, r.depth, r.nodes, r.ms
+    );
 }
