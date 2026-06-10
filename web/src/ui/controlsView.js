@@ -1,6 +1,6 @@
 import { playerColorName } from '../lib/playerColors.js';
 import { encodeReplayFromActions } from '../lib/replayCode.js';
-import { renderEngineThinkCards, updateEngineThinkCards } from './engineThinkView.js';
+import { updateEngineThinkCards } from './engineThinkView.js';
 
 export { updateEngineThinkCards };
 import './scrapedSlider.css';
@@ -12,7 +12,6 @@ export function renderControls(container, state, controller) {
     uiMode,
     replay,
   } = state;
-  const engineThinkCards = renderEngineThinkCards(state);
   const engineErrorLines = Object.entries(state.engineErrors ?? {})
     .filter(([, message]) => Boolean(message))
     .map(([playerType, message]) => `${playerType}: ${message}`)
@@ -54,10 +53,12 @@ export function renderControls(container, state, controller) {
         </div>
         ${engineErrorLines ? `<div class="status-line status-line--error"><span>Error</span><strong>${escapeHtml(engineErrorLines)}</strong></div>` : ''}
       </div>
-      ${engineThinkCards}
+      <div class="engine-think-cards-host" data-think-cards-host></div>
       </div>
     </section>
   `;
+
+  updateEngineThinkCards(container, state);
 
   container.querySelectorAll('[data-ui-mode]').forEach((btn) => {
     btn.addEventListener('click', () => {

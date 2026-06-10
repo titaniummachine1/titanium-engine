@@ -169,11 +169,14 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+.engine-think-cards-host {
+  margin-top: 10px;
+}
+
 .engine-think-cards {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 10px;
 }
 
 .think-card {
@@ -184,6 +187,20 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  contain: layout style;
+}
+
+.think-card__slot--hidden {
+  visibility: hidden;
+  min-height: 1.75rem;
+}
+
+.think-card__slot--visible {
+  visibility: visible;
+}
+
+.think-card--idle .think-card__hero-value {
+  opacity: 0.45;
 }
 
 .think-card--white {

@@ -38,6 +38,78 @@ fn parse_algebraic(move_str: &str) -> Option<Move> {
 }
 
 #[test]
+fn d3h_legal_off_topology_matches_js() {
+    // Scraped Gorisanson rules: `canWallBlock` false → no path trial → wall is legal
+    // even if it looks strategically like a "cage" (see scraped/game_logic_extract.js).
+    let prefix = ["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4"];
+    let mut board = Board::new();
+    let mut bfs = BfsScratch::new();
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::movegen::MAX_LEGAL_MOVES];
+
+    for move_str in prefix {
+        let mv = parse_algebraic(move_str).unwrap();
+        let _ = board.make_move(mv);
+    }
+
+    let d3h = parse_algebraic("d3h").unwrap();
+    let n = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);
+    assert!(
+        buf[..n].contains(&d3h),
+        "d3h must be legal when off topology — matches JS canWallBlock shortcut"
+    );
+}
+
+#[test]
+fn a5h_correctly_rejected_after_tq1_ply19() {
+    let prefix = [
+        "e2", "e8", "e3", "e7", "e4", "e6", "c3h", "e7h", "e3h", "c7h", "f4", "g7h", "f5", "h8h",
+        "f6", "b6v", "g3h", "h7v", "a3h",
+    ];
+    let mut board = Board::new();
+    let mut bfs = BfsScratch::new();
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::movegen::MAX_LEGAL_MOVES];
+
+    for move_str in prefix {
+        let mv = parse_algebraic(move_str).unwrap();
+        let n = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);
+        assert!(buf[..n].contains(&mv), "{move_str} must be legal in prefix");
+        let _ = board.make_move(mv);
+    }
+
+    let a5h = parse_algebraic("a5h").unwrap();
+    let n = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);
+    assert!(
+        !buf[..n].contains(&a5h),
+        "a5h must be rejected — it blocks White's goal path"
+    );
+}
+
+#[test]
+fn a1h_correctly_rejected_ply22_wall_maze() {
+    let prefix = [
+        "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "e4h", "d4", "c4h", "e5v", "a5h", "h8h", "d6",
+        "b5v", "f3v", "e7v", "c3h", "d7h", "b2v", "h6h",
+    ];
+    let mut board = Board::new();
+    let mut bfs = BfsScratch::new();
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; crate::movegen::MAX_LEGAL_MOVES];
+
+    for move_str in prefix {
+        let mv = parse_algebraic(move_str).unwrap();
+        let n = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);
+        assert!(buf[..n].contains(&mv), "{move_str} must be legal in prefix");
+        let _ = board.make_move(mv);
+    }
+
+    let a1h = parse_algebraic("a1h").unwrap();
+    let n = generate_legal_moves_slice(&mut board, &mut buf, &mut bfs);
+    assert!(
+        !buf[..n].contains(&a1h),
+        "a1h cages White — must be illegal (DirMasks cache bug allowed this)"
+    );
+}
+
+#[test]
 fn g1v_correctly_rejected_after_replay_prefix() {
     // Move 24 from an external replay — g1v blocks a goal path under correct rules.
     let prefix = [

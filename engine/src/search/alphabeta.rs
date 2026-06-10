@@ -1,12 +1,12 @@
-//! Iterative-deepening αβ with aspiration windows, LMR, quiescence, and TT.
+//! Iterative-deepening αβ with aspiration windows, LMR, and TT.
 
 use std::io::Write;
 use std::time::Instant;
 
-use crate::cat::constants::{CAT_COLD_CM, CAT_HOT_CM, DIST_PENALTY};
+use crate::cat::constants::DIST_PENALTY;
 use crate::cat::prune::{
     self, collect_search_moves, get_shortest_path, is_tactical_move, move_corridor_attention,
-    move_immediate_gain, order_moves, path_distance,
+    move_immediate_gain, order_moves, our_path_gain, path_distance,
 };
 use crate::cat::CorridorAttention;
 use crate::core::board::{Board, Move, Player, WallOrientation};
@@ -34,13 +34,10 @@ const RACE_LEAD_CM: i32 = 15;
 const LOW_WALL_TRAP_CM: i32 = 18;
 
 const LMR_MIN_DEPTH: u32 = 2;
-// Full-depth moves before LMR kicks in — 4 protects the critical 4th move
-// (e.g. the best reply wall when opp has 3 pawn options).
-const LMR_AFTER_MOVE: usize = 4;
+/// Max walls expanded at the root when `stage_t` is low — rest are CAT-ranked out.
+const ROOT_WALL_CAP_OPENING: usize = 26;
+const ROOT_WALL_CAP_MID: usize = 38;
 const ASPIRATION_DELTA: i32 = 200;
-// Wall/path exchanges settle quickly — 6 plies of noisy-only search is plenty
-// and 10 made depth-1 iterations explode to thousands of nodes.
-const MAX_QDEPTH: u32 = 6;
 // Futility margin per depth ply in centi-squares.
 // At depth 1 we allow 2.5 squares slack, at depth 2 we allow 5.0 — beyond that no futility.
 const FUTILITY_MARGIN: [i32; 3] = [0, 250, 500];
@@ -323,6 +320,9 @@ fn update_lmr_profile_for_depth(
         state.lmr_profile = LmrProfile::mate_refine();
     } else if depth == 1 {
         state.lmr_profile = LmrProfile::first_iteration();
+        state
+            .lmr_profile
+            .apply_time_budget(state.config.time_ms);
     } else {
         let mut buf = [Move::Pawn { row: 1, col: 4 }; MAX_LEGAL_MOVES];
         let n = generate_legal_moves_slice(board, &mut buf, state.bfs);
@@ -330,47 +330,54 @@ fn update_lmr_profile_for_depth(
         let (cat_max, cat_p75) = root_cat_heat_stats(board, &buf, n, &cat);
         let stage_t = compute_stage_t(board, state.our_root_dist, opp_root_dist, cat_max, cat_p75);
         state.lmr_profile = LmrProfile::from_stage(stage_t, endgame_race, false);
+        state
+            .lmr_profile
+            .apply_time_budget(state.config.time_ms);
 
-        if depth > 1 {
-            let log = &state.depth_log;
-            let (marginal, prev_marginal) = if log.len() >= 2 {
-                (
-                    log[log.len() - 1].marginal_nodes,
-                    log[log.len() - 2].marginal_nodes,
-                )
-            } else if log.len() == 1 {
-                (log[0].marginal_nodes, 0)
-            } else {
-                (0, 0)
-            };
-            let completed = log.last().map(|e| e.depth).unwrap_or(0);
-            let fraction = state.fraction_elapsed();
-            apply_depth_feedback(
-                &mut state.lmr_profile,
-                completed,
-                marginal,
-                prev_marginal,
-                fraction,
-                state.last_iter_score_delta,
-                state.last_iter_asp_fails,
-            );
-        }
+        let log = &state.depth_log;
+        let (marginal, prev_marginal) = if log.len() >= 2 {
+            (
+                log[log.len() - 1].marginal_nodes,
+                log[log.len() - 2].marginal_nodes,
+            )
+        } else if log.len() == 1 {
+            (log[0].marginal_nodes, 0)
+        } else {
+            (0, 0)
+        };
+        let completed = log.last().map(|e| e.depth).unwrap_or(0);
+        let fraction = state.fraction_elapsed();
+        apply_depth_feedback(
+            &mut state.lmr_profile,
+            completed,
+            marginal,
+            prev_marginal,
+            fraction,
+            state.last_iter_score_delta,
+            state.last_iter_asp_fails,
+        );
+        state
+            .lmr_profile
+            .apply_time_urgency(fraction, state.config.time_ms);
     }
 
     state.lmr_table = build_lmr_table(state.lmr_profile.aggression);
 
     if state.log && std::env::var("TITANIUM_LOG").is_ok() {
         let p = state.lmr_profile;
+        let time_p = crate::search::lmr_profile::time_pressure_from_ms(state.config.time_ms);
         eprintln!(
-            "info lmr_profile depth={} t={:.2} aggression={:.2} after={} slope={:.3} hot={} cold={} floor={} remaining_ms={}",
+            "info lmr_profile depth={} t={:.2} aggression={:.2} after={} slope={:.3} hot_pct={} cold={} floor={} push_cap={} time_p={:.2} remaining_ms={}",
             depth,
             p.stage_t,
             p.aggression,
             p.lmr_after_move,
             p.cat_heat_lmr_slope,
-            p.hot_cm,
+            p.hot_ratio_pct,
             p.cold_cm,
             p.depth_balance_floor,
+            p.depth_push_marginal_cap,
+            time_p,
             state.remaining_budget_ms()
         );
     }
@@ -606,13 +613,51 @@ fn terminal_score(ply: u32) -> i32 {
     -MATE + ply as i32
 }
 
-fn quiescence(
+/// Keep every pawn; retain only the hottest `max_walls` walls by CAT edge heat.
+fn cap_root_wall_moves(buf: &mut [Move], n: &mut usize, cat: &CorridorAttention, max_walls: usize) {
+    if *n == 0 {
+        return;
+    }
+    let mut ranked = [(0usize, 0u16); MAX_LEGAL_MOVES];
+    let mut wall_count = 0usize;
+    for i in 0..*n {
+        if let Move::Wall {
+            row,
+            col,
+            orientation,
+        } = buf[i]
+        {
+            ranked[wall_count] = (i, cat.wall_edge_heat(row, col, orientation));
+            wall_count += 1;
+        }
+    }
+    if wall_count <= max_walls {
+        return;
+    }
+    ranked[..wall_count].sort_by(|a, b| b.1.cmp(&a.1));
+    let mut keep = [false; MAX_LEGAL_MOVES];
+    for &(i, _) in &ranked[..max_walls] {
+        keep[i] = true;
+    }
+    let mut out = 0usize;
+    for i in 0..*n {
+        if matches!(buf[i], Move::Pawn { .. }) || keep[i] {
+            buf[out] = buf[i];
+            out += 1;
+        }
+    }
+    *n = out;
+}
+
+/// Leaf score: stand-pat eval plus at most one ply of **forward pawn** pushes.
+/// Wall quiescence was removed (too expensive, fought LMR); this fixes the
+/// odd/even depth oscillation (0 / −1.21 / 0 / …) in symmetric pawn races.
+fn leaf_eval(
     state: &mut SearchState<'_>,
     board: &mut Board,
     mut alpha: i32,
     beta: i32,
     ply: u32,
-    qdepth: u32,
 ) -> i32 {
     if state.bump_nodes() {
         return alpha;
@@ -629,69 +674,32 @@ fn quiescence(
     if stand_pat > alpha {
         alpha = stand_pat;
     }
-    if qdepth == 0 {
-        return alpha;
-    }
 
-    // Quiescence skips CAT entirely — noisy moves are gated by the witness
-    // path + BFS gain; corridor heat only matters for full-width ordering.
-    let cat = crate::cat::CorridorAttention::default();
-    let mut opp_path = [0u8; 81];
-    let opp_path_len = get_shortest_path(board, board.side().opposite(), state.bfs, &mut opp_path);
-    let opp_dist = path_distance(board.side().opposite(), &opp_path, opp_path_len);
+    let stm = board.side();
     let our_dist = state
         .bfs
-        .shortest_distance(board, board.side())
+        .shortest_distance(board, stm)
         .unwrap_or(DIST_PENALTY);
 
-    let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_search_moves(
-        board,
-        &mut buf,
-        state.bfs,
-        &cat,
-        &opp_path,
-        opp_path_len,
-        our_dist,
-        opp_dist,
-        true,
-        true,
-    );
-    if n == 0 {
-        return alpha;
-    }
+    let mut buf = [Move::Pawn { row: 0, col: 0 }; 8];
+    let n = crate::movegen::legal::generate_pawn_moves_for(board, stm, &mut buf) as usize;
 
-    let mut scores = [0i32; MAX_LEGAL_MOVES];
-    order_moves(
-        board,
-        &mut buf,
-        n,
-        None,
-        state.book_hint,
-        &mut scores,
-        our_dist,
-        opp_dist,
-        &opp_path,
-        opp_path_len,
-        state.bfs,
-        &cat,
-    );
-
-    // Noisy-move width cap: tactical wall sets can be 15+ wide in funnels;
-    // qsearch only needs the sharpest few to settle the horizon.
-    let qn = n.min(8);
-    for i in 0..qn {
+    for i in 0..n {
         let mv = buf[i];
-        let undo = board.make_move(mv);
-        let mut score = -quiescence(state, board, -beta, -alpha, ply + 1, qdepth - 1);
-        if is_mate_score(score) && !mate_proven(score, qdepth.saturating_sub(1)) {
-            let fallback = eval_stm(board, board.side().opposite(), state.bfs);
-            score = clamp_unproven_mate(score, qdepth.saturating_sub(1), fallback);
+        let extends = match mv {
+            Move::Pawn { row, .. } => {
+                our_path_gain(board, mv, our_dist, state.bfs) > 0 || is_goal(stm, row)
+            }
+            _ => false,
+        };
+        if !extends {
+            continue;
         }
+
+        let undo = board.make_move(mv);
+        let score = -eval_stm(board, board.side(), state.bfs);
         board.unmake_move(undo);
 
-        // Check stop BEFORE using the score — an aborted child returns its own
-        // alpha (= -beta here), which negates into a fake fail-high for us.
         if state.should_stop() {
             break;
         }
@@ -703,10 +711,6 @@ fn quiescence(
         }
     }
 
-    if is_mate_score(alpha) && !mate_proven(alpha, qdepth) {
-        let stand = eval_stm(board, board.side(), state.bfs);
-        return clamp_unproven_mate(alpha, qdepth, stand);
-    }
     alpha
 }
 
@@ -844,7 +848,7 @@ fn negamax_inner(
     }
 
     if depth == 0 {
-        return quiescence(state, board, alpha, beta, ply, MAX_QDEPTH);
+        return leaf_eval(state, board, alpha, beta, ply);
     }
 
     // ── Static eval (shared by NMP and futility) ────────────────────────────
@@ -890,7 +894,7 @@ fn negamax_inner(
     };
 
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let n = collect_search_moves(
+    let mut n = collect_search_moves(
         board,
         &mut buf,
         state.bfs,
@@ -976,6 +980,15 @@ fn negamax_inner(
 
     let profile = state.lmr_profile;
 
+    if ply == 0 && depth >= 3 {
+        let cap = if profile.stage_t < 0.40 {
+            ROOT_WALL_CAP_OPENING
+        } else {
+            ROOT_WALL_CAP_MID
+        };
+        cap_root_wall_moves(&mut buf, &mut n, &cat, cap);
+    }
+
     for i in 0..n {
         let mv = buf[i];
 
@@ -986,13 +999,14 @@ fn negamax_inner(
         //   (b) Disturbs the opponent's shortest path (wall).
         // Tactical moves are NEVER reduced or pruned.
         let cat_cm = move_corridor_attention(board, mv, &cat);
-        let corridor_relevant = cat_cm >= i32::from(CAT_COLD_CM);
+        let heat_ratio_hot = cat_max > 0
+            && (cat_cm.max(0) as u32) * 100 >= (cat_max as u32) * u32::from(profile.hot_ratio_pct);
+        let corridor_relevant = cat_cm >= i32::from(profile.cold_cm);
         let is_tactical = if moves_searched == 0
             || depth < LMR_MIN_DEPTH
-            || moves_searched < LMR_AFTER_MOVE
-            || cat_cm >= i32::from(CAT_HOT_CM)
+            || (ply > 0 && moves_searched < profile.lmr_after_move)
+            || heat_ratio_hot
         {
-            // We treat early moves as tactical by definition (no reduction either way).
             true
         } else if matches!(mv, Move::Wall { .. })
             && !prune::wall_intersects_path(mv, &opp_path, opp_path_len)
@@ -1016,14 +1030,12 @@ fn negamax_inner(
         }
 
         // [LMR_BLOCK_START]
-        // Adaptive LMR — profile rebuilt each ID depth on the main thread.
-        // Never LMR at root — reduced-depth scores are optimistic and, on a time
-        // budget, the last candidates may not get a full re-search before stop.
-        let reduction = if ply == 0
-            || is_tactical
-            || i < profile.lmr_after_move
+        // Adaptive LMR — profile rebuilt each ID depth. Root: only move 1 is
+        // always full-depth; cold root walls get reduced like internal nodes.
+        let reduction = if (ply == 0 && moves_searched == 0)
+            || (ply > 0 && is_tactical)
             || depth < LMR_MIN_DEPTH
-            || cat_cm >= i32::from(profile.hot_cm)
+            || heat_ratio_hot
         {
             0u32
         } else {
@@ -1034,14 +1046,18 @@ fn negamax_inner(
             let cat_extra = (gap as f32 * profile.cat_heat_lmr_slope).round() as u32;
             // Extra reduction for pure quiet walls (not intersecting opp path at all).
             let wall_extra = if matches!(mv, Move::Wall { .. }) && cat_cm == 0 {
-                2u32
+                4u32
             } else if matches!(mv, Move::Wall { .. })
                 && !prune::wall_intersects_path(mv, &opp_path, opp_path_len)
                 && !corridor_relevant
             {
-                1u32
+                3u32
             } else if cat_cm < i32::from(profile.cold_cm) {
-                1u32
+                if profile.stage_t < 0.35 {
+                    3u32
+                } else {
+                    1u32
+                }
             } else {
                 0u32
             };
@@ -1058,7 +1074,7 @@ fn negamax_inner(
         } else {
             let reduced = child_depth.saturating_sub(reduction);
             let mut s = if reduced == 0 {
-                -quiescence(state, board, -alpha - 1, -alpha, ply + 1, MAX_QDEPTH)
+                -leaf_eval(state, board, -beta, -alpha, ply + 1)
             } else {
                 search_child(state, board, reduced, alpha, alpha + 1, ply)
             };
@@ -1956,6 +1972,34 @@ mod tests {
                 dist
             );
         }
+    }
+
+    #[test]
+    fn after_e2_depth_log_does_not_oscillate_zero_and_negative() {
+        let mut board = Board::new();
+        board.apply_algebraic("e2");
+        assert_eq!(board.side(), Player::Two);
+
+        let config = SearchConfig {
+            time_ms: 500,
+            max_nodes: 500_000,
+            log: false,
+            book_hint: None,
+            ..SearchConfig::default()
+        };
+        let report = search_best_move(&mut board, config).expect("report");
+        assert!(report.search_depth >= 4, "depth {}", report.search_depth);
+
+        let d1 = report
+            .depth_log
+            .iter()
+            .find(|e| e.depth == 1)
+            .map(|e| e.score)
+            .expect("d1");
+        assert!(
+            d1 < -50,
+            "d1 must see white edge after e8 (pawn leaf); got {d1}"
+        );
     }
 
     #[test]

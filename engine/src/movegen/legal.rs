@@ -1,12 +1,13 @@
 //! Legal move generation — pawn jumps + wall placements with path validation.
 
 use crate::core::board::{Board, Move, Player, WallOrientation};
+use crate::core::zobrist;
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
 use crate::path::masks::DirMasks;
-use crate::util::grid::{can_step, goal_row, has_wall, set_wall, square_index, unpack_square};
 use crate::path::BfsScratch;
+use crate::util::grid::{can_step, goal_row, has_wall, set_wall, square_index, unpack_square};
 
 const DIRS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
@@ -124,7 +125,11 @@ pub(crate) fn generate_pawn_moves_for(board: &Board, player: Player, out: &mut [
 }
 
 /// Scalar pawn moves — kept for mobility eval and differential tests vs bitboard.
-pub(crate) fn generate_pawn_moves_scalar_for(board: &Board, player: Player, out: &mut [Move]) -> usize {
+pub(crate) fn generate_pawn_moves_scalar_for(
+    board: &Board,
+    player: Player,
+    out: &mut [Move],
+) -> usize {
     let side = player as usize;
     let (fr, fc) = board.pawns[side];
     let (or, oc) = board.pawns[1 - side];
@@ -245,18 +250,16 @@ fn is_legal_wall(
     col: u8,
     orientation: WallOrientation,
     scratch: &mut BfsScratch,
-    path_cache: &mut Option<WallPathCache>,
+    _path_cache: &mut Option<WallPathCache>,
 ) -> bool {
     if wall_collides(board, row, col, orientation) {
         return false;
     }
+    // Matches scraped `canWallBlock` — isolated walls cannot cage anyone (perft fast path).
     if !can_wall_block_topology(board, row, col, orientation) {
         return true;
     }
-    let paths = path_cache.get_or_insert_with(|| WallPathCache::new(board, scratch));
-    if !paths.wall_intersects_either_path(row, col, orientation) {
-        return true;
-    }
+    // Do NOT skip BFS when the wall is off the witness shortest path — unsound (a1h/a5h).
     path_ok_after_wall(board, row, col, orientation, scratch)
 }
 
@@ -370,10 +373,13 @@ fn path_ok_after_wall(
     orientation: WallOrientation,
     scratch: &mut BfsScratch,
 ) -> bool {
+    // `set_wall` does not update `board.hash`; XOR so `dir_masks` rebuilds for the trial
+    // topology instead of reusing a stale cache (a1h ply-22 illegal-move bug).
+    zobrist::xor_wall(&mut board.hash, orientation, row, col);
     set_wall(board, row, col, orientation, true);
     let ok = scratch.both_players_reach_goals(board);
     set_wall(board, row, col, orientation, false);
-    scratch.invalidate_dir_masks();
+    zobrist::xor_wall(&mut board.hash, orientation, row, col);
     ok
 }
 

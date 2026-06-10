@@ -98,18 +98,18 @@ function shouldStopGorisansonSearch(mcts, game, simulations) {
   if (!mcts.root.children.length) {
     return false;
   }
-  const best = mcts.selectBestMove();
-  if (!best || best.n < 100) {
+  const best = mcts.root.maxSimsChild;
+  if (!best || best.numSims < 100) {
     return false;
   }
-  const wr = best.wins / best.n;
-  if (best.n >= 300 && wr >= 0.98) {
+  const wr = best.winRate;
+  if (best.numSims >= 300 && wr >= 0.98) {
     return true;
   }
-  if (best.n >= 150 && wr >= 0.99) {
+  if (best.numSims >= 150 && wr >= 0.99) {
     return true;
   }
-  if (mcts.root.children.length === 1 && best.n >= 500 && wr >= 0.95) {
+  if (mcts.root.children.length === 1 && best.numSims >= 500 && wr >= 0.95) {
     return true;
   }
   return false;
@@ -191,11 +191,15 @@ export function chooseGorisansonMoveWithMeta(game, budget = {}) {
       throw new Error('gorisanson: no legal move');
     }
 
+    const best = mcts.root.maxSimsChild;
+    const rootWinRate = best?.winRate ?? null;
+
     return {
       move,
       meta: {
         stoppedBy,
         simulations,
+        rootWinRate,
         elapsedMs: performance.now() - started,
       },
     };

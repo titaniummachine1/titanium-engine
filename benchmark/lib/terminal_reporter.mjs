@@ -76,8 +76,16 @@ export function formatEngineLog(result) {
     parts.push(`eval=${formatScore(result.rootScore)}`);
   }
 
+  if (result.rootWinRate != null && Number.isFinite(result.rootWinRate)) {
+    parts.push(`wr=${Math.round(result.rootWinRate * 100)}%`);
+  }
+
   if (result.nodes) {
     parts.push(`${result.nodes} nodes`);
+  }
+
+  if (result.simulations && !result.nodes) {
+    parts.push(`${result.simulations} sims`);
   }
 
   if (result.prunedWalls) {

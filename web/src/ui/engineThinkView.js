@@ -57,6 +57,16 @@ function escapeHtml(text) {
     .replaceAll('>', '&gt;');
 }
 
+function setText(el, text) {
+  if (!el) {
+    return;
+  }
+  const next = text ?? '';
+  if (el.textContent !== next) {
+    el.textContent = next;
+  }
+}
+
 function deepestEntry(depthLog) {
   if (!depthLog?.length) {
     return null;
@@ -137,10 +147,32 @@ function payloadFromLiveSearch(ls, ply) {
   };
 }
 
+function idlePayload(seatIndex) {
+  return {
+    idle: true,
+    live: false,
+    engine: '—',
+    move: null,
+    ply: null,
+    whiteDist: null,
+    blackDist: null,
+    score: null,
+    depth: null,
+    depthLog: [],
+    pv: '',
+    nodes: 0,
+    simulations: 0,
+    rootWinRate: null,
+    stoppedBy: 'idle',
+    rootMoves: null,
+    seatIndex,
+  };
+}
+
 function thinkPayloadForSeat(state, seatIndex) {
   const playerType = state.settings.players[seatIndex];
   if (playerType === PlayerType.Human) {
-    return null;
+    return idlePayload(seatIndex);
   }
 
   const saved = state.lastThinkBySeat?.[seatIndex];
@@ -160,9 +192,9 @@ function thinkPayloadForSeat(state, seatIndex) {
       livePayload.rootWinRate != null ||
       livePayload.pv;
     if (!hasFresh && saved) {
-      return { ...payloadFromSnapshot(saved), live: true, move: null, ply, stoppedBy: 'searching' };
+      return { ...payloadFromSnapshot(saved), live: true, move: saved.move ?? null, ply, stoppedBy: 'searching' };
     }
-    return livePayload;
+    return { ...livePayload, move: saved?.move ?? null, ply: saved?.ply ?? ply };
   }
 
   if (saved) {
@@ -171,7 +203,7 @@ function thinkPayloadForSeat(state, seatIndex) {
 
   const entry = lastThinkForSeat(state, seatIndex);
   if (!entry) {
-    return null;
+    return idlePayload(seatIndex);
   }
 
   const deep = deepestEntry(entry.depthLog);
@@ -221,7 +253,7 @@ function heroMetric(payload) {
   if (prefersWinRate(payload)) {
     const pct = Number(payload.rootWinRate) * 100;
     if (!Number.isFinite(pct)) {
-      return { left: '—', right: right.value, rightLabel: right.label, tone: 'even', mode: 'winrate' };
+      return { left: '…', right: right.value, rightLabel: right.label, tone: 'even', mode: 'winrate' };
     }
     return {
       left: `${pct.toFixed(0)}%`,
@@ -263,32 +295,6 @@ function heroMetric(payload) {
   };
 }
 
-function renderDepthFeed(depthLog, live, payload) {
-  if (usesRollouts(payload) || !depthLog?.length) {
-    return '';
-  }
-  const rows = [...depthLog]
-    .sort((a, b) => b.depth - a.depth)
-    .slice(0, 6)
-    .map((entry) => {
-      const score = entry.score != null ? formatEngineScore(entry.score) : '—';
-      const nodes = entry.nodes > 0 ? ` · ${Number(entry.nodes).toLocaleString()}n` : '';
-      return `
-        <li class="think-card__depth-row">
-          <span class="think-card__depth-num">d${entry.depth}</span>
-          <span class="think-card__depth-score">${escapeHtml(score)}</span>
-          <span class="think-card__depth-nodes">${escapeHtml(nodes)}</span>
-        </li>`;
-    })
-    .join('');
-  const title = live ? 'Depth (live)' : 'Depth';
-  return `
-    <div class="think-card__depth-feed">
-      <div class="think-card__depth-title">${title}</div>
-      <ul class="think-card__depth-list">${rows}</ul>
-    </div>`;
-}
-
 function formatNodes(nodes, stoppedBy, payload = {}) {
   if (!nodes || nodes <= 0) {
     return '';
@@ -304,7 +310,7 @@ function formatBudgetLine(payload) {
     parts.push(nodes);
   }
   const stop = STOP_LABELS[payload.stoppedBy] ?? payload.stoppedBy;
-  if (stop && stop !== 'searching') {
+  if (stop && stop !== 'searching' && stop !== 'idle') {
     parts.push(stop);
   }
   return parts.join(' · ');
@@ -318,14 +324,193 @@ function pvHeadline(pv) {
   return first || '';
 }
 
-function renderRootMovesList(rootMoves) {
+function formatRootMoveScore(r, payload) {
+  if (r.winRate != null && Number.isFinite(r.winRate)) {
+    const visits = r.visits > 0 ? ` · ${Number(r.visits).toLocaleString()}v` : '';
+    return `${(r.winRate * 100).toFixed(0)}%${visits}`;
+  }
+  if (usesRollouts(payload) && r.score != null && Number.isFinite(r.score)) {
+    const visits = r.visits > 0 ? ` · ${Number(r.visits).toLocaleString()}v` : '';
+    return `${r.score}%${visits}`;
+  }
+  return formatEngineScore(r.score);
+}
+
+function depthFeedSignature(depthLog) {
+  if (!depthLog?.length) {
+    return '';
+  }
+  const tail = [...depthLog].sort((a, b) => b.depth - a.depth).slice(0, 6);
+  return tail.map((e) => `${e.depth}:${e.score}:${e.nodes}`).join('|');
+}
+
+function rootsSignature(rootMoves, payload) {
   if (!rootMoves?.length) {
     return '';
   }
-  const sorted = [...rootMoves].sort((a, b) => b.score - a.score).slice(0, 4);
-  const rows = sorted
+  const sortKey = usesRollouts(payload)
+    ? (r) => r.winRate ?? r.score ?? 0
+    : (r) => r.score ?? 0;
+  return [...rootMoves]
+    .sort((a, b) => sortKey(b) - sortKey(a))
+    .slice(0, 4)
+    .map((r) => `${r.move}:${formatRootMoveScore(r, payload)}`)
+    .join('|');
+}
+
+function thinkCardShellHtml(seatIndex) {
+  const colorClass = seatIndex === 0 ? 'think-card--white' : 'think-card--black';
+  return `
+    <article class="think-card ${colorClass} think-card--idle" data-seat="${seatIndex}">
+      <header class="think-card__head">
+        <span class="think-card__seat">${playerColorName(seatIndex + 1)}</span>
+        <span class="think-card__engine" data-field="engine">—</span>
+        <span class="think-card__pulse" data-field="pulse" hidden>live</span>
+      </header>
+
+      <div class="think-card__played think-card__slot" data-field="played-slot">
+        <span class="think-card__played-label">played</span>
+        <span class="think-card__played-move" data-field="played-move">&nbsp;</span>
+        <span class="think-card__ply" data-field="played-ply"></span>
+      </div>
+
+      <div class="think-card__hero think-card__hero--even" data-field="hero">
+        <div class="think-card__hero-split">
+          <div class="think-card__hero-side think-card__hero-side--eval">
+            <div class="think-card__hero-value" data-field="hero-left">…</div>
+            <div class="think-card__hero-label" data-field="hero-left-label">—</div>
+          </div>
+          <div class="think-card__hero-divider" aria-hidden="true"></div>
+          <div class="think-card__hero-side think-card__hero-side--depth">
+            <div class="think-card__hero-value think-card__hero-value--depth" data-field="hero-right">…</div>
+            <div class="think-card__hero-label" data-field="hero-right-label">depth</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="think-card__depth-feed think-card__slot" data-field="depth-feed" hidden>
+        <div class="think-card__depth-title" data-field="depth-title">Depth</div>
+        <ul class="think-card__depth-list" data-field="depth-list"></ul>
+      </div>
+
+      <div class="think-card__pv-lead think-card__slot" data-field="pv-lead" hidden>
+        <span class="think-card__pv-lead-label">PV</span>
+        <span class="think-card__pv-lead-move" data-field="pv-lead-move"></span>
+      </div>
+
+      <div class="think-card__race" title="Shortest-path steps to goal">
+        <div class="think-card__race-track">
+          <div class="think-card__race-white" data-field="race-bar" style="width:50%"></div>
+        </div>
+        <div class="think-card__race-meta">
+          <span class="think-card__race-label think-card__race-label--even" data-field="race-label">—</span>
+          <span class="think-card__race-dist" data-field="race-dist"></span>
+        </div>
+      </div>
+
+      <div class="think-card__pv think-card__slot" data-field="pv-block" hidden>
+        <span class="think-card__pv-label">line</span>
+        <span class="think-card__pv-text" data-field="pv-text"></span>
+      </div>
+
+      <div class="think-card__roots-block think-card__slot" data-field="roots-block" hidden>
+        <div class="think-card__roots-title" data-field="roots-title">Top lines</div>
+        <ul class="think-card__roots-list" data-field="roots-list"></ul>
+      </div>
+
+      <div class="think-card__budget" data-field="budget"></div>
+    </article>`;
+}
+
+function ensureThinkCardsHost(container) {
+  const playPanel = container.querySelector('.play-panel');
+  if (!playPanel) {
+    return null;
+  }
+  let host = playPanel.querySelector('[data-think-cards-host]');
+  if (!host) {
+    playPanel.insertAdjacentHTML('beforeend', '<div class="engine-think-cards-host" data-think-cards-host></div>');
+    host = playPanel.querySelector('[data-think-cards-host]');
+  }
+  let root = host.querySelector('.engine-think-cards');
+  if (!root) {
+    host.innerHTML = '<div class="engine-think-cards"></div>';
+    root = host.querySelector('.engine-think-cards');
+  }
+  for (const seat of [0, 1]) {
+    if (!root.querySelector(`[data-seat="${seat}"]`)) {
+      root.insertAdjacentHTML('beforeend', thinkCardShellHtml(seat));
+    }
+  }
+  return root;
+}
+
+function patchDepthFeed(card, payload) {
+  const block = card.querySelector('[data-field="depth-feed"]');
+  const list = card.querySelector('[data-field="depth-list"]');
+  const title = card.querySelector('[data-field="depth-title"]');
+  if (!block || !list) {
+    return;
+  }
+
+  const show = !usesRollouts(payload) && payload.depthLog?.length > 0;
+  block.hidden = !show;
+  if (!show) {
+    return;
+  }
+
+  setText(title, payload.live ? 'Depth (live)' : 'Depth');
+  const sig = depthFeedSignature(payload.depthLog);
+  if (card.dataset.depthSig === sig) {
+    return;
+  }
+  card.dataset.depthSig = sig;
+
+  const rows = [...payload.depthLog]
+    .sort((a, b) => b.depth - a.depth)
+    .slice(0, 6)
+    .map((entry) => {
+      const score = entry.score != null ? formatEngineScore(entry.score) : '—';
+      const nodes = entry.nodes > 0 ? ` · ${Number(entry.nodes).toLocaleString()}n` : '';
+      return `
+        <li class="think-card__depth-row">
+          <span class="think-card__depth-num">d${entry.depth}</span>
+          <span class="think-card__depth-score">${escapeHtml(score)}</span>
+          <span class="think-card__depth-nodes">${escapeHtml(nodes)}</span>
+        </li>`;
+    })
+    .join('');
+  list.innerHTML = rows;
+}
+
+function patchRoots(card, payload) {
+  const block = card.querySelector('[data-field="roots-block"]');
+  const list = card.querySelector('[data-field="roots-list"]');
+  const title = card.querySelector('[data-field="roots-title"]');
+  if (!block || !list) {
+    return;
+  }
+
+  const show = payload.rootMoves?.length > 0;
+  block.hidden = !show;
+  if (!show) {
+    return;
+  }
+
+  setText(title, usesRollouts(payload) ? 'Top MCTS moves' : 'Top lines');
+  const sig = rootsSignature(payload.rootMoves, payload);
+  if (card.dataset.rootsSig === sig) {
+    return;
+  }
+  card.dataset.rootsSig = sig;
+
+  const sortKey = usesRollouts(payload)
+    ? (r) => r.winRate ?? r.score ?? 0
+    : (r) => r.score ?? 0;
+  const sorted = [...payload.rootMoves].sort((a, b) => sortKey(b) - sortKey(a)).slice(0, 4);
+  list.innerHTML = sorted
     .map((r, i) => {
-      const score = formatEngineScore(r.score);
+      const score = formatRootMoveScore(r, payload);
       const best = i === 0 ? ' think-card__root-row--best' : '';
       return `
         <li class="think-card__root-row${best}">
@@ -334,120 +519,101 @@ function renderRootMovesList(rootMoves) {
         </li>`;
     })
     .join('');
-  return `
-    <div class="think-card__roots-block">
-      <div class="think-card__roots-title">Top lines</div>
-      <ul class="think-card__roots-list">${rows}</ul>
-    </div>`;
 }
 
-function renderThinkCard(seatIndex, payload) {
-  const colorClass = seatIndex === 0 ? 'think-card--white' : 'think-card--black';
-  const liveClass = payload.live ? ' think-card--live' : '';
-  const bar = raceBar(payload.whiteDist, payload.blackDist);
+function patchThinkCard(card, seatIndex, payload) {
   const hero = heroMetric(payload);
+  const bar = raceBar(payload.whiteDist, payload.blackDist);
   const budget = formatBudgetLine(payload);
   const distText =
     payload.whiteDist != null ? `path W${payload.whiteDist} · B${payload.blackDist}` : '';
   const pvLead = payload.live ? pvHeadline(payload.pv) : '';
-  const roots = renderRootMovesList(payload.rootMoves);
 
-  return `
-    <article class="think-card ${colorClass}${liveClass}">
-      <header class="think-card__head">
-        <span class="think-card__seat">${playerColorName(seatIndex + 1)}</span>
-        <span class="think-card__engine">${escapeHtml(payload.engine)}</span>
-        ${payload.live ? '<span class="think-card__pulse">live</span>' : ''}
-      </header>
+  card.classList.toggle('think-card--live', !!payload.live);
+  card.classList.toggle('think-card--idle', !!payload.idle);
 
-      ${payload.move
-    ? `<div class="think-card__played">
-            <span class="think-card__played-label">played</span>
-            <span class="think-card__played-move">${escapeHtml(payload.move)}</span>
-            <span class="think-card__ply">ply ${payload.ply}</span>
-          </div>`
-    : ''}
-
-      <div class="think-card__hero think-card__hero--${hero.tone}">
-        <div class="think-card__hero-split">
-          <div class="think-card__hero-side think-card__hero-side--eval">
-            <div class="think-card__hero-value">${escapeHtml(hero.left)}</div>
-            <div class="think-card__hero-label">${hero.mode === 'winrate' ? 'win rate' : hero.mode === 'eval' ? 'eval (sq)' : hero.mode === 'searching' ? 'searching' : '—'}</div>
-          </div>
-          <div class="think-card__hero-divider" aria-hidden="true"></div>
-          <div class="think-card__hero-side think-card__hero-side--depth">
-            <div class="think-card__hero-value think-card__hero-value--depth">${escapeHtml(hero.right)}</div>
-            <div class="think-card__hero-label">${escapeHtml(hero.rightLabel)}</div>
-          </div>
-        </div>
-      </div>
-
-      ${renderDepthFeed(payload.depthLog, payload.live, payload)}
-
-      ${pvLead && payload.live
-    ? `<div class="think-card__pv-lead">
-            <span class="think-card__pv-lead-label">PV</span>
-            <span class="think-card__pv-lead-move">${escapeHtml(pvLead)}</span>
-          </div>`
-    : ''}
-
-      <div class="think-card__race" title="Shortest-path steps to goal">
-        <div class="think-card__race-track">
-          <div class="think-card__race-white" style="width:${bar.pct}%"></div>
-        </div>
-        <div class="think-card__race-meta">
-          <span class="think-card__race-label think-card__race-label--${bar.side}">${bar.label}</span>
-          ${distText ? `<span class="think-card__race-dist">${escapeHtml(distText)}</span>` : ''}
-        </div>
-      </div>
-
-      ${payload.pv && !(payload.live && pvLead)
-    ? `<div class="think-card__pv">
-            <span class="think-card__pv-label">line</span>
-            <span class="think-card__pv-text">${escapeHtml(payload.pv)}</span>
-          </div>`
-    : ''}
-
-      ${roots}
-
-      ${budget ? `<div class="think-card__budget">${escapeHtml(budget)}</div>` : ''}
-    </article>
-  `;
-}
-
-export function renderEngineThinkCards(state) {
-  const cards = [0, 1]
-    .map((seat) => {
-      const payload = thinkPayloadForSeat(state, seat);
-      return payload ? renderThinkCard(seat, payload) : '';
-    })
-    .filter(Boolean);
-
-  if (!cards.length) {
-    return '';
+  const pulse = card.querySelector('[data-field="pulse"]');
+  if (pulse) {
+    pulse.hidden = !payload.live;
   }
 
-  return `<div class="engine-think-cards">${cards.join('')}</div>`;
+  setText(card.querySelector('[data-field="engine"]'), payload.engine ?? '—');
+
+  const playedSlot = card.querySelector('[data-field="played-slot"]');
+  const hasPlayed = Boolean(payload.move);
+  if (playedSlot) {
+    playedSlot.classList.toggle('think-card__slot--visible', hasPlayed);
+    playedSlot.classList.toggle('think-card__slot--hidden', !hasPlayed);
+  }
+  if (hasPlayed) {
+    setText(card.querySelector('[data-field="played-move"]'), payload.move);
+    setText(card.querySelector('[data-field="played-ply"]'), payload.ply ? `ply ${payload.ply}` : '');
+  }
+
+  const heroEl = card.querySelector('[data-field="hero"]');
+  if (heroEl) {
+    heroEl.classList.remove('think-card__hero--good', 'think-card__hero--bad', 'think-card__hero--even');
+    heroEl.classList.add(`think-card__hero--${hero.tone}`);
+  }
+  setText(card.querySelector('[data-field="hero-left"]'), hero.left);
+  setText(card.querySelector('[data-field="hero-right"]'), hero.right);
+  setText(
+    card.querySelector('[data-field="hero-left-label"]'),
+    hero.mode === 'winrate' ? 'win rate' : hero.mode === 'eval' ? 'eval (sq)' : hero.mode === 'searching' ? 'searching' : '—',
+  );
+  setText(card.querySelector('[data-field="hero-right-label"]'), hero.rightLabel);
+
+  patchDepthFeed(card, payload);
+
+  const pvLeadBlock = card.querySelector('[data-field="pv-lead"]');
+  const showPvLead = Boolean(payload.live && pvLead);
+  if (pvLeadBlock) {
+    pvLeadBlock.hidden = !showPvLead;
+  }
+  if (showPvLead) {
+    setText(card.querySelector('[data-field="pv-lead-move"]'), pvLead);
+  }
+
+  const raceBarEl = card.querySelector('[data-field="race-bar"]');
+  if (raceBarEl) {
+    raceBarEl.style.width = `${bar.pct}%`;
+  }
+  const raceLabel = card.querySelector('[data-field="race-label"]');
+  if (raceLabel) {
+    raceLabel.textContent = bar.label;
+    raceLabel.classList.remove('think-card__race-label--white', 'think-card__race-label--black', 'think-card__race-label--even');
+    raceLabel.classList.add(`think-card__race-label--${bar.side}`);
+  }
+  setText(card.querySelector('[data-field="race-dist"]'), distText);
+
+  const pvBlock = card.querySelector('[data-field="pv-block"]');
+  const showPv = Boolean(payload.pv && !(payload.live && pvLead));
+  if (pvBlock) {
+    pvBlock.hidden = !showPv;
+  }
+  if (showPv) {
+    setText(card.querySelector('[data-field="pv-text"]'), payload.pv);
+  }
+
+  patchRoots(card, payload);
+  setText(card.querySelector('[data-field="budget"]'), budget);
+}
+
+/** Legacy string render — prefer `updateEngineThinkCards` (in-place DOM). */
+export function renderEngineThinkCards(state) {
+  return '<div class="engine-think-cards-host" data-think-cards-host></div>';
 }
 
 export function updateEngineThinkCards(container, state) {
-  const host = container.querySelector('.play-panel');
-  if (!host) {
+  const root = ensureThinkCardsHost(container);
+  if (!root) {
     return;
   }
-
-  const html = renderEngineThinkCards(state);
-  const existing = host.querySelector('.engine-think-cards');
-
-  if (!html) {
-    existing?.remove();
-    return;
+  for (const seat of [0, 1]) {
+    const card = root.querySelector(`[data-seat="${seat}"]`);
+    const payload = thinkPayloadForSeat(state, seat);
+    if (card && payload) {
+      patchThinkCard(card, seat, payload);
+    }
   }
-
-  if (existing) {
-    existing.outerHTML = html;
-    return;
-  }
-
-  host.insertAdjacentHTML('beforeend', html);
 }

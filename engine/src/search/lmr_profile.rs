@@ -3,10 +3,12 @@
 use crate::core::board::Board;
 use crate::search::pipeline::walls_placed;
 
-pub const HOT_CM_OPENING: u16 = 60;
-pub const HOT_CM_MID: u16 = 40;
-pub const COLD_CM_OPENING: u16 = 20;
-pub const COLD_CM_MID: u16 = 30;
+/// Absolute cm floor for “cold” extra reduction (fringe walls / off-corridor).
+pub const COLD_CM_OPENING: u16 = 90;
+pub const COLD_CM_MID: u16 = 55;
+/// Top heat fraction at this node that skips LMR (higher = only hottest moves stay full-depth).
+pub const HOT_RATIO_OPENING_PCT: u16 = 97;
+pub const HOT_RATIO_MID_PCT: u16 = 84;
 
 pub const MATE_REFINE_SLACK: u32 = 4;
 pub const MATE_SPIN_MAX_MARGINAL_NODES: u64 = 15_000;
@@ -16,6 +18,9 @@ pub const MATE_MAX_TRUSTED_DIST: u32 = 64;
 pub const EVAL_SPIN_STABLE_ITERS: u32 = 3;
 /// Centipawns (×100 cm) — max root-score change to count as "stable".
 pub const EVAL_STABLE_SCORE_DELTA: i32 = 200;
+
+/// Reference think budget for neutral LMR (10s/move in UI/benchmarks).
+pub const TIME_REFERENCE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MateStopReason {
@@ -30,9 +35,12 @@ pub struct LmrProfile {
     pub aggression: f32,
     pub lmr_after_move: usize,
     pub cat_heat_lmr_slope: f32,
-    pub hot_cm: u16,
+    /// Skip LMR when `move_heat * 100 >= node_max_heat * hot_ratio_pct`.
+    pub hot_ratio_pct: u16,
     pub cold_cm: u16,
     pub depth_balance_floor: u32,
+    /// Marginal-node ceiling for depth-push feedback (opening layers are expensive).
+    pub depth_push_marginal_cap: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -54,10 +62,15 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t.clamp(0.0, 1.0)
 }
 
-fn compute_gates(stage_t: f32) -> (u16, u16) {
-    let hot = lerp(HOT_CM_OPENING as f32, HOT_CM_MID as f32, stage_t) as u16;
+fn compute_gates(stage_t: f32) -> (u16, u16, u64) {
+    let hot_ratio = lerp(
+        HOT_RATIO_OPENING_PCT as f32,
+        HOT_RATIO_MID_PCT as f32,
+        stage_t,
+    ) as u16;
     let cold = lerp(COLD_CM_OPENING as f32, COLD_CM_MID as f32, stage_t) as u16;
-    (hot, cold)
+    let push_cap = lerp(400_000.0, 8_000.0, stage_t) as u64;
+    (hot_ratio, cold, push_cap)
 }
 
 /// Default aggression — gentle LMR, fuller tree (legacy baseline ≈1.0).
@@ -67,7 +80,12 @@ fn aggression_default() -> f32 {
 
 /// Push ID depth when eval is stable and iterations are cheap (opening prep).
 fn aggression_depth_push() -> f32 {
-    1.35
+    1.45
+}
+
+/// Empty / early opening — maximize ID depth; CAT ranks cold walls for extra cut.
+fn aggression_opening_max() -> f32 {
+    2.5
 }
 
 /// Endgame pawn race — narrow tree, chase forcing lines.
@@ -81,17 +99,26 @@ fn aggression_tactical_wide() -> f32 {
 }
 
 impl LmrProfile {
-    /// Depth-first default — same posture as legacy static LMR until feedback adjusts.
+    /// Depth-first default — opening (low `stage_t`) is the most LMR-aggressive phase.
     pub fn depth_first_default(stage_t: f32) -> Self {
-        let (hot, cold) = compute_gates(stage_t);
+        let (hot_ratio, cold, push_cap) = compute_gates(stage_t);
+        let open_blend = (1.0 - stage_t / 0.35).clamp(0.0, 1.0);
+        let aggression = lerp(
+            aggression_opening_max(),
+            aggression_default(),
+            1.0 - open_blend,
+        );
+        let lmr_after = if stage_t < 0.35 { 1 } else { 4 };
+        let slope = lerp(0.052, 0.014, stage_t);
         Self {
             stage_t,
-            aggression: aggression_default(),
-            lmr_after_move: 4,
-            cat_heat_lmr_slope: 0.010,
-            hot_cm: hot,
+            aggression,
+            lmr_after_move: lmr_after,
+            cat_heat_lmr_slope: slope,
+            hot_ratio_pct: hot_ratio,
             cold_cm: cold,
-            depth_balance_floor: 40,
+            depth_balance_floor: if stage_t < 0.25 { 56 } else { 40 },
+            depth_push_marginal_cap: push_cap,
         }
     }
 
@@ -101,28 +128,30 @@ impl LmrProfile {
 
     /// Reproduces legacy static LMR when stage is neutral.
     pub fn baseline() -> Self {
-        let (hot, cold) = compute_gates(0.5);
+        let (hot_ratio, cold, push_cap) = compute_gates(0.5);
         Self {
             stage_t: 0.5,
             aggression: 1.0,
             lmr_after_move: 4,
             cat_heat_lmr_slope: 0.015,
-            hot_cm: hot,
+            hot_ratio_pct: hot_ratio,
             cold_cm: cold,
             depth_balance_floor: 70,
+            depth_push_marginal_cap: push_cap,
         }
     }
 
     pub fn mate_refine() -> Self {
-        let (hot, cold) = compute_gates(0.5);
+        let (hot_ratio, cold, _) = compute_gates(0.5);
         Self {
             stage_t: 0.5,
             aggression: 0.85,
             lmr_after_move: 8,
             cat_heat_lmr_slope: 0.005,
-            hot_cm: hot,
+            hot_ratio_pct: hot_ratio,
             cold_cm: cold,
             depth_balance_floor: 0,
+            depth_push_marginal_cap: 8_000,
         }
     }
 
@@ -153,9 +182,50 @@ impl LmrProfile {
     pub fn apply_depth_push(&mut self) {
         self.aggression = (self.aggression * 1.08)
             .max(aggression_depth_push())
-            .min(1.6);
-        self.lmr_after_move = self.lmr_after_move.saturating_sub(1).max(3);
+            .min(2.6);
+        self.lmr_after_move = self.lmr_after_move.saturating_sub(1).max(2);
+        self.cat_heat_lmr_slope = (self.cat_heat_lmr_slope * 1.10).min(0.060);
     }
+
+    /// Scale LMR for per-move think budget — less time → more pruning, chase depth.
+    pub fn apply_time_budget(&mut self, time_ms: u64) {
+        let t = time_pressure_from_ms(time_ms);
+        if t < 0.02 {
+            return;
+        }
+        let mul = 1.0 + t * 0.55;
+        self.aggression = (self.aggression * mul).min(3.4);
+        self.hot_ratio_pct = (self.hot_ratio_pct as f32 + t * 5.0).min(99.0) as u16;
+        self.cold_cm = (self.cold_cm as f32 + t * 30.0).min(150.0) as u16;
+        let cut = ((t * 2.5) as usize).min(self.lmr_after_move.saturating_sub(1));
+        self.lmr_after_move = self.lmr_after_move.saturating_sub(cut).max(1);
+        self.cat_heat_lmr_slope = (self.cat_heat_lmr_slope * (1.0 + t * 0.40)).min(0.090);
+        self.depth_push_marginal_cap =
+            ((self.depth_push_marginal_cap as f32) * (1.0 - t * 0.50).max(0.15)) as u64;
+        self.depth_balance_floor =
+            ((self.depth_balance_floor as f32) * (1.0 - t * 0.25)).max(24.0) as u32;
+    }
+
+    /// Extra pruning when the clock is running low within a move.
+    pub fn apply_time_urgency(&mut self, fraction_elapsed: f32, time_ms: u64) {
+        let base = time_pressure_from_ms(time_ms);
+        let urgency = ((fraction_elapsed - 0.55) / 0.45).clamp(0.0, 1.0);
+        let t = (base + urgency * (1.0 - base * 0.5)).clamp(0.0, 1.0);
+        let extra = (t - base).max(0.0);
+        if extra < 0.04 {
+            return;
+        }
+        self.aggression = (self.aggression * (1.0 + extra * 0.35)).min(3.6);
+        self.hot_ratio_pct = (self.hot_ratio_pct as f32 + extra * 3.0).min(99.0) as u16;
+        self.cold_cm = (self.cold_cm as f32 + extra * 12.0).min(160.0) as u16;
+    }
+}
+
+/// 0 = full 10s budget, 1 = severe crunch (~2s). Linear in budget fraction —
+/// at 8s/10s pressure≈0.2, at 5s≈0.5 (depth-first under time handicap).
+pub fn time_pressure_from_ms(time_ms: u64) -> f32 {
+    let frac = (time_ms as f32 / TIME_REFERENCE_MS as f32).clamp(0.15, 1.0);
+    (1.0 - frac).clamp(0.0, 1.0)
 }
 
 pub fn compute_stage_t(
@@ -181,7 +251,7 @@ pub fn build_lmr_table(aggression: f32) -> [[u32; 64]; 64] {
     let ag = aggression as f64;
     for depth in 1usize..64 {
         for mv_count in 1usize..64 {
-            let r_raw = 0.5 + (depth as f64).ln() * (mv_count as f64).ln() * (ag / 2.25);
+            let r_raw = 0.75 + (depth as f64).ln() * (mv_count as f64).ln() * (ag / 1.85);
             let cap = (depth / 2) as u32;
             let r = (r_raw.max(0.0) as u32).min(cap);
             table[depth][mv_count] = r;
@@ -261,7 +331,8 @@ pub fn apply_depth_feedback(
     aspiration_fails_delta: u32,
 ) {
     let eval_volatile = score_delta.abs() > EVAL_STABLE_SCORE_DELTA;
-    let tactical = profile.stage_t >= 0.40 || eval_volatile || aspiration_fails_delta >= 2;
+    // Opening pawn-PV ±1.21 oscillation is benign — don't widen LMR mid-ID.
+    let tactical = profile.stage_t >= 0.38 && (eval_volatile || aspiration_fails_delta >= 2);
 
     if tactical {
         profile.apply_tactical_wide();
@@ -270,15 +341,18 @@ pub fn apply_depth_feedback(
 
     // Cheap stable iterations → push depth (opening prep / quiet positions).
     if completed_depth < profile.depth_balance_floor
-        && marginal_nodes < 8_000
+        && marginal_nodes < profile.depth_push_marginal_cap
         && prev_marginal_nodes > 0
-        && fraction_elapsed < 0.75
+        && fraction_elapsed < 0.85
     {
         profile.apply_depth_push();
     }
 
-    // Branching explosion — widen so next depth can finish in budget.
-    if prev_marginal_nodes > 0 && marginal_nodes > prev_marginal_nodes.saturating_mul(4) {
+    // Branching explosion — widen so next depth can finish in budget (not in open prep).
+    if profile.stage_t >= 0.35
+        && prev_marginal_nodes > 0
+        && marginal_nodes > prev_marginal_nodes.saturating_mul(4)
+    {
         profile.apply_tactical_wide();
     }
 }
@@ -342,6 +416,29 @@ mod tests {
     }
 
     #[test]
+    fn time_pressure_increases_with_shorter_budget() {
+        let p10 = time_pressure_from_ms(10_000);
+        let p8 = time_pressure_from_ms(8_000);
+        let p3 = time_pressure_from_ms(3_000);
+        assert!(p10 < p8, "10s={p10} 8s={p8}");
+        assert!(p8 < p3, "8s={p8} 3s={p3}");
+        assert!((p8 - 0.2).abs() < 0.01, "8s pressure ~0.2 got {p8}");
+    }
+
+    #[test]
+    fn apply_time_budget_raises_aggression() {
+        let mut open = LmrProfile::depth_first_default(0.0);
+        let base = open.aggression;
+        open.apply_time_budget(1_000);
+        assert!(
+            open.aggression > base,
+            "base={base} after={}",
+            open.aggression
+        );
+        assert!(open.hot_ratio_pct > HOT_RATIO_OPENING_PCT);
+    }
+
+    #[test]
     fn spread_n_zero_cat_max_uses_neutral_guard() {
         let board = Board::new();
         let t = compute_stage_t(&board, 8, 8, 0, 0);
@@ -360,10 +457,19 @@ mod tests {
     }
 
     #[test]
-    fn depth_first_default_matches_baseline_aggression() {
-        let p = LmrProfile::depth_first_default(0.0);
-        assert!((p.aggression - 1.0).abs() < 0.01);
-        assert_eq!(p.lmr_after_move, 4);
+    fn opening_profile_is_most_aggressive() {
+        let open = LmrProfile::depth_first_default(0.0);
+        let mid = LmrProfile::depth_first_default(0.5);
+        assert!(
+            open.aggression > mid.aggression,
+            "opening aggression {} should exceed mid {}",
+            open.aggression,
+            mid.aggression
+        );
+        assert!(open.aggression >= aggression_opening_max() - 0.01);
+        assert_eq!(open.lmr_after_move, 1);
+        assert!(open.cat_heat_lmr_slope > mid.cat_heat_lmr_slope);
+        assert!(open.depth_push_marginal_cap > 100_000);
     }
 
     #[test]

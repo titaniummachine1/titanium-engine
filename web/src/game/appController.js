@@ -851,7 +851,7 @@ export class AppController {
             engine: this.liveSearch.playerLabel,
           });
           const now = performance.now();
-          if (now - this._liveUpdateLastMs >= 50) {
+          if (now - this._liveUpdateLastMs >= 16) {
             this._liveUpdateLastMs = now;
             (this.onLiveUpdate ?? this.onChange)?.();
           }
@@ -884,9 +884,11 @@ export class AppController {
         }
         this.onChange?.();
       };
-      engine.onError = () => {
+      engine.onError = (err) => {
         this.aiThinking = false;
-        this.engineErrors[playerType] = 'Engine error';
+        const message = err?.message ?? String(err ?? 'Engine error');
+        this.engineErrors[playerType] = message;
+        this.engineStatus[playerType] = 'error';
         this.onChange?.();
       };
       this.engines.set(playerType, engine);
@@ -956,6 +958,57 @@ export class AppController {
 
   seatIndexForPlayerType(playerType) {
     return this.settings.players.indexOf(playerType);
+  }
+
+  recordEngineFailure(playerType, { ply, error, budget }) {
+    const message = error?.message ?? String(error ?? 'Engine error');
+    console.error('Engine search failed', {
+      playerType,
+      ply,
+      engine: this.engineLabel(playerType),
+      message,
+      stack: error?.stack,
+    });
+
+    this.engineErrors[playerType] = message;
+    this.engineStatus[playerType] = 'error';
+    this.aiThinking = false;
+    this.thinkingPlayerType = null;
+    this.liveSearch = null;
+    this._thinkStartedAt = null;
+
+    const si = this.searchInfo[playerType] ?? {};
+    const thinkMs = resolveThinkMs(si, null);
+    const seat = this.seatIndexForPlayerType(playerType);
+    this.snapshotThinkSeat(seat, {
+      live: false,
+      ply,
+      move: null,
+      error: message,
+      stoppedBy: 'error',
+      engine: this.engineLabel(playerType),
+      depthLog: si.depthLog,
+      searchDepth: si.searchDepth,
+      whiteDist: si.whiteDist,
+      blackDist: si.blackDist,
+      nodes: si.nodes ?? si.simulations,
+      simulations: si.simulations ?? si.nodes,
+      thinkMs,
+    });
+    this.moveThinkLog.push({
+      ply,
+      move: null,
+      engine: this.engineLabel(playerType),
+      budget: budget ?? '',
+      error: message,
+      stoppedBy: 'error',
+      nodes: si.nodes ?? si.simulations ?? 0,
+      searchDepth: si.searchDepth,
+      whiteDist: si.whiteDist,
+      blackDist: si.blackDist,
+      depthLog: si.depthLog ? [...si.depthLog] : [],
+      thinkMs,
+    });
   }
 
   snapshotThinkSeat(seatIndex, fields) {
@@ -1117,6 +1170,8 @@ export class AppController {
         const snapshot = this.session.getSnapshot();
         const suggested = this.session.actionToLabel(action);
         const legal = snapshot.validActions.map((mv) => this.session.actionToLabel(mv));
+        const seat = this.seatIndexForPlayerType(playerType);
+        const si = this.searchInfo[playerType] ?? {};
         console.error('Engine produced illegal move', {
           playerType,
           suggested,
@@ -1133,8 +1188,24 @@ export class AppController {
           illegalMovePly: snapshot.actions.length + 1,
           legalMovesCount: legal.length,
         };
-        this.engineErrors[playerType] = `Illegal move ${suggested} on ply ${snapshot.actions.length + 1}`;
+        const illegalMsg = `Illegal move ${suggested} on ply ${snapshot.actions.length + 1} (${legal.length} legal)`;
+        this.engineErrors[playerType] = illegalMsg;
         this.engineStatus[playerType] = 'error';
+        this.moveThinkLog.push({
+          ply: snapshot.actions.length + 1,
+          move: suggested,
+          engine: this.engineLabel(playerType),
+          budget: describePlayerAiSettings(
+            playerType,
+            this._thinkAiSettings ?? this.settings.playerAiSettings[seat],
+            this.engineConfigs,
+          ),
+          error: illegalMsg,
+          stoppedBy: 'error',
+          thinkMs: resolveThinkMs(si, this._thinkStartedAt),
+          nodes: si.nodes ?? si.simulations ?? 0,
+          depthLog: si.depthLog ? [...si.depthLog] : [],
+        });
         this.onChange?.();
         return;
       }
@@ -1151,10 +1222,16 @@ export class AppController {
       if (requestSeq !== this._moveRequestSeq) {
         return;
       }
-      this.aiThinking = false;
-      this.thinkingPlayerType = null;
-      this.engineErrors[playerType] = err?.message ?? String(err ?? 'Engine error');
-      this.engineStatus[playerType] = 'error';
+      const seat = this.seatIndexForPlayerType(playerType);
+      this.recordEngineFailure(playerType, {
+        ply: requestPly + 1,
+        error: err,
+        budget: describePlayerAiSettings(
+          playerType,
+          this._thinkAiSettings ?? this.settings.playerAiSettings[seat],
+          this.engineConfigs,
+        ),
+      });
       this.onChange?.();
     };
 

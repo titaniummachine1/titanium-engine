@@ -77,25 +77,7 @@ impl BfsScratch {
 
     #[inline]
     pub fn both_players_reach_goals(&mut self, board: &Board) -> bool {
-        let masks = self.dir_masks(board);
-        let (r1, c1) = board.pawn(Player::One);
-        let start1 = square_index(r1, c1);
-        let goal1 = goal_square_mask(Player::One);
-        let (ok1, comp1) = flood_to_goal(start1, masks, goal1);
-        if !ok1 {
-            return false;
-        }
-
-        let (r2, c2) = board.pawn(Player::Two);
-        let start2 = square_index(r2, c2);
-        let goal2 = goal_square_mask(Player::Two);
-        let start2_bit = flood_bit_sq(start2);
-
-        if comp1 & start2_bit != 0 {
-            return comp1 & goal2 != 0;
-        }
-
-        flood_to_goal(start2, masks, goal2).0
+        both_players_reach_goals_with_masks(board, self.dir_masks(board))
     }
 
     pub fn fill_reachable(&mut self, board: &Board, player: Player, mask: &mut u128) {
@@ -189,6 +171,29 @@ impl BfsScratch {
             }
         }
     }
+}
+
+/// Both players can reach their goal row — uses caller-supplied masks (wall trials).
+#[inline]
+pub fn both_players_reach_goals_with_masks(board: &Board, masks: DirMasks) -> bool {
+    let (r1, c1) = board.pawn(Player::One);
+    let start1 = square_index(r1, c1);
+    let goal1 = goal_square_mask(Player::One);
+    let (ok1, comp1) = flood_to_goal(start1, masks, goal1);
+    if !ok1 {
+        return false;
+    }
+
+    let (r2, c2) = board.pawn(Player::Two);
+    let start2 = square_index(r2, c2);
+    let goal2 = goal_square_mask(Player::Two);
+    let start2_bit = flood_bit_sq(start2);
+
+    if comp1 & start2_bit != 0 {
+        return comp1 & goal2 != 0;
+    }
+
+    flood_to_goal(start2, masks, goal2).0
 }
 
 #[inline]

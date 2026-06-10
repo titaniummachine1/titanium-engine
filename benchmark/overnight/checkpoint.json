@@ -1,0 +1,13 @@
+{
+  "stepIndex": 0,
+  "probesRun": 1,
+  "confirmsRun": 0,
+  "deadline": 1781087346878,
+  "opts": {
+    "workers": 6,
+    "probeGames": 2,
+    "confirmGames": 4
+  },
+  "lastScore": "4-0",
+  "lastLabel": "fair-10v10 (recovered)"
+}
