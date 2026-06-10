@@ -2,3 +2,5 @@
 web/dist/
 *.log
 
+
+_vendor/*/
