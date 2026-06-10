@@ -1,7 +1,7 @@
 //! Distance-based CAT heat (legacy / tests only).
 //!
 //! Live board overlay uses `build::build_corridor_display_squares` in `viz.rs`
-//! (per-player max corridor heat). Search still uses summed `build_corridor_attention`.
+//! (per-player max corridor heat). Search uses the same max-merge in `build_corridor_attention`.
 
 use crate::core::board::{Board, Player};
 use crate::path::distance::fill_dist_from_sq;

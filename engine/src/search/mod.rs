@@ -6,6 +6,7 @@ pub mod deprecated;
 pub mod genmove;
 pub mod greedy;
 pub mod lmr_profile;
+pub mod lmr_viz;
 pub mod pipeline;
 pub mod runtime;
 pub mod tt;

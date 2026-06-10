@@ -32,10 +32,12 @@ pub const PIERCE_WALL_CAP_RELAXED_MID: usize = 38;
 /// Reference think budget for neutral LMR (10s/move in UI/benchmarks).
 pub const TIME_REFERENCE_MS: u64 = 10_000;
 
-/// Fraction of think elapsed before pierce relaxes into width (verify/refute phase).
-pub const PIERCE_RELAX_START: f32 = 0.40;
+/// Minimum elapsed fraction before pierce may relax (floor; tail budget usually later).
+pub const PIERCE_RELAX_START: f32 = 0.72;
+/// Final fraction of think reserved for verify/refute widen (relax at 1 − tail).
+pub const PIERCE_RELAX_TAIL: f32 = 0.24;
 /// Extra hot-ratio points at pierce peak (only CAT-top moves full-depth).
-pub const PIERCE_HOT_BONUS: f32 = 5.0;
+pub const PIERCE_HOT_BONUS: f32 = 6.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MateStopReason {
@@ -232,9 +234,9 @@ impl LmrProfile {
     }
 
     /// Pierce-first schedule within one think: start hyper-narrow on CAT-hot PV
-    /// (chase depth toward terminal races), then relax LMR as the clock advances
-    /// so secondary lines get verified without a late-clock choke.
-    pub fn apply_pierce_schedule(&mut self, fraction_elapsed: f32) {
+    /// (chase depth toward terminal races), then relax only in the final slice of
+    /// the clock — sized from remaining budget, not a fixed early fraction.
+    pub fn apply_pierce_schedule(&mut self, fraction_elapsed: f32, time_ms: u64) {
         let tunables = pierce_tunables_from_env();
         let f = fraction_elapsed.clamp(0.0, 1.0);
         let pierce = (1.0 - f).powf(tunables.pierce_pow);
@@ -242,16 +244,16 @@ impl LmrProfile {
 
         if pierce > 0.02 {
             let boost = 1.0 + pierce * tunables.aggr_boost;
-            self.aggression = (self.aggression * boost).min(3.8);
+            self.aggression = (self.aggression * boost).min(4.0);
             self.hot_ratio_pct =
                 (self.hot_ratio_pct as f32 + pierce * tunables.hot_bonus).min(99.0) as u16;
-            self.cold_cm = (self.cold_cm as f32 + pierce * 18.0).min(165.0) as u16;
-            let cut = ((pierce * 2.8) as usize).min(self.lmr_after_move.saturating_sub(1));
+            self.cold_cm = (self.cold_cm as f32 + pierce * 22.0).min(175.0) as u16;
+            let cut = ((pierce * 3.4) as usize).min(self.lmr_after_move.saturating_sub(1));
             self.lmr_after_move = self.lmr_after_move.saturating_sub(cut).max(1);
-            self.cat_heat_lmr_slope = (self.cat_heat_lmr_slope * (1.0 + pierce * 0.38)).min(0.095);
+            self.cat_heat_lmr_slope = (self.cat_heat_lmr_slope * (1.0 + pierce * 0.48)).min(0.100);
         }
 
-        let relax_start = tunables.relax_start;
+        let relax_start = pierce_relax_start(time_ms);
         if f > relax_start {
             let widen = ((f - relax_start) / (1.0 - relax_start)).clamp(0.0, 1.0);
             let widen = widen * widen;
@@ -319,15 +321,26 @@ pub fn pierce_tunables_from_env() -> PierceTunables {
     PierceTunables {
         relax_start: env_f32("TITANIUM_PIERCE_RELAX", PIERCE_RELAX_START),
         hot_bonus: env_f32("TITANIUM_PIERCE_HOT", PIERCE_HOT_BONUS),
-        aggr_boost: env_f32("TITANIUM_PIERCE_AGGR", 0.48),
-        pierce_pow: env_f32("TITANIUM_PIERCE_POW", 1.15),
+        aggr_boost: env_f32("TITANIUM_PIERCE_AGGR", 0.60),
+        pierce_pow: env_f32("TITANIUM_PIERCE_POW", 0.92),
     }
+}
+
+/// When pierce widens — last `PIERCE_RELAX_TAIL` of think at 10s; shorter budgets
+/// keep pierce longer (smaller tail) so depth chase uses most of the clock.
+pub fn pierce_relax_start(time_ms: u64) -> f32 {
+    let tunables = pierce_tunables_from_env();
+    let tail = env_f32("TITANIUM_PIERCE_RELAX_TAIL", PIERCE_RELAX_TAIL);
+    let pressure = time_pressure_from_ms(time_ms);
+    let tail = (tail - pressure * 0.07).clamp(0.14, 0.32);
+    let from_remaining = 1.0 - tail;
+    from_remaining.max(tunables.relax_start).min(0.90)
 }
 
 /// Full-depth move window (pawn + CAT-hot) — 2 at pierce peak, ~20 when relaxed.
 pub fn pierce_move_window(stage_t: f32, pierce: f32) -> usize {
     let relaxed = lerp(14.0, 20.0, stage_t);
-    let tight = lerp(2.0, 10.0, stage_t);
+    let tight = lerp(2.0, 7.0, stage_t);
     lerp(relaxed, tight, pierce).round().clamp(2.0, 20.0) as usize
 }
 
@@ -453,7 +466,7 @@ pub fn apply_depth_feedback(
     if completed_depth < profile.depth_balance_floor
         && marginal_nodes < profile.depth_push_marginal_cap
         && prev_marginal_nodes > 0
-        && fraction_elapsed < 0.85
+        && fraction_elapsed < pierce_relax_start(TIME_REFERENCE_MS)
     {
         profile.apply_depth_push();
     }
@@ -537,6 +550,25 @@ mod tests {
     }
 
     #[test]
+    fn pierce_relax_starts_in_final_time_slice() {
+        let at_10s = pierce_relax_start(10_000);
+        let at_5s = pierce_relax_start(5_000);
+        assert!(at_10s >= 0.72, "10s relax start {at_10s}");
+        assert!(
+            at_5s >= at_10s,
+            "shorter budget should pierce longer: 5s={at_5s} 10s={at_10s}"
+        );
+        let mut mid = LmrProfile::depth_first_default(0.3);
+        mid.apply_time_budget(10_000);
+        let aggr_mid = mid.aggression;
+        mid.apply_pierce_schedule(0.50, 10_000);
+        assert!(
+            mid.aggression > aggr_mid,
+            "50% elapsed should still be piercing at 10s"
+        );
+    }
+
+    #[test]
     fn pierce_schedule_narrows_early_and_relaxes_late() {
         let mut early = LmrProfile::depth_first_default(0.2);
         early.apply_time_budget(10_000);
@@ -545,7 +577,7 @@ mod tests {
         let base_after = early.lmr_after_move;
 
         let mut pierced = early;
-        pierced.apply_pierce_schedule(0.05);
+        pierced.apply_pierce_schedule(0.05, 10_000);
         assert!(
             pierced.aggression > base_aggr,
             "early pierce should raise aggression"
@@ -553,14 +585,14 @@ mod tests {
         assert!(pierced.hot_ratio_pct > base_hot);
         assert!(pierced.lmr_after_move <= base_after);
 
-        let mut relaxed = pierced;
-        relaxed.apply_pierce_schedule(0.85);
+        let mut late = early;
+        late.apply_pierce_schedule(0.85, 10_000);
         assert!(
-            relaxed.aggression < pierced.aggression,
+            late.aggression < pierced.aggression,
             "late think should relax aggression"
         );
-        assert!(relaxed.lmr_after_move >= pierced.lmr_after_move);
-        assert!(relaxed.hot_ratio_pct < pierced.hot_ratio_pct);
+        assert!(late.lmr_after_move >= pierced.lmr_after_move);
+        assert!(late.hot_ratio_pct < pierced.hot_ratio_pct);
     }
 
     #[test]

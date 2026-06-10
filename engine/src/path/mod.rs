@@ -6,7 +6,8 @@ pub mod flood;
 pub mod masks;
 
 pub use bfs::{
-    both_players_reach_goals, can_reach_goal, shortest_distance, BfsScratch,
+    both_players_reach_goals, both_players_reach_goals_with_masks, can_reach_goal,
+    shortest_distance, BfsScratch,
 };
 pub use masks::DirMasks;
 

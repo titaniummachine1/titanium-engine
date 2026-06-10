@@ -164,6 +164,8 @@ export class TitaniumEngineClient {
                 rootScore: data.rootScore,
                 rootWinRate: isMinimax ? null : data.rootWinRate,
                 rootMoves: data.rootMoves,
+                lmrProfile: data.lmrProfile,
+                lmrReSearches: data.lmrReSearches,
                 elapsedMs: data.elapsedMs,
               });
               continue;
@@ -191,6 +193,8 @@ export class TitaniumEngineClient {
                 blackDist: finalMeta.blackDist,
                 rootWinRate: stoppedBy === 'minimax' ? null : finalMeta.rootWinRate,
                 rootMoves: finalMeta.rootMoves,
+                lmrProfile: finalMeta.lmrProfile,
+                lmrReSearches: finalMeta.lmrReSearches,
                 progress: 1,
               });
               const action = parseAlgebraic(data.algebraic);

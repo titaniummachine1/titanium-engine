@@ -131,6 +131,66 @@ const bootstrap = new Function(
     return next.row === goalRow;
   }
 
+  function bestRootChild(mcts) {
+    if (!mcts.root.children.length) {
+      return null;
+    }
+    return mcts.root.maxSimsChild;
+  }
+
+  function moveToAlgebraicSafe(move) {
+    if (!move) {
+      return null;
+    }
+    try {
+      return toAlgebraic(gorisansonMoveToAction(move));
+    } catch {
+      return null;
+    }
+  }
+
+  function snapshotMctsRoot(mcts) {
+    const children = mcts.root.children;
+    if (!children.length) {
+      return { rootWinRate: null, rootMoves: [] };
+    }
+    const sorted = [...children]
+      .filter((child) => child?.move)
+      .sort((a, b) => b.numSims - a.numSims);
+    if (!sorted.length) {
+      return { rootWinRate: null, rootMoves: [] };
+    }
+    const best = sorted[0];
+    const rootMoves = sorted
+      .slice(0, 6)
+      .map((child) => {
+        const algebraic = moveToAlgebraicSafe(child.move);
+        if (!algebraic) {
+          return null;
+        }
+        const wr = child.numSims > 0 ? child.numWins / child.numSims : 0;
+        return {
+          move: algebraic,
+          winRate: wr,
+          score: Math.round(wr * 100),
+          visits: child.numSims,
+        };
+      })
+      .filter(Boolean);
+    const bestWr = best.numSims > 0 ? best.numWins / best.numSims : null;
+    return { rootWinRate: bestWr, rootMoves };
+  }
+
+  function pathDistances(game) {
+    try {
+      const d0 = AI.get2DArrayPrevAndNextAndDistanceToGoalFor(game.pawn0, game);
+      const d1 = AI.get2DArrayPrevAndNextAndDistanceToGoalFor(game.pawn1, game);
+      return { whiteDist: d0[2], blackDist: d1[2] };
+    } catch {
+      return { whiteDist: null, blackDist: null };
+    }
+  }
+
   function shouldStopGorisansonSearch(mcts, game, simulations) {
     if (simulations < 100) {
       return false;
@@ -138,21 +198,18 @@ const bootstrap = new Function(
     if (stmOneStepFromGoal(game)) {
       return true;
     }
-    if (!mcts.root.children.length) {
+    const best = bestRootChild(mcts);
+    if (!best || best.numSims < 100) {
       return false;
     }
-    const best = mcts.selectBestMove();
-    if (!best || best.n < 100) {
-      return false;
-    }
-    const wr = best.wins / best.n;
-    if (best.n >= 300 && wr >= 0.98) {
+    const wr = best.numSims > 0 ? best.numWins / best.numSims : 0;
+    if (best.numSims >= 300 && wr >= 0.98) {
       return true;
     }
-    if (best.n >= 150 && wr >= 0.99) {
+    if (best.numSims >= 150 && wr >= 0.99) {
       return true;
     }
-    if (mcts.root.children.length === 1 && best.n >= 500 && wr >= 0.95) {
+    if (mcts.root.children.length === 1 && best.numSims >= 500 && wr >= 0.95) {
       return true;
     }
     return false;
@@ -194,9 +251,17 @@ const bootstrap = new Function(
         break;
       }
 
-      if (tick % 5 === 0) {
+      if (tick % 3 === 0) {
         const elapsed = performance.now() - started;
-        postMessage({ type: 'progress', value: Math.min(0.99, elapsed / timeMs), simulations });
+        const snap = snapshotMctsRoot(mcts);
+        const dist = pathDistances(game);
+        postMessage({
+          type: 'progress',
+          value: Math.min(0.99, elapsed / timeMs),
+          simulations,
+          ...snap,
+          ...dist,
+        });
       }
     }
 
@@ -209,7 +274,9 @@ const bootstrap = new Function(
     if (!move) {
       throw new Error('no legal move');
     }
-    return { move, simulations, stoppedBy };
+    const snap = snapshotMctsRoot(mcts);
+    const dist = pathDistances(game);
+    return { move, simulations, stoppedBy, ...snap, ...dist };
   }
 
   return { Game, AI, searchForTime };
@@ -246,10 +313,15 @@ self.onmessage = (event) => {
         algebraicMove: toAlgebraic(gorisansonMoveToAction(result.move)),
         simulations: result.simulations,
         stoppedBy: result.stoppedBy,
+        rootWinRate: result.rootWinRate,
+        rootMoves: result.rootMoves,
+        whiteDist: result.whiteDist,
+        blackDist: result.blackDist,
         timeMs,
       });
     } catch (err) {
-      self.postMessage({ type: 'error', message: err.message ?? String(err) });
+      const message = err?.stack ?? err?.message ?? String(err);
+      self.postMessage({ type: 'error', message });
     }
     return;
   }

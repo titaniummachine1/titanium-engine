@@ -1,0 +1,25 @@
+  Ply 11 — Black to move   W walls: 8   B walls: 8
+
+ 9  ·   ·   ·   ·   ·   ·   ·   ·   · 
+                                      
+ 8  ·   ·   ·   ·   ·   ·   ·   ·   · 
+                                      
+ 7  ·   ·   ·   ·   ·   ·   ·   ·   · 
+                                      
+ 6  ·   ·   ·   ·  (B)  ·   ·   ·   · 
+                                      
+ 5  ·   ·   ·   ·   ·   ·   ·   ·   · 
+              +═══+═══+═══+═══+       
+ 4  ·   ·   · ║(W)  · ║ ·   ·   ·   · 
+              +       +               
+ 3  ·   ·   · ║ ·   · ║ ·   ·   ·   · 
+              +       +               
+ 2  ·   ·   ·   ·   ·   ·   ·   ·   · 
+                                      
+ 1  ·   ·   ·   ·   ·   ·   ·   ·   · 
+
+     a   b   c   d   e   f   g   h   i  
+
+  Walls on board: c3v e3v d4h f4h
+  BFS distances — White: 10 steps to row 9   Black: 7 steps to row 1
+  Move history (11): e2 e8 e3 e7 e4 e6 e3v d4h d4 c3v f4h

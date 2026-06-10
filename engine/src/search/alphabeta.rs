@@ -130,6 +130,18 @@ pub struct RootMoveInfo {
     pub mate_distance: Option<u32>,
     /// True if it's a pawn move, false for a wall.
     pub is_pawn: bool,
+    /// Search order at root (0 = first expanded).
+    pub order: usize,
+    pub cat_cm: i32,
+    pub tactical: bool,
+    pub hot: bool,
+    pub reduction: u32,
+    pub child_depth_full: u32,
+    pub child_depth_used: u32,
+    pub re_searched: bool,
+    pub in_full_window: bool,
+    /// Nodes spent searching this root move (last completed ID depth; log only).
+    pub nodes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -323,7 +335,7 @@ fn update_lmr_profile_for_depth(
         state.lmr_profile.apply_time_budget(state.config.time_ms);
         state
             .lmr_profile
-            .apply_pierce_schedule(state.fraction_elapsed());
+            .apply_pierce_schedule(state.fraction_elapsed(), state.config.time_ms);
     } else {
         let mut buf = [Move::Pawn { row: 1, col: 4 }; MAX_LEGAL_MOVES];
         let n = generate_legal_moves_slice(board, &mut buf, state.bfs);
@@ -355,7 +367,9 @@ fn update_lmr_profile_for_depth(
             state.last_iter_score_delta,
             state.last_iter_asp_fails,
         );
-        state.lmr_profile.apply_pierce_schedule(fraction);
+        state
+            .lmr_profile
+            .apply_pierce_schedule(fraction, state.config.time_ms);
     }
 
     state.lmr_table = build_lmr_table(state.lmr_profile.aggression);
@@ -1033,6 +1047,7 @@ fn negamax_inner(
         // [LMR_BLOCK_START]
         // Adaptive LMR — profile rebuilt each ID depth. Root: only move 1 is
         // always full-depth; cold root walls get reduced like internal nodes.
+        let in_full_window = moves_searched < full_depth_slots;
         let reduction = if (ply == 0 && moves_searched == 0)
             || (ply > 0 && is_tactical)
             || depth < LMR_MIN_DEPTH
@@ -1066,14 +1081,26 @@ fn negamax_inner(
         };
         // [LMR_BLOCK_END]
 
+        let nodes_before_root_mv = if ply == 0 && state.log {
+            state.nodes
+        } else {
+            0
+        };
+
         let undo = board.make_move(mv);
         // child_depth: one ply below current, plus any forcing extension so that
         // near-forced positions are searched one ply deeper throughout the subtree.
         let child_depth = (depth - 1) + forcing_extension;
+        let mut re_searched = false;
+        let child_depth_used = if moves_searched == 0 {
+            child_depth
+        } else {
+            child_depth.saturating_sub(reduction)
+        };
         let score = if moves_searched == 0 {
             search_child(state, board, child_depth, alpha, beta, ply)
         } else {
-            let reduced = child_depth.saturating_sub(reduction);
+            let reduced = child_depth_used;
             let mut s = if reduced == 0 {
                 -leaf_eval(state, board, -beta, -alpha, ply + 1)
             } else {
@@ -1082,6 +1109,7 @@ fn negamax_inner(
             if s > alpha && (reduction > 0 || s < beta) {
                 if reduction > 0 {
                     state.lmr_re_searches += 1;
+                    re_searched = true;
                 }
                 s = search_child(state, board, child_depth, alpha, beta, ply);
             }
@@ -1138,6 +1166,20 @@ fn negamax_inner(
                 gain: root_gain,
                 mate_distance: mate_distance(score),
                 is_pawn: matches!(mv, Move::Pawn { .. }),
+                order: moves_searched,
+                cat_cm,
+                tactical: is_tactical,
+                hot: heat_ratio_hot,
+                reduction,
+                child_depth_full: child_depth,
+                child_depth_used,
+                re_searched,
+                in_full_window,
+                nodes: if ply == 0 && state.log {
+                    state.nodes.saturating_sub(nodes_before_root_mv)
+                } else {
+                    0
+                },
             });
         }
 
@@ -1369,6 +1411,38 @@ fn flush_search_log() {
     let _ = std::io::stderr().flush();
 }
 
+fn format_root_moves_json(root_moves: &[RootMoveInfo]) -> String {
+    let mut root_json = String::new();
+    for (i, r) in root_moves.iter().enumerate() {
+        if i > 0 {
+            root_json.push(',');
+        }
+        root_json.push_str(&format!(
+            "{{\"move\":\"{}\",\"score\":{},\"mateDistance\":{},\"whiteDist\":{},\"blackDist\":{},\"gain\":{},\"kind\":\"{}\",\"order\":{},\"catCm\":{},\"tactical\":{},\"hot\":{},\"reduction\":{},\"childDepthFull\":{},\"childDepthUsed\":{},\"reSearched\":{},\"inFullWindow\":{},\"nodes\":{}}}",
+            r.mv,
+            r.score,
+            r.mate_distance
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "null".to_owned()),
+            r.white_dist_after,
+            r.black_dist_after,
+            r.gain,
+            if r.is_pawn { "pawn" } else { "wall" },
+            r.order,
+            r.cat_cm,
+            r.tactical,
+            r.hot,
+            r.reduction,
+            r.child_depth_full,
+            r.child_depth_used,
+            r.re_searched,
+            r.in_full_window,
+            r.nodes,
+        ));
+    }
+    root_json
+}
+
 fn emit_search_progress(
     state: &SearchState,
     config: &SearchConfig,
@@ -1380,43 +1454,36 @@ fn emit_search_progress(
     }
     let depth_json = format_depth_log_json(&state.depth_log);
     let root_score = state.depth_log.last().map(|e| e.score).unwrap_or(0);
+    let root_json = format_root_moves_json(&state.root_moves);
+    let profile_json = crate::search::lmr_viz::lmr_profile_fields(
+        &state.lmr_profile,
+        state.search_depth,
+    );
     eprintln!(
-        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"depthLog\":[{}]}}",
+        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"lmrReSearches\":{},\"lmrProfile\":{},\"depthLog\":[{}],\"rootMoves\":[{}]}}",
         state.search_depth,
         state.nodes,
         root_score,
         white_dist,
         black_dist,
-        depth_json
+        state.lmr_re_searches,
+        profile_json,
+        depth_json,
+        root_json
     );
     flush_search_log();
 }
 
-fn emit_json_report(report: &SearchReport, log: bool) {
+fn emit_json_report(report: &SearchReport, profile: &LmrProfile, log: bool) {
     if !log {
         return;
     }
     let depth_json = format_depth_log_json(&report.depth_log);
-    let mut root_json = String::new();
-    for (i, r) in report.root_moves.iter().enumerate() {
-        if i > 0 {
-            root_json.push(',');
-        }
-        root_json.push_str(&format!(
-            "{{\"move\":\"{}\",\"score\":{},\"mateDistance\":{},\"whiteDist\":{},\"blackDist\":{},\"gain\":{},\"kind\":\"{}\"}}",
-            r.mv,
-            r.score,
-            r.mate_distance
-                .map(|d| d.to_string())
-                .unwrap_or_else(|| "null".to_owned()),
-            r.white_dist_after,
-            r.black_dist_after,
-            r.gain,
-            if r.is_pawn { "pawn" } else { "wall" }
-        ));
-    }
+    let root_json = format_root_moves_json(&report.root_moves);
+    let profile_json =
+        crate::search::lmr_viz::lmr_profile_fields(profile, report.search_depth);
     eprintln!(
-        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"aspirationFails\":{},\"lmrReSearches\":{},\"mateExtensions\":{},\"pvMateFailures\":{},\"elapsedMs\":{},\"depthLog\":[{}],\"rootMoves\":[{}]}}",
+        "info json {{\"stoppedBy\":\"minimax\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"aspirationFails\":{},\"lmrReSearches\":{},\"mateExtensions\":{},\"pvMateFailures\":{},\"elapsedMs\":{},\"lmrProfile\":{},\"depthLog\":[{}],\"rootMoves\":[{}]}}",
         report.search_depth,
         report.nodes,
         report.root_score,
@@ -1427,6 +1494,7 @@ fn emit_json_report(report: &SearchReport, log: bool) {
         report.mate_extensions,
         report.pv_mate_failures,
         report.elapsed_ms,
+        profile_json,
         depth_json,
         root_json
     );
@@ -1741,7 +1809,7 @@ pub fn search_best_move(board: &mut Board, config: SearchConfig) -> Option<Searc
         elapsed_ms,
         root_moves: committed_root_moves,
     };
-    emit_json_report(&report, config.log);
+    emit_json_report(&report, &state.lmr_profile, config.log);
     Some(report)
 }
 

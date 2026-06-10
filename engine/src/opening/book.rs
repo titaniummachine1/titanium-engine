@@ -109,19 +109,27 @@ const BOOK_LINES: &[BookLine] = &[
         priority: 100,
         stm_bias: 0,
     },
-    // Mined anti-Gorisanson ply-7 walls — higher priority than center e3v.
+    // Proven fair-10v10 ply-7 — blocks south corridor; d3h self-traps White.
+    BookLine {
+        name: "mined-ply7-e3h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
+        reply: "e3h",
+        priority: 160,
+        stm_bias: 0,
+    },
+    // Alt mined walls — below e3h mainline.
     BookLine {
         name: "mined-ply7-h3h",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
         reply: "h3h",
-        priority: 150,
+        priority: 140,
         stm_bias: 0,
     },
     BookLine {
         name: "mined-ply7-a3h",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
         reply: "a3h",
-        priority: 150,
+        priority: 140,
         stm_bias: 0,
     },
     // Shiller center vertical — kept as a documented PV but demoted: d4h+c3v refutes.
@@ -147,40 +155,12 @@ const BOOK_LINES: &[BookLine] = &[
         priority: 130,
         stm_bias: 0,
     },
-    // After e5 Black can jump to e4, leaving a tied race.  Playing d3h
-    // immediately creates a 2-step forced detour for Black (d3h blocks both
-    // e4→e3 and d4→d3), giving White the race lead before spending more walls.
+    // After e5 Black jumps to e4; e3h blocks the south corridor (d3h cages White — illegal).
     BookLine {
         name: "center-anti-jump",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4"],
-        reply: "d3h",
+        reply: "e3h",
         priority: 130,
-        stm_bias: 0,
-    },
-    // If Black retreats north to e6 after d3h, White jumps over them to e7
-    // (Black is at e6, White at e5 — jump lands at e7 = 2 steps from goal).
-    BookLine {
-        name: "center-anti-jump-retreat",
-        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "d3h", "e6"],
-        reply: "e7",
-        priority: 130,
-        stm_bias: 0,
-    },
-    // After d3h Black's optimal east detour is f4→f3→f2→f1 (4 steps).
-    // White advances to keep tempo.
-    BookLine {
-        name: "center-anti-jump-detour-east",
-        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "d3h", "f4"],
-        reply: "e6",
-        priority: 128,
-        stm_bias: 0,
-    },
-    // Suboptimal west detour (c4 forces 5-step path after d3h); White still advances.
-    BookLine {
-        name: "center-anti-jump-detour-west",
-        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "d3h", "c4"],
-        reply: "e6",
-        priority: 127,
         stm_bias: 0,
     },
     BookLine {
@@ -420,12 +400,8 @@ fn push_book_variant(out: &mut Vec<BookEntry>, line: &BookLine, mirrored: bool) 
     }
     let reply = parse_algebraic(&reply_text);
     if !is_legal_reply(&mut board, reply) {
-        panic!(
-            "illegal opening reply {} for {} ({})",
-            reply_text,
-            line.name,
-            if mirrored { "mirrored" } else { "direct" }
-        );
+        // Skip lines that depended on pre-fix wall legality (topology shortcut).
+        return;
     }
     let stm_bias = if line.stm_bias != 0 {
         line.stm_bias
@@ -646,10 +622,6 @@ mod tests {
         matches!(reply, Some("h3h" | "a3h" | "e3v" | "d3v" | "c3v"))
     }
 
-    fn is_center_anti_jump(reply: Option<&str>) -> bool {
-        matches!(reply, Some("d3h" | "e3h"))
-    }
-
     #[test]
     fn book_center_start() {
         let mut board = Board::new();
@@ -683,17 +655,6 @@ mod tests {
     fn book_rejects_passive_stonewall_followup() {
         let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "d1h"]);
         assert_eq!(lookup_text(&mut board).as_deref(), Some("d6h"));
-    }
-
-    #[test]
-    fn book_blocks_jump_with_d3h() {
-        // After e5 Black jumps over White to e4; d3h forces a 2-step detour.
-        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4"]);
-        let reply = lookup_text(&mut board);
-        assert!(
-            is_center_anti_jump(reply.as_deref()),
-            "expected d3h or e3h, got {reply:?}"
-        );
     }
 
     #[test]

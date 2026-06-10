@@ -4,9 +4,9 @@ use std::env;
 use std::time::Instant;
 
 use titanium::{
-    cat_snapshot_json, generate_legal_moves, genmove_algebraic, perft_divide, Board, Engine,
-    GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
-    MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT,
+    cat_snapshot_json, generate_legal_moves, genmove_algebraic, lmr_snapshot_json, perft_divide,
+    Board, Engine, GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES,
+    DEFAULT_TIME_MS, MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT,
 };
 
 fn main() {
@@ -26,6 +26,7 @@ fn main() {
         "moves" => run_moves(),
         "genmove" => run_genmove(&args),
         "cat" => run_cat(&args),
+        "lmr" => run_lmr(&args),
         _ => print_usage(),
     }
 }
@@ -43,6 +44,7 @@ fn print_usage() {
     println!("              [--time SEC] [--sims N] [--uct F] [--nodes N] [--log]");
     println!("              — default: Gorisanson-style MCTS in Rust");
     println!("  titanium cat [moves...]                — CAT v3 heatmap JSON for current position");
+    println!("  titanium lmr [moves...] [--time SEC]   — root LMR plan JSON (shallow, pre-search)");
 }
 
 const DEFAULT_PERFT_DEPTH: u32 = 3;
@@ -340,6 +342,29 @@ fn run_cat(args: &[String]) {
         board.apply_algebraic(mv);
     }
     println!("{}", cat_snapshot_json(&mut board));
+}
+
+fn run_lmr(args: &[String]) {
+    let mut board = Board::new();
+    let mut time_ms = DEFAULT_TIME_MS;
+    let mut i = 2usize;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--time" {
+            if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
+                time_ms = (sec * 1000.0).round() as u64;
+                i += 2;
+                continue;
+            }
+        } else if arg.starts_with("--") {
+            i += 1;
+            continue;
+        } else {
+            board.apply_algebraic(arg);
+        }
+        i += 1;
+    }
+    println!("{}", lmr_snapshot_json(&mut board, time_ms));
 }
 
 fn run_genmove(args: &[String]) {

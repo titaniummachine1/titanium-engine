@@ -1,0 +1,83 @@
+=== Quoridor game report ===
+
+Result: Black wins · 66 plies
+White: Titanium αβ + CAT
+Black: Gorisanson (JS, original)
+Budget: Titanium αβ + CAT: 10s · ≤10B · Gorisanson (JS, original): 5s · ≤66.0k
+Game: 1
+
+Final position: White=i8 Black=e1
+Path distance: W=1 B=0 · margin=-1 (positive = White ahead)
+Walls used: White=10 Black=10 · left W=0 B=0
+Race swing: closest margin=0 · best White lead=+253 · best Black lead=-4
+Verdict: close — loser within 3 steps of goal
+
+Replay: tq1#{"a":"rust-titanium","b":"gorisanson","plies":66,"winner":"gorisanson"} e2 e8 e3 e7 e4 e6 e3h d6h e5 e4 e6 e5v c3h c5v g3h f5h a3h h5h f3v b4h h1h f4 f1h f5 d6 a8h d5 c8h d4 g5 c4 e8h b4 g8h a4 g4 h3v h4 a5 h5 a6 i5 a7 i4 b7 i3 c7 i2 d7 h2 g1v h3 e7 g3 f7 g2 f8 f2 e1v f3 g8 e3 h8 e2 i8 e1
+
+--- Think chain ---
+ply1 White [Titanium αβ + CAT] e2 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W8 B8 margin=0 766701nodes 0sims 10.00s (minimax) d1=0.00 d2=1.21 d3=0.00 d4=1.21 d5=0.00 d6=1.21 d7=-0.18 d8=1.15 d8 LMR↺305
+ply2 Black [Gorisanson (JS, original)] e8 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W7 B7 margin=0 0sims 0.00s (opening)
+ply3 White [Titanium αβ + CAT] e3 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W7 B7 margin=0 741961nodes 0sims 10.00s (minimax) d1=0.00 d2=1.21 d3=0.00 d4=1.21 d5=-0.18 d6=1.15 d7=-0.06 d8=1.09 d8 LMR↺349
+ply4 Black [Gorisanson (JS, original)] e7 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W6 B6 margin=0 20024sims 5.00s wr=42% (time)
+ply5 White [Titanium αβ + CAT] e4 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W6 B6 margin=0 754025nodes 0sims 10.00s (minimax) d1=0.00 d2=1.21 d3=-0.18 d4=1.15 d5=-0.06 d6=1.09 d7=-0.06 d8=1.09 d8 LMR↺886
+ply6 Black [Gorisanson (JS, original)] e6 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W5 B5 margin=0 22065sims 5.00s wr=44% (time)
+ply7 White [Titanium αβ + CAT] e3h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W6 B6 margin=0 0nodes 0sims 0.02s (mcts)
+ply8 Black [Gorisanson (JS, original)] d6h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W7 B6 margin=-1 22196sims 5.00s wr=46% (time)
+ply9 White [Titanium αβ + CAT] e5 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W6 B6 margin=0 655899nodes 0sims 10.00s (minimax) d1=-0.06 d2=1.09 d3=-0.12 d4=0.06 d5=-0.18 d6=0.00 d6 LMR↺917
+ply10 Black [Gorisanson (JS, original)] e4 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W5 B3 margin=-2 22325sims 5.01s wr=58% (time)
+ply11 White [Titanium αβ + CAT] e6 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W5 B4 margin=-1 625323nodes 0sims 10.00s (minimax) d1=-1.16 d2=-0.06 d3=-1.23 d4=-1.13 d5=-1.27 d6=0.00 d7=-0.97 d8=-1.09 d8 LMR↺899
+ply12 Black [Gorisanson (JS, original)] e5v budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 31485sims 5.00s wr=63% (time)
+ply13 White [Titanium αβ + CAT] c3h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W5 B4 margin=-1 632544nodes 0sims 10.00s (minimax) d1=-1.23 d2=-2.09 d3=-1.09 d4=0.12 d5=-0.97 d6=-0.97 d7=-1.09 d7 LMR↺806
+ply14 Black [Gorisanson (JS, original)] c5v budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 23600sims 5.00s wr=76% (time)
+ply15 White [Titanium αβ + CAT] g3h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W8 B5 margin=-3 536530nodes 0sims 10.00s (minimax) d1=-3.78 d2=-2.21 d3=-1.15 d4=-2.09 d5=-1.09 d6=-2.03 d7=-0.12 d8=0.18 d8 LMR↺2558
+ply16 Black [Gorisanson (JS, original)] f5h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 18790sims 5.00s wr=78% (time)
+ply17 White [Titanium αβ + CAT] a3h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W9 B6 margin=-3 459427nodes 0sims 10.00s (minimax) d1=-3.69 d2=-2.15 d3=-1.09 d4=-0.06 d5=-0.97 d6=-1.91 d7=-1.95 d8=3.57 d8 LMR↺1814
+ply18 Black [Gorisanson (JS, original)] h5h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 18890sims 5.00s wr=63% (time)
+ply19 White [Titanium αβ + CAT] f3v budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W9 B7 margin=-2 549761nodes 0sims 10.00s (minimax) d1=-1.15 d2=-1.03 d3=-2.09 d4=-1.91 d5=-2.09 d6=-1.91 d7=-2.03 d8=-1.03 d9=-1.15 d10=-1.03 d11=-2.01 d11 LMR↺92
+ply20 Black [Gorisanson (JS, original)] b4h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 18996sims 5.00s wr=64% (time)
+ply21 White [Titanium αβ + CAT] h1h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W11 B9 margin=-2 552331nodes 0sims 10.00s (minimax) d1=-1.15 d2=-1.03 d3=-2.03 d4=-1.97 d5=-2.03 d6=-1.97 d7=-2.03 d8=-1.97 d9=-2.03 d10=-1.09 d11=-1.95 d12=-1.09 d13=-2.09 d13 LMR↺138
+ply22 Black [Gorisanson (JS, original)] f4 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B3 margin=-1 16417sims 5.00s wr=59% (time)
+ply23 White [Titanium αβ + CAT] f1h budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W11 B10 margin=-1 542127nodes 0sims 10.00s (minimax) d1=-0.06 d2=0.00 d3=-1.09 d4=-1.09 d5=-1.09 d6=-1.09 d7=-1.09 d8=-1.09 d9=-1.95 d10=-1.09 d11=-2.09 d12=-1.09 d13=-2.11 d13 LMR↺69
+ply24 Black [Gorisanson (JS, original)] f5 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B255 margin=+251 15672sims 5.00s wr=57% (time)
+ply25 White [Titanium αβ + CAT] d6 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W11 B11 margin=0 180494nodes 0sims 3.10s (minimax) d1=0.97 d2=1.09 d3=-0.06 d4=0.00 d5=-0.06 d6=0.00 d7=-1.15 d8=-1.09 d9=-2.05 d10=-1.09 d11=-2.17 d12=-1.15 d12 LMR↺58
+ply26 Black [Gorisanson (JS, original)] a8h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B255 margin=+251 19307sims 5.00s wr=58% (time)
+ply27 White [Titanium αβ + CAT] d5 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W12 B11 margin=-1 50595nodes 0sims 0.94s (minimax) d1=-0.06 d2=0.00 d3=-1.15 d4=-1.09 d5=-1.15 d6=-1.09 d7=-2.09 d8=-1.09 d9=-2.17 d10=-1.15 d11=-1.27 d12=-0.12 d12 LMR↺6
+ply28 Black [Gorisanson (JS, original)] c8h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W5 B255 margin=+250 20235sims 5.00s wr=55% (time)
+ply29 White [Titanium αβ + CAT] d4 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W13 B11 margin=-2 35056nodes 0sims 0.59s (minimax) d1=-1.15 d2=-1.09 d3=-2.09 d4=-1.97 d5=-2.09 d6=-1.09 d7=-2.17 d8=-1.15 d9=-1.27 d10=-0.12 d11=-1.21 d12=-0.06 d12 LMR↺6
+ply30 Black [Gorisanson (JS, original)] g5 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W255 B255 margin=0 20032sims 5.00s wr=56% (time)
+ply31 White [Titanium αβ + CAT] c4 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W12 B10 margin=-2 41769nodes 0sims 0.68s (minimax) d1=-1.27 d2=-1.09 d3=-2.17 d4=-1.97 d5=-2.17 d6=-1.15 d7=-1.27 d8=-0.12 d9=-1.21 d10=-0.06 d11=-1.21 d12=-0.06 d12 LMR↺6
+ply32 Black [Gorisanson (JS, original)] e8h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W255 B255 margin=0 25563sims 5.00s wr=58% (time)
+ply33 White [Titanium αβ + CAT] b4 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W13 B10 margin=-3 28795nodes 0sims 0.36s (minimax) d1=-2.17 d2=-1.97 d3=-3.65 d4=-2.03 d5=-2.17 d6=-1.15 d7=-1.21 d8=-0.06 d9=-1.21 d10=0.00 d11=-1.21 d12=0.00 d12 LMR↺17
+ply34 Black [Gorisanson (JS, original)] g8h budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W255 B255 margin=0 30089sims 5.00s wr=63% (time)
+ply35 White [Titanium αβ + CAT] a4 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W14 B10 margin=-4 14179nodes 0sims 0.20s (minimax) d1=-3.65 d2=-2.03 d3=-3.65 d4=-1.97 d5=-2.17 d6=-1.03 d7=-1.21 d8=0.00 d9=-1.21 d10=0.00 d11=-1.21 d12=0.00 d12
+ply36 Black [Gorisanson (JS, original)] g4 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W255 B255 margin=0 33480sims 5.00s wr=57% (time)
+ply37 White [Titanium αβ + CAT] h3v budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W13 B9 margin=-4 13692nodes 0sims 0.14s (minimax) d1=-3.65 d2=-1.97 d3=-2.17 d4=-1.03 d5=-1.21 d6=0.00 d7=-1.21 d8=0.00 d9=-1.21 d10=0.00 d11=-1.15 d12=0.00 d12 LMR↺1
+ply38 Black [Gorisanson (JS, original)] h4 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W255 B255 margin=0 43013sims 5.00s wr=60% (time)
+ply39 White [Titanium αβ + CAT] a5 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W13 B10 margin=-3 9651nodes 0sims 0.13s (minimax) d1=-2.17 d2=-1.03 d3=-1.95 d4=-0.97 d5=-1.21 d6=0.00 d7=-1.21 d8=0.00 d9=-1.21 d10=0.00 d11=-1.15 d12=0.00 d12
+ply40 Black [Gorisanson (JS, original)] h5 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W4 B255 margin=+251 52047sims 5.00s wr=63% (time)
+ply41 White [Titanium αβ + CAT] a6 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W12 B9 margin=-3 13205nodes 0sims 0.13s (minimax) d1=-1.95 d2=-0.97 d3=-2.01 d4=-1.03 d5=-1.27 d6=-0.06 d7=-1.21 d8=0.00 d9=-1.15 d10=0.00 d11=-1.09 d12=0.00 d12 LMR↺2
+ply42 Black [Gorisanson (JS, original)] i5 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W3 B255 margin=+252 66000sims 5.00s wr=71% (visits)
+ply43 White [Titanium αβ + CAT] a7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W11 B8 margin=-3 12905nodes 0sims 0.14s (minimax) d1=-1.95 d2=-0.97 d3=-1.93 d4=-1.03 d5=-1.27 d6=-0.06 d7=-1.15 d8=0.00 d9=-1.09 d10=0.06 d11=-1.09 d12=0.06 d12 LMR↺2
+ply44 Black [Gorisanson (JS, original)] i4 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W2 B255 margin=+253 66000sims 3.71s wr=82% (visits)
+ply45 White [Titanium αβ + CAT] b7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W10 B7 margin=-3 11992nodes 0sims 0.10s (minimax) d1=-1.95 d2=-0.97 d3=-1.93 d4=-1.03 d5=-1.21 d6=0.00 d7=-1.09 d8=0.06 d9=-1.09 d10=0.06 d11=-1.09 d12=0.06 d12 LMR↺1
+ply46 Black [Gorisanson (JS, original)] i3 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W2 B255 margin=+253 66000sims 2.64s wr=88% (visits)
+ply47 White [Titanium αβ + CAT] c7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W9 B6 margin=-3 11016nodes 0sims 0.08s (minimax) d1=-1.93 d2=-1.03 d3=-1.95 d4=-1.03 d5=-1.09 d6=0.06 d7=-1.09 d8=0.06 d9=-1.09 d10=0.06 d11=-0.99 d12=0.10 d12 LMR↺2
+ply48 Black [Gorisanson (JS, original)] i2 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W2 B1 margin=-1 66000sims 1.81s wr=93% (visits)
+ply49 White [Titanium αβ + CAT] d7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W8 B5 margin=-3 12577nodes 0sims 0.11s (minimax) d1=-1.93 d2=-1.03 d3=-1.89 d4=-0.97 d5=-1.09 d6=0.06 d7=-1.09 d8=0.06 d9=-1.01 d10=0.08 d11=-1.45 d12=0.14 d12 LMR↺2
+ply50 Black [Gorisanson (JS, original)] h2 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W3 B1 margin=-2 66000sims 1.22s wr=95% (visits)
+ply51 White [Titanium αβ + CAT] g1v budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W7 B4 margin=-3 9646nodes 0sims 0.07s (minimax) d1=-1.95 d2=-0.97 d3=-1.15 d4=0.06 d5=-1.15 d6=0.00 d7=-1.05 d8=0.10 d9=-1.45 d10=0.00 d11=0.06 d12=0.06 d12 LMR↺2
+ply52 Black [Gorisanson (JS, original)] h3 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W3 B255 margin=+252 13600sims 0.12s wr=98% (forced)
+ply53 White [Titanium αβ + CAT] e7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W7 B5 margin=-2 5192nodes 0sims 0.04s (minimax) d1=-1.15 d2=0.06 d3=-1.21 d4=0.00 d5=-1.05 d6=0.10 d7=-1.49 d8=0.02 d9=-1.45 d10=0.06 d11=-0.02 d12=0.06 d12 LMR↺2
+ply54 Black [Gorisanson (JS, original)] g3 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W3 B255 margin=+252 9450sims 0.07s wr=98% (forced)
+ply55 White [Titanium αβ + CAT] f7 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W6 B4 margin=-2 5383nodes 0sims 0.04s (minimax) d1=-1.21 d2=0.00 d3=-1.07 d4=0.08 d5=-1.51 d6=0.14 d7=-1.45 d8=0.06 d9=-0.02 d10=0.06 d11=-1.37 d12=-1.37 d12 LMR↺1
+ply56 Black [Gorisanson (JS, original)] g2 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W2 B1 margin=-1 4350sims 0.03s wr=98% (forced)
+ply57 White [Titanium αβ + CAT] f8 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W5 B3 margin=-2 4397nodes 0sims 0.04s (minimax) d1=-1.05 d2=0.02 d3=-1.51 d4=0.14 d5=-1.47 d6=0.06 d7=-0.02 d8=0.06 d9=-1.37 d10=-1.63 d11=-1.63 d12=-1.63 d12 LMR↺2
+ply58 Black [Gorisanson (JS, original)] f2 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W1 B1 margin=0 950sims 0.01s wr=98% (forced)
+ply59 White [Titanium αβ + CAT] e1v budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W4 B2 margin=-2 1280nodes 0sims 0.01s (minimax) d1=-1.51 d2=0.00 d3=-1.47 d4=0.06 d5=-1.65 d6=0.06 d7=-1.63 d8=-1.63 d9=-1.63 d10=-1.63 d11=0.06 d12=0.06 d12 LMR↺1
+ply60 Black [Gorisanson (JS, original)] f3 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W1 B3 margin=+2 200sims 0.00s wr=100% (forced)
+ply61 White [Titanium αβ + CAT] g8 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W4 B3 margin=-1 666nodes 0sims 0.01s (minimax) d1=-1.47 d2=0.06 d3=-1.65 d4=0.06 d5=-1.63 d6=-1.63 d7=0.06 d8=0.06 d9=0.04 d10=-M d10 LMR↺2
+ply62 Black [Gorisanson (JS, original)] e3 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W1 B2 margin=+1 200sims 0.00s wr=99% (forced)
+ply63 White [Titanium αβ + CAT] h8 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W3 B2 margin=-1 323nodes 0sims 0.01s (minimax) d1=-1.65 d2=0.06 d3=-1.63 d4=0.06 d5=0.04 d6=-M d7=-M d8=-M d9=-M d9 LMR↺2
+ply64 Black [Gorisanson (JS, original)] e2 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W1 B1 margin=0 200sims 0.00s wr=99% (forced)
+ply65 White [Titanium αβ + CAT] i8 budget=Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap W2 B1 margin=-1 42nodes 0sims 0.01s (minimax) d1=-1.63 d2=0.06 d3=-M d4=-M d5=-M d6=-M d6 LMR↺2
+ply66 Black [Gorisanson (JS, original)] e1 budget=Gorisanson MCTS (5s/66000 cap): 5s · ≤66000 cap W1 B0 margin=-1 0sims 0.00s (win-in-1)

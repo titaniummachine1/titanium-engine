@@ -16,7 +16,7 @@ export function renderCatHint(container, state, controller) {
       <p class="cat-hint__title">CAT vision</p>
       <div class="cat-hint__bar" aria-hidden="true"></div>
       <p class="cat-hint__labels"><span>cold</span><span>warm</span><span>hot</span></p>
-      <p class="cat-hint__text">Numbers = raw engine heat in cm (exactly what search sees). Tint anchors: ≥60 warm corridor, ≥160 hot (tactical / no LMR). Cold fringe shows a faint number, no tint. Dark squares are unreachable. Wall outlines = searchable walls.</p>
+      <p class="cat-hint__text">Numbers = raw engine heat in cm. Square tints: ≥60 warm, ≥160 hot. Each wall slot shows one half-segment (where you click); heat printed on that slot. Skipped walls are dimmed.</p>
       <button type="button" class="btn btn--primary btn--small" data-action="dismiss-cat-hint">Got it</button>
     </div>
   `;

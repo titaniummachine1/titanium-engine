@@ -1,0 +1,4 @@
+{"ts":"2026-06-10T01:15:00Z","iter":0,"finding":"probe-10v10 1-3: d3h at ply7 not e3h; book had h3h/a3h not e3h; 300k-390k nodes/move; 1114 lmr re-searches at ply5","action":"add mined-ply7-e3h priority 160; stronger book aspiration; pierce relax 0.40"}
+{"ts":"2026-06-10T01:26:00Z","iter":1,"score":"1-11","finding":"all 12 games d3h ply7 despite book hint — soft aspiration insufficient; avg 145k nodes/move","action":"instant book play priority>=160; fix pierceEnv load from best_pierce.json; rebuild required"}
+{"ts":"2026-06-10T01:32:00Z","iter":2,"score":"0-6","probe":"5v10","finding":"e3h all 6 games ply7; nodes 78k/move; 0-6 expected at half time","action":"run fair 10v10 chunk next"}
+{"ts":"2026-06-10T01:41:00Z","iter":3,"score":"4-8","probe":"10v5","finding":"33% WR with 2x time — middlegame still weak; ladder hit 10v5 not 10v10","action":"explicit iter3-fair-10v10 batch"}

@@ -6,6 +6,12 @@ import {
   catSquareIndex,
   isSquareSkipped,
 } from '../lib/catHeatmap.js';
+import {
+  lmrDepthStyle,
+  lmrDisplayText,
+  lmrSubLabel,
+  lmrWallOutlineColor,
+} from '../lib/lmrHeatmap.js';
 import './board.css';
 
 const SQUARE_TRACK = '9fr';
@@ -41,6 +47,7 @@ export function renderBoard(container, state, controller) {
     aiThinking,
     uiMode,
     catViz,
+    lmrViz,
   } = state;
 
   const numRows = board.numRows();
@@ -60,6 +67,7 @@ export function renderBoard(container, state, controller) {
     uiMode !== 'replay' &&
     (freePlay || controller.session.isHumanTurn(settings.players));
   const showCat = settings.showCatVision && catViz && uiMode !== 'replay';
+  const showLmr = settings.showLmrVision && lmrViz && uiMode !== 'replay';
   const showCoords = settings.displayCoordinates;
   const showWallCounts = settings.displayRemainingWalls;
   const isRotated = settings.rotateBoard;
@@ -72,6 +80,7 @@ export function renderBoard(container, state, controller) {
     'board' +
     (isRotated ? ' board--rotate' : '') +
     (showCat ? ' board--cat' : '') +
+    (showLmr ? ' board--lmr' : '') +
     (freePlay ? ' board--freeplay' : '');
 
   const engineStateP1 = document.createElement('div');
@@ -112,6 +121,7 @@ export function renderBoard(container, state, controller) {
           canInteract,
           playerToMove,
           catViz: showCat ? catViz : null,
+          lmrViz: showLmr ? lmrViz : null,
         }),
       );
     }
@@ -174,6 +184,7 @@ function renderBoardCell({
   canInteract,
   playerToMove,
   catViz,
+  lmrViz,
 }) {
   const row = numRows - Math.floor(p / 2);
   const col = Math.floor(h / 2) + 1;
@@ -222,6 +233,29 @@ function renderBoardCell({
     square.className = 'board-cell__square';
     square.classList.toggle('board-cell__square--prev', isPrev);
     square.classList.toggle('board-cell__square--valid', isValid);
+    const lmrEntry = lmrViz?.moveIndex?.get(key);
+    if (lmrViz && lmrEntry?.kind === 'pawn') {
+      square.classList.add('board-cell__square--lmr');
+      const style = lmrDepthStyle(lmrEntry, lmrViz);
+      const tint = document.createElement('div');
+      tint.className = 'board-cell__lmr-tint';
+      tint.style.backgroundColor = style.fill;
+      square.appendChild(tint);
+      const val = document.createElement('span');
+      val.className = 'board-cell__lmr-val';
+      val.textContent = lmrDisplayText(lmrEntry, lmrViz);
+      square.appendChild(val);
+      const sub = lmrSubLabel(lmrEntry, lmrViz);
+      if (sub) {
+        const subEl = document.createElement('span');
+        subEl.className = 'board-cell__lmr-sub';
+        subEl.textContent = sub;
+        square.appendChild(subEl);
+      }
+      const mode = lmrViz.shallow ? 'pre-search plan' : 'searched';
+      square.title = `LMR ${mode}: ${style.label} · #${lmrEntry.order + 1}${lmrEntry.reSearched ? ' · re-search' : ''}`;
+    }
+
     if (catViz) {
       square.classList.add('board-cell__square--cat');
       if (skipped) {
@@ -306,23 +340,54 @@ function renderBoardCell({
 
     cell.appendChild(wall);
 
-    if (catViz && wallCat?.search && !wallCat.skip && !owner) {
+    const lmrWall = lmrViz?.moveIndex?.get(key);
+    if (lmrViz && lmrWall?.kind === 'wall' && !owner) {
+      const hint = document.createElement('div');
+      hint.className = 'board-cell__lmr-wall-hint';
+      const style = lmrDepthStyle(lmrWall, lmrViz);
+      hint.style.setProperty('--lmr-wall-color', lmrWallOutlineColor(lmrWall, lmrViz));
+      hint.style.backgroundColor = style.fill;
+      const tag = document.createElement('span');
+      tag.className = 'board-cell__lmr-wall-tag';
+      tag.textContent = lmrDisplayText(lmrWall, lmrViz);
+      hint.appendChild(tag);
+      const sub = lmrSubLabel(lmrWall, lmrViz);
+      if (sub) {
+        const subTag = document.createElement('span');
+        subTag.className = 'board-cell__lmr-wall-sub';
+        subTag.textContent = sub;
+        hint.appendChild(subTag);
+      }
+      hint.title = `LMR ${style.label} · order ${lmrWall.order}`;
+      cell.appendChild(hint);
+    } else if (catViz && wallCat && !owner) {
       const hint = document.createElement('div');
       hint.className = 'board-cell__cat-wall-hint';
-      hint.classList.add(
-        cellType === 'horizontalWall'
-          ? 'board-cell__cat-wall-hint--h'
-          : 'board-cell__cat-wall-hint--v',
-      );
-      hint.style.setProperty(
-        '--cat-wall-color',
-        catWallOutlineColor(wallCat.heat, {
-          coldCm: catViz.coldCm,
-          hotCm: catViz.hotCm,
-          maxCm: catViz.maxCm,
-        }),
-      );
-      hint.title = `CAT ${wallCat.heat} cm`;
+      if (wallCat.skip) {
+        hint.classList.add('board-cell__cat-wall-hint--skipped');
+      }
+      const scale = {
+        coldCm: catViz.coldCm,
+        hotCm: catViz.hotCm,
+        maxCm: catViz.maxCm,
+      };
+      const outline = catWallOutlineColor(wallCat.heat, scale);
+      const fill = catSquareOverlay(wallCat.heat, true, scale);
+      hint.style.setProperty('--cat-wall-color', outline);
+      if (fill) {
+        hint.style.setProperty('--cat-wall-fill', fill.fill);
+      }
+      if (wallCat.heat > 0) {
+        const tag = document.createElement('span');
+        tag.className = 'board-cell__cat-wall-tag';
+        tag.textContent = String(wallCat.heat);
+        hint.appendChild(tag);
+      }
+      hint.title = wallCat.skip
+        ? `CAT skipped (pruned)`
+        : wallCat.search
+          ? `CAT ${wallCat.heat} cm (searchable)`
+          : `CAT ${wallCat.heat} cm (cold fringe)`;
       cell.appendChild(hint);
     }
   }

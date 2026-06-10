@@ -177,6 +177,11 @@ function formatThinkEntry(entry) {
     entry.whiteDist != null && entry.blackDist != null
       ? ` W${entry.whiteDist} B${entry.blackDist}`
       : '';
+  const think = formatThinkDuration(entry);
+
+  if (entry.error) {
+    return `ply${entry.ply} ${who}${engine} ERROR: ${entry.error}${budget}${dist}${think}`;
+  }
 
   const isMcts =
     !isTitaniumThinkEntry(entry) &&
@@ -191,7 +196,6 @@ function formatThinkEntry(entry) {
       entry.stoppedBy === 'opening');
 
   const sims = entry.nodes > 0 ? ` ${entry.nodes.toLocaleString()}nodes` : '';
-  const think = formatThinkDuration(entry);
   const wr = entry.rootWinRate != null && isMcts
     ? ` wr=${(entry.rootWinRate * 100).toFixed(0)}%`
     : '';
@@ -347,7 +351,46 @@ function buildGameHeader(state) {
     lines.push('', `Moves: ${compact}`);
   }
 
+  if (state.aiThinking && state.thinkingPlayerType) {
+    const seat = state.settings?.players?.indexOf(state.thinkingPlayerType);
+    const who = seat === 0 ? 'White' : seat === 1 ? 'Black' : '?';
+    const label = engineLabelForSlot(state, seat >= 0 ? seat + 1 : 1);
+    lines.push(`Search: in progress — ${who} (${label}) thinking`);
+  }
+
   return lines.join('\n');
+}
+
+function formatEngineErrorsBlock(state) {
+  const lines = [];
+  const errors = state.engineErrors ?? {};
+  const status = state.engineStatus ?? {};
+  const players = state.settings?.players ?? [];
+
+  for (let i = 0; i < players.length; i++) {
+    const msg = errors[players[i]];
+    if (msg) {
+      lines.push(
+        `${engineLabelForSlot(state, i + 1)}: ${msg} (status=${status[players[i]] ?? 'error'})`,
+      );
+    }
+  }
+
+  for (const entry of state.moveThinkLog ?? []) {
+    if (!entry.error) {
+      continue;
+    }
+    const who = entry.ply % 2 === 1 ? 'White' : 'Black';
+    const tagged = `ply${entry.ply} ${who}`;
+    if (!lines.some((line) => line.includes(entry.error) && line.includes(tagged))) {
+      lines.push(`${tagged} [${entry.engine}]: ${entry.error}`);
+    }
+  }
+
+  if (!lines.length) {
+    return '';
+  }
+  return `--- Engine errors ---\n${lines.join('\n')}`;
 }
 
 export function buildGameCodeText(state) {
@@ -375,11 +418,12 @@ export function buildThinkLogText(state) {
 
 export function buildGameExportText(state) {
   const header = buildGameHeader(state);
+  const errorsBlock = formatEngineErrorsBlock(state);
   const log = state.moveThinkLog;
-  if (!log?.length) {
-    return `${header}\n\n--- Think chain ---\n(no AI think log yet)`;
-  }
-  return `${header}\n\n--- Think chain ---\n${log.map(formatThinkEntry).join('\n')}`;
+  const thinkSection = !log?.length
+    ? '--- Think chain ---\n(no AI think log yet)'
+    : `--- Think chain ---\n${log.map(formatThinkEntry).join('\n')}`;
+  return [header, errorsBlock, thinkSection].filter(Boolean).join('\n\n');
 }
 
 export function renderThinkLogPanel(log) {

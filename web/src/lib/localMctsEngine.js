@@ -52,6 +52,8 @@ export class LocalMctsEngineClient {
           depthLog: data.depthLog,
           nodes: data.nodes,
           rootScore: data.rootScore,
+          rootWinRate: data.rootWinRate,
+          rootMoves: data.rootMoves,
           whiteDist: data.whiteDist,
           blackDist: data.blackDist,
           lmrReSearches: data.lmrReSearches,
@@ -69,10 +71,18 @@ export class LocalMctsEngineClient {
       }
     };
 
-    this.worker.onerror = (err) => {
+    this.worker.onerror = (event) => {
+      const pending = this.pendingRequest;
       this.pendingRequest = null;
       this.setStatus('error');
-      this.onError?.(err);
+      const message =
+        event?.message
+        ?? (typeof event === 'string' ? event : null)
+        ?? 'Gorisanson worker crashed (see browser console)';
+      const error = new Error(message);
+      pending?.onError?.(error);
+      this.onError?.(error);
+      this.drainQueuedRequest();
     };
   }
 
@@ -169,6 +179,10 @@ export class LocalMctsEngineClient {
           thinking: true,
           progress: data.value,
           simulations: data.simulations,
+          rootWinRate: data.rootWinRate,
+          rootMoves: data.rootMoves,
+          whiteDist: data.whiteDist,
+          blackDist: data.blackDist,
         });
       },
       onInfo: (info) => this.onInfo?.(info),

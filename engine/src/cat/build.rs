@@ -155,25 +155,11 @@ pub fn build_corridor_display_squares(scratch: &mut BfsScratch, board: &Board) -
     let mut black = CorridorAttention::default();
     {
         let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(
-            board,
-            Player::One,
-            masks,
-            &mut white,
-            dist_from,
-            dist_to,
-        );
+        add_player_corridor_attention(board, Player::One, masks, &mut white, dist_from, dist_to);
     }
     {
         let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(
-            board,
-            Player::Two,
-            masks,
-            &mut black,
-            dist_from,
-            dist_to,
-        );
+        add_player_corridor_attention(board, Player::Two, masks, &mut black, dist_from, dist_to);
     }
     let mut out = [0u16; 81];
     for i in 0..81 {
@@ -184,32 +170,32 @@ pub fn build_corridor_display_squares(scratch: &mut BfsScratch, board: &Board) -
     out
 }
 
-/// Build combined two-player corridor attention for the current board.
+fn merge_corridor_max(a: &mut CorridorAttention, b: &CorridorAttention) {
+    for i in 0..81 {
+        a.square_heat[i] = a.square_heat[i].max(b.square_heat[i]);
+        a.route_flex[i] = a.route_flex[i].max(b.route_flex[i]);
+        a.bottleneck_heat[i] = a.bottleneck_heat[i].max(b.bottleneck_heat[i]);
+    }
+}
+
+/// Build combined two-player corridor attention for search ordering.
+///
+/// Uses per-square **max** of each player's heat (same as the web overlay), not sum —
+/// summing both races doubled fringe heat and qualified ~40 walls per node in open games.
 pub fn build_corridor_attention(scratch: &mut BfsScratch, board: &Board) -> CorridorAttention {
     let masks = DirMasks::from_board(board);
-    let mut attention = CorridorAttention::default();
+    let mut white = CorridorAttention::default();
+    let mut black = CorridorAttention::default();
     {
         let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(
-            board,
-            Player::One,
-            masks,
-            &mut attention,
-            dist_from,
-            dist_to,
-        );
+        add_player_corridor_attention(board, Player::One, masks, &mut white, dist_from, dist_to);
     }
     {
         let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(
-            board,
-            Player::Two,
-            masks,
-            &mut attention,
-            dist_from,
-            dist_to,
-        );
+        add_player_corridor_attention(board, Player::Two, masks, &mut black, dist_from, dist_to);
     }
+    let mut attention = white;
+    merge_corridor_max(&mut attention, &black);
     attention
 }
 
@@ -288,6 +274,24 @@ mod tests {
         assert!(
             center > 100,
             "mid-race corridor stays warm enough for wall search, center={center}"
+        );
+    }
+
+    #[test]
+    fn open_board_corners_stay_cold_for_search() {
+        let board = Board::new();
+        let mut scratch = BfsScratch::new();
+        let cat = build_corridor_attention(&mut scratch, &board);
+        assert_eq!(cat.square_heat(0, 0), 0, "a9 should have no corridor heat");
+        assert_eq!(cat.square_heat(0, 0), cat.square_heat(8, 8));
+        assert!(
+            cat.square_heat(4, 4) < cat.square_heat(0, 4),
+            "center must stay cooler than pawn lane"
+        );
+        assert!(
+            cat.square_heat(0, 4) < 220,
+            "pawn heat should not stack two players, got {}",
+            cat.square_heat(0, 4)
         );
     }
 

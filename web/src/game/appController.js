@@ -2,6 +2,7 @@ import { GameSession } from './gameSession.js';
 import { naiveDistanceEval } from '../lib/gameLogic.js';
 import { decodeReplayCode, encodeReplayFromActions } from '../lib/replayCode.js';
 import { fetchCatSnapshot, indexCatWalls } from '../lib/catHeatmap.js';
+import { buildLmrViz, fetchLmrSnapshot } from '../lib/lmrHeatmap.js';
 import { toAlgebraic } from '../lib/gameLogic.js';
 import { EngineClient } from '../lib/engineClient.js';
 import { GorisansonEngineClient, TitaniumEngineClient } from '../lib/localMctsEngine.js';
@@ -67,6 +68,8 @@ function buildThinkSeatSnapshot({
   rootWinRate,
   stoppedBy,
   rootMoves,
+  lmrProfile,
+  lmrReSearches,
   thinkMs,
 }) {
   const deep = deepestDepthEntry(depthLog);
@@ -85,6 +88,8 @@ function buildThinkSeatSnapshot({
     rootWinRate,
     stoppedBy: stoppedBy ?? (live ? 'searching' : '?'),
     rootMoves: rootMoves ? [...rootMoves] : [],
+    lmrProfile: lmrProfile ?? null,
+    lmrReSearches: lmrReSearches ?? null,
     depthLog: depthLog ? [...depthLog] : [],
     thinkMs: thinkMs ?? null,
   };
@@ -139,6 +144,8 @@ export class AppController {
       displayRemainingWalls: true,
       displayEvalBar: true,
       showCatVision: false,
+      showLmrVision: false,
+      lmrVisionShallow: false,
       uiMode: 'play',
     };
 
@@ -150,6 +157,15 @@ export class AppController {
     this._catMovesKey = null;
     this.catHintDismissed = false;
     this.showCatHint = false;
+    this.lmrShallowByPosition = new Map();
+    this.lmrSearchByPosition = new Map();
+    this.lmrVizLive = null;
+    this.lmrVizLoading = false;
+    this.lmrVizError = null;
+    this._lmrFetchSeq = 0;
+    this._lmrShallowKey = null;
+    this.lmrHintDismissed = false;
+    this.showLmrHint = false;
 
     this.engineStatus = {};
     this.engineErrors = {};
@@ -225,6 +241,11 @@ export class AppController {
       catVizLoading: this.catVizLoading,
       catVizError: this.catVizError,
       showCatHint: this.showCatHint && this.settings.showCatVision,
+      lmrViz: this.resolveLmrViz(),
+      lmrVisionShallow: this.settings.lmrVisionShallow,
+      lmrVizLoading: this.lmrVizLoading,
+      lmrVizError: this.lmrVizError,
+      showLmrHint: this.showLmrHint && this.settings.showLmrVision,
       canRedo: snapshot.canRedo,
       replay: this.replay
         ? {
@@ -450,9 +471,11 @@ export class AppController {
   toggleCatVision(enabled = !this.settings.showCatVision) {
     this.settings.showCatVision = Boolean(enabled);
     if (this.settings.showCatVision) {
+      this.settings.showLmrVision = false;
       if (!this.catHintDismissed) {
         this.showCatHint = true;
       }
+      this.showLmrHint = false;
       this.invalidateCatCache();
       this.refreshCatViz();
     } else {
@@ -464,6 +487,196 @@ export class AppController {
       this.showCatHint = false;
     }
     this.onChange?.();
+  }
+
+  toggleLmrVision(enabled = !this.settings.showLmrVision) {
+    this.settings.showLmrVision = Boolean(enabled);
+    if (this.settings.showLmrVision) {
+      this.settings.showCatVision = false;
+      this.catViz = null;
+      this.showCatHint = false;
+      if (!this.lmrHintDismissed) {
+        this.showLmrHint = true;
+      }
+      this.lmrVizError = null;
+      this.invalidateLmrCache();
+      this.refreshLmrShallow();
+      if (
+        this.aiThinking &&
+        this.thinkingPlayerType &&
+        isTitaniumEngine(this.thinkingPlayerType, this.engineConfigs) &&
+        this.liveSearch
+      ) {
+        this.ingestLmrSearchPayload(
+          {
+            live: true,
+            searchDepth: this.liveSearch.searchDepth,
+            depthLog: this.liveSearch.depthLog,
+            lmrProfile: this.liveSearch.lmrProfile,
+            lmrReSearches: this.liveSearch.lmrReSearches,
+            rootMoves: this.liveSearch.rootMoves,
+          },
+          this.lmrPositionKey(),
+        );
+      }
+      this.onChange?.();
+    } else {
+      this._lmrFetchSeq += 1;
+      this._lmrShallowKey = null;
+      this.lmrVizLive = null;
+      this.lmrVizError = null;
+      this.lmrVizLoading = false;
+      this.showLmrHint = false;
+    }
+    this.onChange?.();
+  }
+
+  toggleLmrShallow(enabled = !this.settings.lmrVisionShallow) {
+    this.settings.lmrVisionShallow = Boolean(enabled);
+    if (this.settings.showLmrVision) {
+      this.onChange?.();
+    }
+  }
+
+  dismissLmrHint() {
+    this.lmrHintDismissed = true;
+    this.showLmrHint = false;
+    this.onChange?.();
+  }
+
+  invalidateLmrCache() {
+    this._lmrShallowKey = null;
+  }
+
+  lmrPositionKey() {
+    return this.catMovesKey();
+  }
+
+  lmrTimeSecForPosition() {
+    const seat = this.session.playerToMove - 1;
+    const playerType = this.settings.players[seat];
+    const ai = this.settings.playerAiSettings[seat];
+    if (isTitaniumEngine(playerType, this.engineConfigs)) {
+      return Number(ai?.wallClockSeconds) || 10;
+    }
+    return 10;
+  }
+
+  isTitaniumThinkEntry(entry) {
+    return String(entry?.engine ?? '').toLowerCase().includes('titanium');
+  }
+
+  ingestLmrSearchPayload(payload, positionKey = this.lmrPositionKey()) {
+    if (!payload?.rootMoves?.length && !payload?.moves?.length) {
+      return null;
+    }
+    const depthLog = payload.depthLog ?? [];
+    const deep = deepestDepthEntry(depthLog);
+    const planViz = this.lmrShallowByPosition.get(positionKey);
+    const viz = buildLmrViz({
+      source: payload.live ? 'search-live' : 'search',
+      searchDepth: payload.searchDepth ?? deep?.depth,
+      depthLog,
+      lmrProfile: payload.lmrProfile,
+      lmrReSearches: payload.lmrReSearches,
+      rootMoves: payload.rootMoves ?? payload.moves,
+      planMoves: planViz?.moves,
+    });
+    if (!viz) {
+      return null;
+    }
+    this.lmrSearchByPosition.set(positionKey, viz);
+    if (!planViz && !this._lmrMergePending?.has(positionKey)) {
+      if (!this._lmrMergePending) {
+        this._lmrMergePending = new Set();
+      }
+      this._lmrMergePending.add(positionKey);
+      this.refreshLmrShallow().finally(() => {
+        this._lmrMergePending?.delete(positionKey);
+        const plan = this.lmrShallowByPosition.get(positionKey);
+        if (plan?.moves?.length) {
+          this.ingestLmrSearchPayload(payload, positionKey);
+          this.onChange?.();
+        }
+      });
+    }
+    const thinkingHere =
+      this.aiThinking &&
+      this.thinkingPlayerType &&
+      isTitaniumEngine(this.thinkingPlayerType, this.engineConfigs) &&
+      this.session.actions.length === positionKey.split('|').filter(Boolean).length;
+    if (thinkingHere) {
+      this.lmrVizLive = { ...viz, moveIndex: new Map(viz.moveIndex) };
+    }
+    return viz;
+  }
+
+  resolveLmrViz() {
+    if (!this.settings.showLmrVision) {
+      return null;
+    }
+    const posKey = this.lmrPositionKey();
+    if (this.settings.lmrVisionShallow) {
+      return this.lmrShallowByPosition.get(posKey) ?? null;
+    }
+    if (
+      this.aiThinking &&
+      this.lmrVizLive &&
+      this.thinkingPlayerType &&
+      isTitaniumEngine(this.thinkingPlayerType, this.engineConfigs)
+    ) {
+      return this.lmrVizLive;
+    }
+    return this.lmrSearchByPosition.get(posKey) ?? null;
+  }
+
+  scheduleLmrRefresh() {
+    if (!this.settings.showLmrVision || this.settings.uiMode === 'replay') {
+      return;
+    }
+    this.refreshLmrShallow();
+  }
+
+  async refreshLmrShallow() {
+    const posKey = this.lmrPositionKey();
+    const fetchKey = `${posKey}|${this.lmrTimeSecForPosition()}`;
+    if (fetchKey === this._lmrShallowKey && this.lmrShallowByPosition.has(posKey)) {
+      return;
+    }
+    const seq = ++this._lmrFetchSeq;
+    if (this.settings.showLmrVision) {
+      this.lmrVizLoading = true;
+      this.lmrVizError = null;
+      this.onChange?.();
+    }
+
+    const moves = this.session.actions.map((action) => toAlgebraic(action));
+    const timeSec = this.lmrTimeSecForPosition();
+    try {
+      const data = await fetchLmrSnapshot(moves, timeSec);
+      if (seq !== this._lmrFetchSeq) {
+        return;
+      }
+      this._lmrShallowKey = fetchKey;
+      const shallow = buildLmrViz({ ...data, source: 'shallow' });
+      if (shallow) {
+        this.lmrShallowByPosition.set(posKey, shallow);
+      }
+      this.lmrVizLoading = false;
+      this.lmrVizError = null;
+      if (this.settings.showLmrVision) {
+        this.onChange?.();
+      }
+    } catch (err) {
+      if (seq !== this._lmrFetchSeq) {
+        return;
+      }
+      this.lmrVizError = err?.message ?? String(err);
+      this.lmrVizLoading = false;
+      if (this.settings.showLmrVision) {
+        this.onChange?.();
+      }
+    }
   }
 
   dismissCatHint() {
@@ -762,7 +975,11 @@ export class AppController {
   }
 
   onSessionChange() {
+    if (!this.aiThinking) {
+      this.lmrVizLive = null;
+    }
     this.scheduleCatRefresh();
+    this.scheduleLmrRefresh();
     this.onChange?.();
   }
 
@@ -832,9 +1049,33 @@ export class AppController {
             whiteDist: info.whiteDist ?? this.liveSearch?.whiteDist,
             blackDist: info.blackDist ?? this.liveSearch?.blackDist,
             rootMoves: info.rootMoves ?? this.liveSearch?.rootMoves,
+            lmrProfile: info.lmrProfile ?? this.liveSearch?.lmrProfile,
+            lmrReSearches: info.lmrReSearches ?? this.liveSearch?.lmrReSearches,
             rootScore: liveRootScore,
           };
           const seat = this.seatIndexForPlayerType(playerType);
+          const liveDepth =
+            info.searchDepth ?? deepestDepthEntry(liveDepthLog)?.depth;
+          const depthTick =
+            liveDepth != null && liveDepth !== (prev.searchDepth ?? 0);
+          const rootTick = Boolean(info.rootMoves?.length);
+          if (
+            this.settings.showLmrVision &&
+            isTitaniumEngine(playerType, this.engineConfigs) &&
+            (rootTick || depthTick)
+          ) {
+            this.ingestLmrSearchPayload(
+              {
+                live: true,
+                searchDepth: liveDepth,
+                depthLog: liveDepthLog,
+                lmrProfile: info.lmrProfile ?? this.liveSearch.lmrProfile,
+                lmrReSearches: info.lmrReSearches ?? this.liveSearch.lmrReSearches,
+                rootMoves: info.rootMoves ?? this.liveSearch.rootMoves,
+              },
+              this.lmrPositionKey(),
+            );
+          }
           this.snapshotThinkSeat(seat, {
             live: true,
             ply: this.session.actions.length + 1,
@@ -848,6 +1089,7 @@ export class AppController {
             rootWinRate: this.liveSearch.rootWinRate,
             stoppedBy: this.liveSearch.mode,
             rootMoves: this.liveSearch.rootMoves,
+            lmrProfile: this.liveSearch.lmrProfile,
             engine: this.liveSearch.playerLabel,
           });
           const now = performance.now();
@@ -1082,6 +1324,10 @@ export class AppController {
       mode: 'searching',
       depthLog: [],
     };
+    this.lmrVizLive = null;
+    if (this.settings.showLmrVision && isTitaniumEngine(playerType, this.engineConfigs)) {
+      this.scheduleLmrRefresh();
+    }
     this.onChange?.();
 
     engine.onBestMove = (action) => {
@@ -1110,14 +1356,34 @@ export class AppController {
         return;
       }
 
+      const siBeforeMove = this.searchInfo[playerType] ?? {};
+      const posKeyBeforeMove = this.session.actions.map((a) => toAlgebraic(a)).join('|');
+      if (
+        isTitaniumEngine(playerType, this.engineConfigs) &&
+        siBeforeMove.rootMoves?.length
+      ) {
+        this.ingestLmrSearchPayload(
+          {
+            live: false,
+            searchDepth: siBeforeMove.searchDepth,
+            depthLog: siBeforeMove.depthLog,
+            lmrProfile: siBeforeMove.lmrProfile,
+            lmrReSearches: siBeforeMove.lmrReSearches,
+            rootMoves: siBeforeMove.rootMoves,
+          },
+          posKeyBeforeMove,
+        );
+      }
+
       this.aiThinking = false;
       this.thinkingPlayerType = null;
       this.liveSearch = null;
+      this.lmrVizLive = null;
 
       const applied = this.session.applyAction(action);
       if (applied) {
         const plyNum = this.session.actions.length;
-        const si = this.searchInfo[playerType] ?? {};
+        const si = siBeforeMove;
         const thinkMs = resolveThinkMs(si, this._thinkStartedAt);
         this._thinkStartedAt = null;
         const moveLabel = this.session.actionToLabel(action);
@@ -1142,6 +1408,8 @@ export class AppController {
           rootWinRate: si.rootWinRate,
           stoppedBy: si.stoppedBy ?? si.mode ?? '?',
           rootMoves: si.rootMoves,
+          lmrProfile: si.lmrProfile,
+          lmrReSearches: si.lmrReSearches,
           engine: this.engineLabel(playerType),
           thinkMs,
         });
@@ -1159,6 +1427,8 @@ export class AppController {
           rootWinRate: si.rootWinRate,
           depthLog: si.depthLog ? [...si.depthLog] : [],
           rootMoves: si.rootMoves ? [...si.rootMoves] : [],
+          lmrProfile: si.lmrProfile ?? null,
+          lmrReSearches: si.lmrReSearches ?? null,
           thinkMs,
         });
       }

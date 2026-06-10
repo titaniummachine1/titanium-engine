@@ -1,0 +1,1125 @@
+{
+  "opts": {
+    "games": 40,
+    "workers": 2,
+    "maxPlies": 10,
+    "ishtarPreset": "medium",
+    "resume": true,
+    "quiet": false
+  },
+  "lines": [
+    {
+      "gameIndex": 1,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 2,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 3,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 4,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    },
+    {
+      "gameIndex": 5,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 7,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c2v",
+        "f3h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c2v f3h d6h"
+    },
+    {
+      "gameIndex": 6,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "d3v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h d3v"
+    },
+    {
+      "gameIndex": 8,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 9,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c2v",
+        "f3h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c2v f3h d6h"
+    },
+    {
+      "gameIndex": 10,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 11,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 13,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "a6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v a6h"
+    },
+    {
+      "gameIndex": 12,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c2v",
+        "f3h",
+        "f5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c2v f3h f5v"
+    },
+    {
+      "gameIndex": 14,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 15,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 16,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 17,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 18,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 19,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "c4h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v c4h"
+    },
+    {
+      "gameIndex": 21,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    },
+    {
+      "gameIndex": 20,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "a6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v a6h"
+    },
+    {
+      "gameIndex": 23,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    },
+    {
+      "gameIndex": 22,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "c4h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v c4h"
+    },
+    {
+      "gameIndex": 25,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 24,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 26,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "d3v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h d3v"
+    },
+    {
+      "gameIndex": 27,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d3v",
+        "e2h",
+        "g4v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d3v e2h g4v"
+    },
+    {
+      "gameIndex": 28,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 29,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "d6"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h d6"
+    },
+    {
+      "gameIndex": 30,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "d6"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h d6"
+    },
+    {
+      "gameIndex": 31,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 32,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    },
+    {
+      "gameIndex": 33,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v",
+        "h6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h f6h e5v h6h"
+    },
+    {
+      "gameIndex": 34,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "c4h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v c4h"
+    },
+    {
+      "gameIndex": 35,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v",
+        "e4v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h c6h d5v e4v"
+    },
+    {
+      "gameIndex": 36,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    },
+    {
+      "gameIndex": 37,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 38,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "d6h"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h d6h"
+    },
+    {
+      "gameIndex": 39,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h",
+        "c2v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 h3h d6h f3h c2v"
+    },
+    {
+      "gameIndex": 40,
+      "plies": 10,
+      "stopReason": "max-plies",
+      "algebraicHistory": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h",
+        "a5v"
+      ],
+      "replayCode": "tq1#{\"game\":\"ishtar-opening-mine\",\"visits\":200000,\"parallelism\":\"1024\",\"stopReason\":\"max-plies\",\"plies\":10} e2 e8 e3 e7 e4 e6 a3h e3v d2h a5v"
+    }
+  ],
+  "failures": [
+    {
+      "gameIndex": 1,
+      "error": "Ishtar WebSocket closed before bestmove",
+      "at": "2026-06-09T02:29:48.988Z"
+    },
+    {
+      "gameIndex": 2,
+      "error": "Ishtar WebSocket closed before bestmove",
+      "at": "2026-06-09T02:29:57.592Z"
+    },
+    {
+      "gameIndex": 4,
+      "error": "Ishtar WebSocket closed before bestmove",
+      "at": "2026-06-09T02:30:25.539Z"
+    },
+    {
+      "gameIndex": 3,
+      "error": "Ishtar WebSocket closed before bestmove",
+      "at": "2026-06-09T02:30:48.111Z"
+    }
+  ],
+  "candidates": [
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4"
+      ],
+      "reply": "e6",
+      "replySide": 1,
+      "hits": 40
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7"
+      ],
+      "reply": "e4",
+      "replySide": 0,
+      "hits": 40
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3"
+      ],
+      "reply": "e7",
+      "replySide": 1,
+      "hits": 40
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8"
+      ],
+      "reply": "e3",
+      "replySide": 0,
+      "hits": 40
+    },
+    {
+      "prefix": [
+        "e2"
+      ],
+      "reply": "e8",
+      "replySide": 1,
+      "hits": 40
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6"
+      ],
+      "reply": "h3h",
+      "replySide": 0,
+      "hits": 20
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6"
+      ],
+      "reply": "a3h",
+      "replySide": 0,
+      "hits": 20
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v"
+      ],
+      "reply": "d2h",
+      "replySide": 0,
+      "hits": 14
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h"
+      ],
+      "reply": "e3v",
+      "replySide": 1,
+      "hits": 14
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h"
+      ],
+      "reply": "f3h",
+      "replySide": 0,
+      "hits": 10
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h"
+      ],
+      "reply": "d6h",
+      "replySide": 1,
+      "hits": 10
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h"
+      ],
+      "reply": "d6h",
+      "replySide": 1,
+      "hits": 8
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h"
+      ],
+      "reply": "c2v",
+      "replySide": 1,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h",
+        "e5v"
+      ],
+      "reply": "h6h",
+      "replySide": 1,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "e3v",
+        "d2h"
+      ],
+      "reply": "a5v",
+      "replySide": 1,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h",
+        "f6h"
+      ],
+      "reply": "e5v",
+      "replySide": 0,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h"
+      ],
+      "reply": "d5v",
+      "replySide": 0,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "a3h"
+      ],
+      "reply": "f6h",
+      "replySide": 1,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h"
+      ],
+      "reply": "c6h",
+      "replySide": 1,
+      "hits": 6
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v"
+      ],
+      "reply": "c4h",
+      "replySide": 1,
+      "hits": 3
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c2v"
+      ],
+      "reply": "f3h",
+      "replySide": 0,
+      "hits": 3
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h"
+      ],
+      "reply": "c2v",
+      "replySide": 1,
+      "hits": 3
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c2v",
+        "f3h"
+      ],
+      "reply": "d6h",
+      "replySide": 1,
+      "hits": 2
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h"
+      ],
+      "reply": "d3v",
+      "replySide": 1,
+      "hits": 2
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "c6h",
+        "d5v"
+      ],
+      "reply": "a6h",
+      "replySide": 1,
+      "hits": 2
+    },
+    {
+      "prefix": [
+        "e2",
+        "e8",
+        "e3",
+        "e7",
+        "e4",
+        "e6",
+        "h3h",
+        "d6h",
+        "f3h"
+      ],
+      "reply": "d6",
+      "replySide": 1,
+      "hits": 2
+    }
+  ],
+  "elapsedSec": 2754.4655754,
+  "completedGames": 40,
+  "failedGames": 4,
+  "partial": false
+}

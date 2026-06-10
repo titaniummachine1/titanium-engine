@@ -1,0 +1,450 @@
+{
+  "opts": {
+    "games": 10,
+    "workers": 2,
+    "timeSec": 5
+  },
+  "summary": [
+    {
+      "variant": "mcts-nobook",
+      "label": "MCTS only (no book)",
+      "wins": 5,
+      "losses": 5,
+      "aborted": 0,
+      "games": 10,
+      "results": [
+        {
+          "variant": "mcts-nobook",
+          "game": 2,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 63,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 1,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 83,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 3,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 63,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 4,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 64,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 5,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 80,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 6,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 59,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 8,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 73,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 7,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 62,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 9,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 56,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "mcts-nobook",
+          "game": 10,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 64,
+          "engine": "mcts",
+          "disableBook": true,
+          "disableBridge": true
+        }
+      ]
+    },
+    {
+      "variant": "hybrid",
+      "label": "Hybrid (MCTS opening + minimax)",
+      "wins": 3,
+      "losses": 7,
+      "aborted": 0,
+      "games": 10,
+      "results": [
+        {
+          "variant": "hybrid",
+          "game": 2,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 65,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 1,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 72,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 3,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 42,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 4,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 61,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 5,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 64,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 6,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 64,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 7,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 68,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 8,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 63,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 9,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 56,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid",
+          "game": 10,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 54,
+          "engine": "minimax",
+          "disableBook": false,
+          "disableBridge": true
+        }
+      ]
+    },
+    {
+      "variant": "hybrid-nobook",
+      "label": "Hybrid no book (MCTS opening + minimax)",
+      "wins": 7,
+      "losses": 3,
+      "aborted": 0,
+      "games": 10,
+      "results": [
+        {
+          "variant": "hybrid-nobook",
+          "game": 1,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 63,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 2,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 83,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 3,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 53,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 4,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 84,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 5,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 68,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 6,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 59,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 7,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 63,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 8,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 59,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 9,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 61,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "hybrid-nobook",
+          "game": 10,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 48,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        }
+      ]
+    },
+    {
+      "variant": "minimax-pure",
+      "label": "Minimax only (no book, no bridge)",
+      "wins": 6,
+      "losses": 4,
+      "aborted": 0,
+      "games": 10,
+      "results": [
+        {
+          "variant": "minimax-pure",
+          "game": 1,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 57,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 2,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 74,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 3,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 57,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 4,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 86,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 5,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 72,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 6,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 61,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 8,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 51,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 7,
+          "result": "loss",
+          "winner": "gorisanson",
+          "plies": 90,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 10,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 67,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        },
+        {
+          "variant": "minimax-pure",
+          "game": 9,
+          "result": "win",
+          "winner": "rust-titanium",
+          "plies": 67,
+          "engine": "minimax",
+          "disableBook": true,
+          "disableBridge": true
+        }
+      ]
+    }
+  ],
+  "at": "2026-06-09T13:02:33.785Z"
+}

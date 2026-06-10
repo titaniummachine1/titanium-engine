@@ -20,6 +20,7 @@ export function renderControls(container, state, controller) {
   const isAnalysis = uiMode === 'analysis';
   const isPlay = uiMode === 'play';
   const catStatus = renderCatStatusLine(state);
+  const lmrStatus = renderLmrStatusLine(state);
 
   container.innerHTML = `
     <section class="controls-card">
@@ -33,7 +34,7 @@ export function renderControls(container, state, controller) {
 
       ${isReplay ? renderReplayPanel(replay) : ''}
       ${isAnalysis ? renderAnalysisPanel(state) : ''}
-      ${!isReplay ? renderBoardToggles(settings, catStatus) : ''}
+      ${!isReplay ? renderBoardToggles(settings, catStatus, lmrStatus) : ''}
 
       <div class="play-panel ${isPlay ? '' : 'play-panel--hidden'}">
       <div class="button-row">
@@ -94,6 +95,12 @@ export function renderControls(container, state, controller) {
   container.querySelector('[data-toggle="cat-vision"]')?.addEventListener('change', (event) => {
     controller.toggleCatVision(event.target.checked);
   });
+  container.querySelector('[data-toggle="lmr-vision"]')?.addEventListener('change', (event) => {
+    controller.toggleLmrVision(event.target.checked);
+  });
+  container.querySelector('[data-toggle="lmr-shallow"]')?.addEventListener('change', (event) => {
+    controller.toggleLmrShallow(event.target.checked);
+  });
 }
 
 function renderCatStatusLine(state) {
@@ -113,8 +120,44 @@ function renderCatStatusLine(state) {
   return `W${cat.whiteDist} B${cat.blackDist}`;
 }
 
-function renderBoardToggles(settings, catStatus) {
+export function renderLmrStatusLine(state) {
+  if (!state.settings.showLmrVision) {
+    return '';
+  }
+  if (state.lmrVizLoading) {
+    return 'Loading…';
+  }
+  if (state.lmrVizError) {
+    const msg = String(state.lmrVizError);
+    return msg.length > 28 ? `${msg.slice(0, 26)}…` : msg;
+  }
+  const viz = state.lmrViz;
+  if (!viz) {
+    return '';
+  }
+  if (state.settings.lmrVisionShallow) {
+    const n = viz.moves?.length ?? 0;
+    return n ? `${viz.label ?? 'pre-search'} · ${n} mv` : (viz.label ?? 'pre-search');
+  }
+  const searched = viz.searchedCount ?? viz.moves?.filter((m) => m.searched).length ?? 0;
+  const total = viz.moves?.length ?? 0;
+  const depth = viz.searchDepth ?? '?';
+  return total ? `search d${depth} · ${searched}/${total}` : `search d${depth}`;
+}
+
+/** Patch LMR status text during live search without re-rendering controls. */
+export function updateLmrToggleStatus(container, state) {
+  const el = container.querySelector('.toggle-group__lmr-status');
+  if (!el) {
+    return;
+  }
+  const line = renderLmrStatusLine(state);
+  el.textContent = line;
+}
+
+function renderBoardToggles(settings, catStatus, lmrStatus) {
   const catNote = catStatus ? `<span class="toggle-group__cat-status">${escapeHtml(catStatus)}</span>` : '';
+  const lmrNote = lmrStatus ? `<span class="toggle-group__lmr-status">${escapeHtml(lmrStatus)}</span>` : '';
   return `
     <div class="toggle-group toggle-group--board">
       <label class="toggle"><input type="checkbox" data-toggle="rotate" ${settings.rotateBoard ? 'checked' : ''} /> Rotate</label>
@@ -122,6 +165,8 @@ function renderBoardToggles(settings, catStatus) {
       <label class="toggle"><input type="checkbox" data-toggle="walls" ${settings.displayRemainingWalls ? 'checked' : ''} /> Walls</label>
       <label class="toggle"><input type="checkbox" data-toggle="eval" ${settings.displayEvalBar ? 'checked' : ''} /> Eval</label>
       <label class="toggle toggle--cat"><input type="checkbox" data-toggle="cat-vision" ${settings.showCatVision ? 'checked' : ''} /> CAT ${catNote}</label>
+      <label class="toggle toggle--lmr"><input type="checkbox" data-toggle="lmr-vision" ${settings.showLmrVision ? 'checked' : ''} /> LMR ${lmrNote}</label>
+      <label class="toggle toggle--lmr-shallow ${settings.showLmrVision ? '' : 'toggle--hidden'}"><input type="checkbox" data-toggle="lmr-shallow" ${settings.lmrVisionShallow ? 'checked' : ''} ${settings.showLmrVision ? '' : 'disabled'} /> Shallow</label>
     </div>`;
 }
 

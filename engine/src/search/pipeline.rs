@@ -125,10 +125,7 @@ mod tests {
         let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6"]);
         let hint = opening::book_hint(&mut board).expect("book hint");
         let mv = format_move(hint.mv);
-        assert!(
-            matches!(mv.as_str(), "h3h" | "a3h"),
-            "expected anti-Gorisanson edge wall PV, got {mv}"
-        );
+        assert_eq!(mv, "e3h", "fair-10v10 mined ply-7 mainline");
     }
 
     #[test]

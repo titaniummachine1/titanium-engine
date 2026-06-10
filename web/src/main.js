@@ -1,7 +1,8 @@
 import { AppController } from './game/appController.js';
 import { renderBoard } from './ui/boardView.js';
 import { renderCatHint } from './ui/catHint.js';
-import { renderControls, updateEngineThinkCards } from './ui/controlsView.js';
+import { renderLmrHint } from './ui/lmrHint.js';
+import { renderControls, updateEngineThinkCards, updateLmrToggleStatus } from './ui/controlsView.js';
 import { renderEvalBar } from './ui/evalBar.js';
 import { renderGameFooter } from './ui/gameFooter.js';
 import { renderPlayersPanel } from './ui/playerSetupView.js';
@@ -38,6 +39,7 @@ function renderBoardArea() {
   renderBoard(boardSlot, state, controller);
   renderGameFooter(footerRoot, state);
   renderCatHint(boardRoot, state, controller);
+  renderLmrHint(boardRoot, state, controller);
 }
 
 function render() {
@@ -48,7 +50,12 @@ function render() {
 }
 
 function renderLiveSearch() {
-  updateEngineThinkCards(controlsRoot, controller.getState());
+  const state = controller.getState();
+  updateEngineThinkCards(controlsRoot, state);
+  if (state.settings.showLmrVision) {
+    renderBoardArea();
+    updateLmrToggleStatus(controlsRoot, state);
+  }
 }
 
 controller.onChange = render;

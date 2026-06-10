@@ -1,0 +1,3888 @@
+{
+  "gameIndex": 1,
+  "winner": "gorisanson",
+  "winnerPawn": 1,
+  "plies": 66,
+  "finalMargin": -1,
+  "whiteDist": 1,
+  "blackDist": 0,
+  "errors": [],
+  "illegalMoves": [],
+  "tiNodes": 7381568,
+  "goSims": 1120251,
+  "goAvgWinRate": 0.7247807822091606,
+  "tiAvgNodesPerMove": 223684,
+  "goAvgSimsPerMove": 33947,
+  "replay": "tq1#{\"a\":\"rust-titanium\",\"b\":\"gorisanson\",\"plies\":66,\"winner\":\"gorisanson\"} e2 e8 e3 e7 e4 e6 e3h d6h e5 e4 e6 e5v c3h c5v g3h f4h a3h h4h h1h b6h e5 f4 d5 a8h d4 c8h c4 e8h c5 g8h b5 g4 b6 h4 a6 i4 a7 i3 a8 h3 g2h g3 f3v h3 b8 i3 c8 i2 f1h h2 e1v g2 d2h f2 d8 f3 e8 e3 f8 d3 g8 c3 h8 c2 i8 c1",
+  "reportPath": "benchmark\\overnight\\iter3-fair-10v10\\worker-g2\\iter3-fair-10v10-g2-game1.txt",
+  "moveThinkLog": [
+    {
+      "ply": 1,
+      "engine": "Titanium αβ + CAT",
+      "move": "e2",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 8,
+      "blackDist": 8,
+      "margin": 0,
+      "nodes": 707191,
+      "simulations": 0,
+      "rootScore": 115,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": 0,
+          "nodes": 21,
+          "elapsedMs": 13,
+          "marginalNodes": 21,
+          "pv": "e2"
+        },
+        {
+          "depth": 2,
+          "score": 121,
+          "nodes": 75,
+          "elapsedMs": 14,
+          "marginalNodes": 54,
+          "pv": "e2 e8"
+        },
+        {
+          "depth": 3,
+          "score": 0,
+          "nodes": 229,
+          "elapsedMs": 18,
+          "marginalNodes": 154,
+          "pv": "e2 e8 e3"
+        },
+        {
+          "depth": 4,
+          "score": 121,
+          "nodes": 641,
+          "elapsedMs": 24,
+          "marginalNodes": 412,
+          "pv": "e2 e8 e3 e7"
+        },
+        {
+          "depth": 5,
+          "score": 0,
+          "nodes": 1223,
+          "elapsedMs": 39,
+          "marginalNodes": 582,
+          "pv": "e2 e8 e3 e7 e4"
+        },
+        {
+          "depth": 6,
+          "score": 121,
+          "nodes": 2239,
+          "elapsedMs": 54,
+          "marginalNodes": 1016,
+          "pv": "e2 e8 e3 e7 e4 e6"
+        },
+        {
+          "depth": 7,
+          "score": -18,
+          "nodes": 12262,
+          "elapsedMs": 193,
+          "marginalNodes": 10023,
+          "pv": "e2 e8 e3 e7 e4 e6 d1h"
+        },
+        {
+          "depth": 8,
+          "score": 115,
+          "nodes": 48742,
+          "elapsedMs": 709,
+          "marginalNodes": 36480,
+          "pv": "e2 e8 e3 e7 e4 e6 d3h d4h"
+        }
+      ],
+      "searchDepth": 8,
+      "lmrReSearches": 272,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 2,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e8",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 7,
+      "blackDist": 7,
+      "margin": 0,
+      "simulations": 0,
+      "stoppedBy": "opening",
+      "elapsedMs": 1.0586999999995896,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 3,
+      "engine": "Titanium αβ + CAT",
+      "move": "e3",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 7,
+      "blackDist": 7,
+      "margin": 0,
+      "nodes": 693024,
+      "simulations": 0,
+      "rootScore": 109,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": 0,
+          "nodes": 20,
+          "elapsedMs": 7,
+          "marginalNodes": 20,
+          "pv": "e3"
+        },
+        {
+          "depth": 2,
+          "score": 121,
+          "nodes": 66,
+          "elapsedMs": 7,
+          "marginalNodes": 46,
+          "pv": "e3 e7"
+        },
+        {
+          "depth": 3,
+          "score": 0,
+          "nodes": 252,
+          "elapsedMs": 10,
+          "marginalNodes": 186,
+          "pv": "e3 e7 e4"
+        },
+        {
+          "depth": 4,
+          "score": 121,
+          "nodes": 773,
+          "elapsedMs": 19,
+          "marginalNodes": 521,
+          "pv": "e3 e7 e4 e6"
+        },
+        {
+          "depth": 5,
+          "score": -18,
+          "nodes": 3441,
+          "elapsedMs": 55,
+          "marginalNodes": 2668,
+          "pv": "e3 e7 e4 e6 d1h"
+        },
+        {
+          "depth": 6,
+          "score": 115,
+          "nodes": 7062,
+          "elapsedMs": 110,
+          "marginalNodes": 3621,
+          "pv": "e3 e7 e4 e6 d3h d4h"
+        },
+        {
+          "depth": 7,
+          "score": -6,
+          "nodes": 22128,
+          "elapsedMs": 305,
+          "marginalNodes": 15066,
+          "pv": "e3 e7 e4 e6 d3h e6h d4"
+        },
+        {
+          "depth": 8,
+          "score": 109,
+          "nodes": 77082,
+          "elapsedMs": 1181,
+          "marginalNodes": 54954,
+          "pv": "e3 e7 e4 e6 d3h e6h e5h f6"
+        }
+      ],
+      "searchDepth": 8,
+      "lmrReSearches": 335,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 4,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e7",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 6,
+      "blackDist": 6,
+      "margin": 0,
+      "simulations": 36423,
+      "rootWinRate": 0.43641686182669787,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.3357,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 5,
+      "engine": "Titanium αβ + CAT",
+      "move": "e4",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 6,
+      "blackDist": 6,
+      "margin": 0,
+      "nodes": 752808,
+      "simulations": 0,
+      "rootScore": 109,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": 0,
+          "nodes": 18,
+          "elapsedMs": 8,
+          "marginalNodes": 18,
+          "pv": "e4"
+        },
+        {
+          "depth": 2,
+          "score": 121,
+          "nodes": 62,
+          "elapsedMs": 9,
+          "marginalNodes": 44,
+          "pv": "e4 e6"
+        },
+        {
+          "depth": 3,
+          "score": -18,
+          "nodes": 264,
+          "elapsedMs": 12,
+          "marginalNodes": 202,
+          "pv": "e4 e6 d1h"
+        },
+        {
+          "depth": 4,
+          "score": 115,
+          "nodes": 767,
+          "elapsedMs": 18,
+          "marginalNodes": 503,
+          "pv": "e4 e6 d3h d4h"
+        },
+        {
+          "depth": 5,
+          "score": -6,
+          "nodes": 2169,
+          "elapsedMs": 35,
+          "marginalNodes": 1402,
+          "pv": "e4 e6 d3h e6h d4"
+        },
+        {
+          "depth": 6,
+          "score": 109,
+          "nodes": 7209,
+          "elapsedMs": 122,
+          "marginalNodes": 5040,
+          "pv": "e4 e6 d3h e6h e5h f6"
+        },
+        {
+          "depth": 7,
+          "score": -6,
+          "nodes": 29876,
+          "elapsedMs": 335,
+          "marginalNodes": 22667,
+          "pv": "e4 e6 d3h e6h f3h d4h f4"
+        },
+        {
+          "depth": 8,
+          "score": 109,
+          "nodes": 100254,
+          "elapsedMs": 1097,
+          "marginalNodes": 70378,
+          "pv": "e4 e6 d3h e6h f3h c6h b3h f6"
+        }
+      ],
+      "searchDepth": 8,
+      "lmrReSearches": 886,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 6,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e6",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 5,
+      "blackDist": 5,
+      "margin": 0,
+      "simulations": 36272,
+      "rootWinRate": 0.4332892221732098,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.259999999995,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 7,
+      "engine": "Titanium αβ + CAT",
+      "move": "e3h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 6,
+      "blackDist": 6,
+      "margin": 0,
+      "nodes": 0,
+      "simulations": 0,
+      "stoppedBy": "mcts",
+      "elapsedMs": 21,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 8,
+      "engine": "Gorisanson (JS, original)",
+      "move": "d6h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 7,
+      "blackDist": 6,
+      "margin": -1,
+      "simulations": 37510,
+      "rootWinRate": 0.42680935969526573,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.166900000004,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 9,
+      "engine": "Titanium αβ + CAT",
+      "move": "e5",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 6,
+      "blackDist": 6,
+      "margin": 0,
+      "nodes": 722068,
+      "simulations": 0,
+      "rootScore": -97,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -6,
+          "nodes": 17,
+          "elapsedMs": 9,
+          "marginalNodes": 17,
+          "pv": "f4"
+        },
+        {
+          "depth": 2,
+          "score": 109,
+          "nodes": 98,
+          "elapsedMs": 10,
+          "marginalNodes": 81,
+          "pv": "d5h f6"
+        },
+        {
+          "depth": 3,
+          "score": -12,
+          "nodes": 469,
+          "elapsedMs": 14,
+          "marginalNodes": 371,
+          "pv": "d5h f6 e5"
+        },
+        {
+          "depth": 4,
+          "score": 6,
+          "nodes": 1632,
+          "elapsedMs": 30,
+          "marginalNodes": 1163,
+          "pv": "d5h e4v d4 c4v"
+        },
+        {
+          "depth": 5,
+          "score": -18,
+          "nodes": 16057,
+          "elapsedMs": 280,
+          "marginalNodes": 14425,
+          "pv": "e5 e4 d4v e5h g3h"
+        },
+        {
+          "depth": 6,
+          "score": 0,
+          "nodes": 44838,
+          "elapsedMs": 574,
+          "marginalNodes": 28781,
+          "pv": "e5 e4 d3v f6h e4v b6h"
+        },
+        {
+          "depth": 7,
+          "score": -97,
+          "nodes": 719678,
+          "elapsedMs": 9969,
+          "marginalNodes": 674840,
+          "pv": "e5 f6h d5h b6h c3h f5v d5"
+        }
+      ],
+      "searchDepth": 7,
+      "lmrReSearches": 883,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 10,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e4",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 5,
+      "blackDist": 3,
+      "margin": -2,
+      "simulations": 37485,
+      "rootWinRate": 0.5020837903048915,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.344599999997,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 11,
+      "engine": "Titanium αβ + CAT",
+      "move": "e6",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 5,
+      "blackDist": 4,
+      "margin": -1,
+      "nodes": 636486,
+      "simulations": 0,
+      "rootScore": -109,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -116,
+          "nodes": 16,
+          "elapsedMs": 8,
+          "marginalNodes": 16,
+          "pv": "c3h"
+        },
+        {
+          "depth": 2,
+          "score": -6,
+          "nodes": 62,
+          "elapsedMs": 9,
+          "marginalNodes": 46,
+          "pv": "d4v e5h"
+        },
+        {
+          "depth": 3,
+          "score": -123,
+          "nodes": 209,
+          "elapsedMs": 10,
+          "marginalNodes": 147,
+          "pv": "e6 e6v c3h"
+        },
+        {
+          "depth": 4,
+          "score": -113,
+          "nodes": 602,
+          "elapsedMs": 15,
+          "marginalNodes": 393,
+          "pv": "f5 f6h d4v f4"
+        },
+        {
+          "depth": 5,
+          "score": -127,
+          "nodes": 3798,
+          "elapsedMs": 61,
+          "marginalNodes": 3196,
+          "pv": "f5 f5h d3v f4 f4v"
+        },
+        {
+          "depth": 6,
+          "score": 0,
+          "nodes": 9143,
+          "elapsedMs": 116,
+          "marginalNodes": 5345,
+          "pv": "e6 d4 f6 d3 f7 d2"
+        },
+        {
+          "depth": 7,
+          "score": -97,
+          "nodes": 49017,
+          "elapsedMs": 717,
+          "marginalNodes": 39874,
+          "pv": "e6 e5v d4v c5v f4v f6h d6"
+        },
+        {
+          "depth": 8,
+          "score": -109,
+          "nodes": 219601,
+          "elapsedMs": 3177,
+          "marginalNodes": 170584,
+          "pv": "e6 f6h c3h d5v e4v h6h a3h b6h"
+        }
+      ],
+      "searchDepth": 8,
+      "lmrReSearches": 900,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 12,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e5v",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "simulations": 50759,
+      "rootWinRate": 0.5961668436806025,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.316200000001,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 13,
+      "engine": "Titanium αβ + CAT",
+      "move": "c3h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 5,
+      "blackDist": 4,
+      "margin": -1,
+      "nodes": 686425,
+      "simulations": 0,
+      "rootScore": -109,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -123,
+          "nodes": 13,
+          "elapsedMs": 8,
+          "marginalNodes": 13,
+          "pv": "c3h"
+        },
+        {
+          "depth": 2,
+          "score": -209,
+          "nodes": 82,
+          "elapsedMs": 10,
+          "marginalNodes": 69,
+          "pv": "d3v c5v"
+        },
+        {
+          "depth": 3,
+          "score": -109,
+          "nodes": 174,
+          "elapsedMs": 11,
+          "marginalNodes": 92,
+          "pv": "d4v c5v f4v"
+        },
+        {
+          "depth": 4,
+          "score": 12,
+          "nodes": 833,
+          "elapsedMs": 20,
+          "marginalNodes": 659,
+          "pv": "d4v c5v f4v f5h"
+        },
+        {
+          "depth": 5,
+          "score": -97,
+          "nodes": 4336,
+          "elapsedMs": 67,
+          "marginalNodes": 3503,
+          "pv": "d4v c5v f4v f6h d6"
+        },
+        {
+          "depth": 6,
+          "score": -97,
+          "nodes": 23505,
+          "elapsedMs": 397,
+          "marginalNodes": 19169,
+          "pv": "d4v b6h f4v b5v d6 e5"
+        },
+        {
+          "depth": 7,
+          "score": -109,
+          "nodes": 143900,
+          "elapsedMs": 2487,
+          "marginalNodes": 120395,
+          "pv": "c3h c5v f4v f6h d4v b4h g3h"
+        }
+      ],
+      "searchDepth": 7,
+      "lmrReSearches": 948,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 14,
+      "engine": "Gorisanson (JS, original)",
+      "move": "c5v",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "simulations": 38457,
+      "rootWinRate": 0.6817878585723816,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.26890000001,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 15,
+      "engine": "Titanium αβ + CAT",
+      "move": "g3h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 8,
+      "blackDist": 5,
+      "margin": -3,
+      "nodes": 555600,
+      "simulations": 0,
+      "rootScore": 18,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -378,
+          "nodes": 16,
+          "elapsedMs": 7,
+          "marginalNodes": 16,
+          "pv": "e5"
+        },
+        {
+          "depth": 2,
+          "score": -221,
+          "nodes": 54,
+          "elapsedMs": 7,
+          "marginalNodes": 38,
+          "pv": "f3v d4"
+        },
+        {
+          "depth": 3,
+          "score": -115,
+          "nodes": 138,
+          "elapsedMs": 8,
+          "marginalNodes": 84,
+          "pv": "f4v f6h b4v"
+        },
+        {
+          "depth": 4,
+          "score": -209,
+          "nodes": 759,
+          "elapsedMs": 17,
+          "marginalNodes": 621,
+          "pv": "f3v f5h e5 d4"
+        },
+        {
+          "depth": 5,
+          "score": -109,
+          "nodes": 1597,
+          "elapsedMs": 31,
+          "marginalNodes": 838,
+          "pv": "f4v f6h b4v b6h e5"
+        },
+        {
+          "depth": 6,
+          "score": -203,
+          "nodes": 8452,
+          "elapsedMs": 150,
+          "marginalNodes": 6855,
+          "pv": "e5 e4h g3h b5h d5 d4"
+        },
+        {
+          "depth": 7,
+          "score": -12,
+          "nodes": 73550,
+          "elapsedMs": 1238,
+          "marginalNodes": 65098,
+          "pv": "g3h d4 b3v e4h b5v b4h h4v"
+        },
+        {
+          "depth": 8,
+          "score": 18,
+          "nodes": 494180,
+          "elapsedMs": 8819,
+          "marginalNodes": 420630,
+          "pv": "g3h d2v d4v e5 e4 f5h f3v h5h"
+        }
+      ],
+      "searchDepth": 8,
+      "lmrReSearches": 2558,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 16,
+      "engine": "Gorisanson (JS, original)",
+      "move": "f4h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "simulations": 34246,
+      "rootWinRate": 0.7735539129414526,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.081699999995,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 17,
+      "engine": "Titanium αβ + CAT",
+      "move": "a3h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 9,
+      "blackDist": 6,
+      "margin": -3,
+      "nodes": 539330,
+      "simulations": 0,
+      "rootScore": 591,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -369,
+          "nodes": 20,
+          "elapsedMs": 8,
+          "marginalNodes": 20,
+          "pv": "e5"
+        },
+        {
+          "depth": 2,
+          "score": -215,
+          "nodes": 58,
+          "elapsedMs": 9,
+          "marginalNodes": 38,
+          "pv": "d4v f4"
+        },
+        {
+          "depth": 3,
+          "score": -109,
+          "nodes": 256,
+          "elapsedMs": 12,
+          "marginalNodes": 198,
+          "pv": "d4v b5h h4v"
+        },
+        {
+          "depth": 4,
+          "score": -6,
+          "nodes": 1200,
+          "elapsedMs": 28,
+          "marginalNodes": 944,
+          "pv": "d4v e5 h3v d6"
+        },
+        {
+          "depth": 5,
+          "score": -97,
+          "nodes": 5218,
+          "elapsedMs": 121,
+          "marginalNodes": 4018,
+          "pv": "d4v b5h h4v g6h d6"
+        },
+        {
+          "depth": 6,
+          "score": -191,
+          "nodes": 11354,
+          "elapsedMs": 225,
+          "marginalNodes": 6136,
+          "pv": "e5 b4h a3h h4h h1h d4v"
+        },
+        {
+          "depth": 7,
+          "score": -195,
+          "nodes": 37127,
+          "elapsedMs": 635,
+          "marginalNodes": 25773,
+          "pv": "e5 b5h a3h h4h d4 a6h h2h"
+        },
+        {
+          "depth": 8,
+          "score": -191,
+          "nodes": 97741,
+          "elapsedMs": 1677,
+          "marginalNodes": 60614,
+          "pv": "e5 b4h a3h h4h h2h a7h d4 c7h"
+        },
+        {
+          "depth": 9,
+          "score": 591,
+          "nodes": 335459,
+          "elapsedMs": 6266,
+          "marginalNodes": 237718,
+          "pv": "a3h b6h h4v g6h g5h f4 h2h g4 f2h"
+        }
+      ],
+      "searchDepth": 9,
+      "lmrReSearches": 1301,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10001,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 18,
+      "engine": "Gorisanson (JS, original)",
+      "move": "h4h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "simulations": 35178,
+      "rootWinRate": 0.6423175480049252,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.317899999995,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 19,
+      "engine": "Titanium αβ + CAT",
+      "move": "h1h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 9,
+      "blackDist": 7,
+      "margin": -2,
+      "nodes": 516445,
+      "simulations": 0,
+      "rootScore": -363,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -115,
+          "nodes": 14,
+          "elapsedMs": 7,
+          "marginalNodes": 14,
+          "pv": "h1h"
+        },
+        {
+          "depth": 2,
+          "score": -103,
+          "nodes": 59,
+          "elapsedMs": 8,
+          "marginalNodes": 45,
+          "pv": "h2h b4h"
+        },
+        {
+          "depth": 3,
+          "score": -209,
+          "nodes": 169,
+          "elapsedMs": 9,
+          "marginalNodes": 110,
+          "pv": "e5 d4v h1h"
+        },
+        {
+          "depth": 4,
+          "score": -191,
+          "nodes": 454,
+          "elapsedMs": 12,
+          "marginalNodes": 285,
+          "pv": "e5 b4h h2h d4v"
+        },
+        {
+          "depth": 5,
+          "score": -209,
+          "nodes": 1393,
+          "elapsedMs": 26,
+          "marginalNodes": 939,
+          "pv": "e5 d4v h2h b4h f2h"
+        },
+        {
+          "depth": 6,
+          "score": -191,
+          "nodes": 3481,
+          "elapsedMs": 54,
+          "marginalNodes": 2088,
+          "pv": "e5 b4h h2h a5h f2h d4v"
+        },
+        {
+          "depth": 7,
+          "score": -203,
+          "nodes": 8564,
+          "elapsedMs": 123,
+          "marginalNodes": 5083,
+          "pv": "d6 c4h h1h a5h f1h b6h d1h"
+        },
+        {
+          "depth": 8,
+          "score": -197,
+          "nodes": 14130,
+          "elapsedMs": 216,
+          "marginalNodes": 5566,
+          "pv": "d6 b4h h2h a5h f2h b6h d2h a7h"
+        },
+        {
+          "depth": 9,
+          "score": -203,
+          "nodes": 22020,
+          "elapsedMs": 343,
+          "marginalNodes": 7890,
+          "pv": "d6 c4h h1h b5h f1h a7h d1h c7h b1h"
+        },
+        {
+          "depth": 10,
+          "score": -363,
+          "nodes": 61908,
+          "elapsedMs": 1178,
+          "marginalNodes": 39888,
+          "pv": "e5 b4h h2h a7h f2h c7h d2h e7h b2h f6v"
+        },
+        {
+          "depth": 11,
+          "score": -375,
+          "nodes": 191014,
+          "elapsedMs": 3484,
+          "marginalNodes": 129106,
+          "pv": "h2h b6h f2h a7h d2h c7h c1h e7h a1h f6v b2h"
+        },
+        {
+          "depth": 12,
+          "score": -363,
+          "nodes": 332493,
+          "elapsedMs": 6188,
+          "marginalNodes": 141479,
+          "pv": "h1h b5h f1h a7h d1h c7h e5 e7h d4 f6v b1h f4"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 382,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 20,
+      "engine": "Gorisanson (JS, original)",
+      "move": "b6h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "simulations": 33400,
+      "rootWinRate": 0.610607708106802,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.3597,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 21,
+      "engine": "Titanium αβ + CAT",
+      "move": "e5",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 11,
+      "blackDist": 9,
+      "margin": -2,
+      "nodes": 577912,
+      "simulations": 0,
+      "rootScore": -375,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -115,
+          "nodes": 16,
+          "elapsedMs": 8,
+          "marginalNodes": 16,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -103,
+          "nodes": 66,
+          "elapsedMs": 9,
+          "marginalNodes": 50,
+          "pv": "f1h a7h"
+        },
+        {
+          "depth": 3,
+          "score": -203,
+          "nodes": 192,
+          "elapsedMs": 11,
+          "marginalNodes": 126,
+          "pv": "d6 c4h f1h"
+        },
+        {
+          "depth": 4,
+          "score": -197,
+          "nodes": 441,
+          "elapsedMs": 13,
+          "marginalNodes": 249,
+          "pv": "d6 a7h f1h c7h"
+        },
+        {
+          "depth": 5,
+          "score": -203,
+          "nodes": 844,
+          "elapsedMs": 17,
+          "marginalNodes": 403,
+          "pv": "d6 c4h f1h a5h d1h"
+        },
+        {
+          "depth": 6,
+          "score": -197,
+          "nodes": 1681,
+          "elapsedMs": 25,
+          "marginalNodes": 837,
+          "pv": "d6 a7h f1h c7h d1h e7h"
+        },
+        {
+          "depth": 7,
+          "score": -203,
+          "nodes": 4328,
+          "elapsedMs": 65,
+          "marginalNodes": 2647,
+          "pv": "d6 c4h f1h a5h d1h a7h b1h"
+        },
+        {
+          "depth": 8,
+          "score": -363,
+          "nodes": 9481,
+          "elapsedMs": 167,
+          "marginalNodes": 5153,
+          "pv": "e5 a7h f1h c7h d1h e7h b1h f6v"
+        },
+        {
+          "depth": 9,
+          "score": -475,
+          "nodes": 39687,
+          "elapsedMs": 681,
+          "marginalNodes": 30206,
+          "pv": "e5 a7h f1h c7h d1h e7h b1h f6v d4"
+        },
+        {
+          "depth": 10,
+          "score": -363,
+          "nodes": 55029,
+          "elapsedMs": 983,
+          "marginalNodes": 15342,
+          "pv": "e5 a7h f1h c7h d1h e7h d4 f6v b1h f4"
+        },
+        {
+          "depth": 11,
+          "score": -475,
+          "nodes": 122791,
+          "elapsedMs": 2201,
+          "marginalNodes": 67762,
+          "pv": "e5 a7h f1h c7h d1h e7h d4 f6v b1h f4 c4"
+        },
+        {
+          "depth": 12,
+          "score": -375,
+          "nodes": 243941,
+          "elapsedMs": 4284,
+          "marginalNodes": 121150,
+          "pv": "e5 f4 f1h a7h c7v b8h d1h g4 b1h b4v e4 a5v"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 546,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 22,
+      "engine": "Gorisanson (JS, original)",
+      "move": "f4",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 5,
+      "blackDist": 3,
+      "margin": -2,
+      "simulations": 33580,
+      "rootWinRate": 0.6064942212438085,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.209999999992,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 23,
+      "engine": "Titanium αβ + CAT",
+      "move": "d5",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 10,
+      "blackDist": 8,
+      "margin": -2,
+      "nodes": 622687,
+      "simulations": 0,
+      "rootScore": -477,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -121,
+          "nodes": 17,
+          "elapsedMs": 9,
+          "marginalNodes": 17,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -109,
+          "nodes": 67,
+          "elapsedMs": 9,
+          "marginalNodes": 50,
+          "pv": "f1h a7h"
+        },
+        {
+          "depth": 3,
+          "score": -209,
+          "nodes": 149,
+          "elapsedMs": 10,
+          "marginalNodes": 82,
+          "pv": "d5 c4h f1h"
+        },
+        {
+          "depth": 4,
+          "score": -203,
+          "nodes": 332,
+          "elapsedMs": 13,
+          "marginalNodes": 183,
+          "pv": "d5 a7h f1h c7h"
+        },
+        {
+          "depth": 5,
+          "score": -209,
+          "nodes": 612,
+          "elapsedMs": 18,
+          "marginalNodes": 280,
+          "pv": "d5 c4h f1h a5h d1h"
+        },
+        {
+          "depth": 6,
+          "score": -203,
+          "nodes": 1389,
+          "elapsedMs": 32,
+          "marginalNodes": 777,
+          "pv": "d5 a7h f1h c7h d1h e7h"
+        },
+        {
+          "depth": 7,
+          "score": -209,
+          "nodes": 2448,
+          "elapsedMs": 50,
+          "marginalNodes": 1059,
+          "pv": "d5 c4h f1h a5h d1h a7h b1h"
+        },
+        {
+          "depth": 8,
+          "score": -483,
+          "nodes": 17074,
+          "elapsedMs": 340,
+          "marginalNodes": 14626,
+          "pv": "d5 a7h f1h c7h d1h e7h b1h f6v"
+        },
+        {
+          "depth": 9,
+          "score": -489,
+          "nodes": 60449,
+          "elapsedMs": 1148,
+          "marginalNodes": 43375,
+          "pv": "d5 a7h c7v c4h f1h b8h d1h a5h b1h"
+        },
+        {
+          "depth": 10,
+          "score": -483,
+          "nodes": 85858,
+          "elapsedMs": 1573,
+          "marginalNodes": 25409,
+          "pv": "d5 a7h f1h c7h d1h e7h b1h f6v d4 g4"
+        },
+        {
+          "depth": 11,
+          "score": -487,
+          "nodes": 161887,
+          "elapsedMs": 2735,
+          "marginalNodes": 76029,
+          "pv": "d5 a7h c7v b8h f1h b4v d1h a5v b1h g4 d4"
+        },
+        {
+          "depth": 12,
+          "score": -477,
+          "nodes": 291453,
+          "elapsedMs": 4900,
+          "marginalNodes": 129566,
+          "pv": "d5 a7h f1h c7h d1h e7h b1h f6v d4 g4 c4 h4"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 549,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10000,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 24,
+      "engine": "Gorisanson (JS, original)",
+      "move": "a8h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 6,
+      "blackDist": 3,
+      "margin": -3,
+      "simulations": 39018,
+      "rootWinRate": 0.6221058434399118,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.121400000004,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 25,
+      "engine": "Titanium αβ + CAT",
+      "move": "d4",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 11,
+      "blackDist": 8,
+      "margin": -3,
+      "nodes": 52220,
+      "simulations": 0,
+      "rootScore": -447,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -201,
+          "nodes": 17,
+          "elapsedMs": 10,
+          "marginalNodes": 17,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -203,
+          "nodes": 67,
+          "elapsedMs": 10,
+          "marginalNodes": 50,
+          "pv": "f1h c8h"
+        },
+        {
+          "depth": 3,
+          "score": -355,
+          "nodes": 138,
+          "elapsedMs": 12,
+          "marginalNodes": 71,
+          "pv": "d4 c8h f1h"
+        },
+        {
+          "depth": 4,
+          "score": -351,
+          "nodes": 332,
+          "elapsedMs": 16,
+          "marginalNodes": 194,
+          "pv": "d4 c8h f1h e8h"
+        },
+        {
+          "depth": 5,
+          "score": -355,
+          "nodes": 625,
+          "elapsedMs": 21,
+          "marginalNodes": 293,
+          "pv": "d4 c8h f1h e8h d1h"
+        },
+        {
+          "depth": 6,
+          "score": -351,
+          "nodes": 1272,
+          "elapsedMs": 33,
+          "marginalNodes": 647,
+          "pv": "d4 c8h f1h e8h d1h g8h"
+        },
+        {
+          "depth": 7,
+          "score": -355,
+          "nodes": 2146,
+          "elapsedMs": 49,
+          "marginalNodes": 874,
+          "pv": "d4 c8h f1h e8h d1h f7v b1h"
+        },
+        {
+          "depth": 8,
+          "score": -203,
+          "nodes": 5058,
+          "elapsedMs": 115,
+          "marginalNodes": 2912,
+          "pv": "d4 c8h f1h e8h d1h g8h b1h g4"
+        },
+        {
+          "depth": 9,
+          "score": -363,
+          "nodes": 9216,
+          "elapsedMs": 194,
+          "marginalNodes": 4158,
+          "pv": "d4 c8h f1h b4v d1h a5v b1h g4 c4"
+        },
+        {
+          "depth": 10,
+          "score": -203,
+          "nodes": 15855,
+          "elapsedMs": 310,
+          "marginalNodes": 6639,
+          "pv": "d4 c8h f1h g4 d1h a5h b1h b4h c4 h4"
+        },
+        {
+          "depth": 11,
+          "score": -349,
+          "nodes": 22837,
+          "elapsedMs": 400,
+          "marginalNodes": 6982,
+          "pv": "d4 c8h f1h e8h d1h f7v b1h g4 c4 h4 c5"
+        },
+        {
+          "depth": 12,
+          "score": -447,
+          "nodes": 52220,
+          "elapsedMs": 852,
+          "marginalNodes": 29383,
+          "pv": "d4 f2v c4 c8h c5 g4 b5 h4 a6v e8h a5 i4"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 76,
+      "stoppedBy": "minimax",
+      "elapsedMs": 852,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 26,
+      "engine": "Gorisanson (JS, original)",
+      "move": "c8h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 255,
+      "blackDist": 3,
+      "margin": -252,
+      "simulations": 39842,
+      "rootWinRate": 0.6346747388414055,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.310400000017,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 27,
+      "engine": "Titanium αβ + CAT",
+      "move": "c4",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 12,
+      "blackDist": 8,
+      "margin": -4,
+      "nodes": 105475,
+      "simulations": 0,
+      "rootScore": -447,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -355,
+          "nodes": 17,
+          "elapsedMs": 8,
+          "marginalNodes": 17,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -351,
+          "nodes": 71,
+          "elapsedMs": 10,
+          "marginalNodes": 54,
+          "pv": "f1h e8h"
+        },
+        {
+          "depth": 3,
+          "score": -463,
+          "nodes": 171,
+          "elapsedMs": 12,
+          "marginalNodes": 100,
+          "pv": "c4 e8h f1h"
+        },
+        {
+          "depth": 4,
+          "score": -453,
+          "nodes": 439,
+          "elapsedMs": 18,
+          "marginalNodes": 268,
+          "pv": "c4 e8h f1h g8h"
+        },
+        {
+          "depth": 5,
+          "score": -463,
+          "nodes": 1021,
+          "elapsedMs": 26,
+          "marginalNodes": 582,
+          "pv": "c4 e8h f1h f7v d1h"
+        },
+        {
+          "depth": 6,
+          "score": -351,
+          "nodes": 2025,
+          "elapsedMs": 37,
+          "marginalNodes": 1004,
+          "pv": "c4 b4h f1h a5h d1h g4"
+        },
+        {
+          "depth": 7,
+          "score": -363,
+          "nodes": 4317,
+          "elapsedMs": 76,
+          "marginalNodes": 2292,
+          "pv": "c4 b4h f1h a5h d1h g4 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -447,
+          "nodes": 10835,
+          "elapsedMs": 185,
+          "marginalNodes": 6518,
+          "pv": "c4 f2v c5 g4 a5h e8h c6 h4"
+        },
+        {
+          "depth": 9,
+          "score": -447,
+          "nodes": 18279,
+          "elapsedMs": 306,
+          "marginalNodes": 7444,
+          "pv": "c4 f2v c5 a5v c4 g4 b4 h4 a4"
+        },
+        {
+          "depth": 10,
+          "score": -447,
+          "nodes": 27282,
+          "elapsedMs": 481,
+          "marginalNodes": 9003,
+          "pv": "c4 f2v c5 g4 a5h e8h c6 h4 b6 i4"
+        },
+        {
+          "depth": 11,
+          "score": -486,
+          "nodes": 70976,
+          "elapsedMs": 1112,
+          "marginalNodes": 43694,
+          "pv": "c4 f2v b4 a4h c4 g4 c5 h4 c6 i4 b6"
+        },
+        {
+          "depth": 12,
+          "score": -447,
+          "nodes": 105475,
+          "elapsedMs": 1617,
+          "marginalNodes": 34499,
+          "pv": "c4 f2v b4 g4 a5v e8h a4 h4 a5 i4 a6 i3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 80,
+      "stoppedBy": "minimax",
+      "elapsedMs": 1618,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 28,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e8h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 255,
+      "blackDist": 3,
+      "margin": -252,
+      "simulations": 35445,
+      "rootWinRate": 0.6393215645552094,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.334199999983,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 29,
+      "engine": "Titanium αβ + CAT",
+      "move": "c5",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 13,
+      "blackDist": 8,
+      "margin": -5,
+      "nodes": 64834,
+      "simulations": 0,
+      "rootScore": -399,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -463,
+          "nodes": 18,
+          "elapsedMs": 7,
+          "marginalNodes": 18,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -453,
+          "nodes": 79,
+          "elapsedMs": 8,
+          "marginalNodes": 61,
+          "pv": "f1h g8h"
+        },
+        {
+          "depth": 3,
+          "score": -573,
+          "nodes": 226,
+          "elapsedMs": 11,
+          "marginalNodes": 147,
+          "pv": "c5 b5v f1h"
+        },
+        {
+          "depth": 4,
+          "score": -459,
+          "nodes": 504,
+          "elapsedMs": 16,
+          "marginalNodes": 278,
+          "pv": "c5 b5v f1h g4"
+        },
+        {
+          "depth": 5,
+          "score": -465,
+          "nodes": 1083,
+          "elapsedMs": 25,
+          "marginalNodes": 579,
+          "pv": "c5 b5v f1h g4 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -351,
+          "nodes": 1700,
+          "elapsedMs": 33,
+          "marginalNodes": 617,
+          "pv": "c5 b5v f1h g4 d1h h4"
+        },
+        {
+          "depth": 7,
+          "score": -357,
+          "nodes": 2944,
+          "elapsedMs": 46,
+          "marginalNodes": 1244,
+          "pv": "c5 b5v f1h g4 d1h h4 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -309,
+          "nodes": 4934,
+          "elapsedMs": 76,
+          "marginalNodes": 1990,
+          "pv": "c5 f2v c6 g4 b6 h4 a6 i4"
+        },
+        {
+          "depth": 9,
+          "score": -480,
+          "nodes": 23448,
+          "elapsedMs": 276,
+          "marginalNodes": 18514,
+          "pv": "c5 f2v c6 g4 b6 h4 a6 i4 a7"
+        },
+        {
+          "depth": 10,
+          "score": -315,
+          "nodes": 25516,
+          "elapsedMs": 305,
+          "marginalNodes": 2068,
+          "pv": "c5 f2v c6 g4 b6 h4 a6 i4 a7 i3"
+        },
+        {
+          "depth": 11,
+          "score": -483,
+          "nodes": 55270,
+          "elapsedMs": 660,
+          "marginalNodes": 29754,
+          "pv": "c5 f2v b5 g4 a5 h4 a6v i4 h3v i3 g1v"
+        },
+        {
+          "depth": 12,
+          "score": -399,
+          "nodes": 64834,
+          "elapsedMs": 805,
+          "marginalNodes": 9564,
+          "pv": "c5 f2v b5 g4 a5 h4 a6 i4 a7 i3 a8 h3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 58,
+      "stoppedBy": "minimax",
+      "elapsedMs": 806,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 30,
+      "engine": "Gorisanson (JS, original)",
+      "move": "g8h",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 6,
+      "blackDist": 3,
+      "margin": -3,
+      "simulations": 40974,
+      "rootWinRate": 0.6961552818215753,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.098800000007,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 31,
+      "engine": "Titanium αβ + CAT",
+      "move": "b5",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 14,
+      "blackDist": 8,
+      "margin": -6,
+      "nodes": 15280,
+      "simulations": 0,
+      "rootScore": -197,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -565,
+          "nodes": 19,
+          "elapsedMs": 8,
+          "marginalNodes": 19,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 60,
+          "elapsedMs": 9,
+          "marginalNodes": 41,
+          "pv": "f1h g4"
+        },
+        {
+          "depth": 3,
+          "score": -557,
+          "nodes": 151,
+          "elapsedMs": 10,
+          "marginalNodes": 91,
+          "pv": "b5 g4 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -447,
+          "nodes": 225,
+          "elapsedMs": 12,
+          "marginalNodes": 74,
+          "pv": "b5 g4 f1h h4"
+        },
+        {
+          "depth": 5,
+          "score": -449,
+          "nodes": 519,
+          "elapsedMs": 17,
+          "marginalNodes": 294,
+          "pv": "b5 g4 f1h h4 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -339,
+          "nodes": 667,
+          "elapsedMs": 19,
+          "marginalNodes": 148,
+          "pv": "b5 g4 f1h h4 d1h i4"
+        },
+        {
+          "depth": 7,
+          "score": -355,
+          "nodes": 1230,
+          "elapsedMs": 28,
+          "marginalNodes": 563,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -197,
+          "nodes": 1816,
+          "elapsedMs": 36,
+          "marginalNodes": 586,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h i3"
+        },
+        {
+          "depth": 9,
+          "score": -357,
+          "nodes": 4071,
+          "elapsedMs": 62,
+          "marginalNodes": 2255,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h i3 b6"
+        },
+        {
+          "depth": 10,
+          "score": -203,
+          "nodes": 5537,
+          "elapsedMs": 81,
+          "marginalNodes": 1466,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h i3 b6 i2"
+        },
+        {
+          "depth": 11,
+          "score": -363,
+          "nodes": 11072,
+          "elapsedMs": 139,
+          "marginalNodes": 5535,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h i3 b6 i2 a6"
+        },
+        {
+          "depth": 12,
+          "score": -197,
+          "nodes": 15280,
+          "elapsedMs": 195,
+          "marginalNodes": 4208,
+          "pv": "b5 g4 f1h h4 d1h i4 b1h i3 b6 i2 a6 h2"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 1,
+      "stoppedBy": "minimax",
+      "elapsedMs": 195,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 32,
+      "engine": "Gorisanson (JS, original)",
+      "move": "g4",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 5,
+      "blackDist": 3,
+      "margin": -2,
+      "simulations": 43608,
+      "rootWinRate": 0.6943406669434067,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.12069999997,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 33,
+      "engine": "Titanium αβ + CAT",
+      "move": "b6",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 13,
+      "blackDist": 7,
+      "margin": -6,
+      "nodes": 11723,
+      "simulations": 0,
+      "rootScore": -109,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -557,
+          "nodes": 21,
+          "elapsedMs": 6,
+          "marginalNodes": 21,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 65,
+          "elapsedMs": 7,
+          "marginalNodes": 44,
+          "pv": "f1h h4"
+        },
+        {
+          "depth": 3,
+          "score": -559,
+          "nodes": 158,
+          "elapsedMs": 8,
+          "marginalNodes": 93,
+          "pv": "b6 h4 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -447,
+          "nodes": 222,
+          "elapsedMs": 9,
+          "marginalNodes": 64,
+          "pv": "b6 h4 f1h i4"
+        },
+        {
+          "depth": 5,
+          "score": -465,
+          "nodes": 458,
+          "elapsedMs": 11,
+          "marginalNodes": 236,
+          "pv": "b6 h4 f1h i4 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -345,
+          "nodes": 585,
+          "elapsedMs": 12,
+          "marginalNodes": 127,
+          "pv": "b6 h4 f1h i4 d1h i3"
+        },
+        {
+          "depth": 7,
+          "score": -357,
+          "nodes": 1031,
+          "elapsedMs": 18,
+          "marginalNodes": 446,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -203,
+          "nodes": 1636,
+          "elapsedMs": 26,
+          "marginalNodes": 605,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h i2"
+        },
+        {
+          "depth": 9,
+          "score": -363,
+          "nodes": 3382,
+          "elapsedMs": 48,
+          "marginalNodes": 1746,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h i2 a6"
+        },
+        {
+          "depth": 10,
+          "score": -197,
+          "nodes": 4823,
+          "elapsedMs": 59,
+          "marginalNodes": 1441,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h i2 a6 h2"
+        },
+        {
+          "depth": 11,
+          "score": -209,
+          "nodes": 7551,
+          "elapsedMs": 94,
+          "marginalNodes": 2728,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h i2 a6 h2 g1v"
+        },
+        {
+          "depth": 12,
+          "score": -109,
+          "nodes": 11723,
+          "elapsedMs": 127,
+          "marginalNodes": 4172,
+          "pv": "b6 h4 f1h i4 d1h i3 b1h h3 g2h i3 a6 i2"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 127,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 34,
+      "engine": "Gorisanson (JS, original)",
+      "move": "h4",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 4,
+      "blackDist": 4,
+      "margin": 0,
+      "simulations": 57949,
+      "rootWinRate": 0.7208105166784708,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.171099999978,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 35,
+      "engine": "Titanium αβ + CAT",
+      "move": "a6",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 12,
+      "blackDist": 6,
+      "margin": -6,
+      "nodes": 9855,
+      "simulations": 0,
+      "rootScore": -191,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -559,
+          "nodes": 18,
+          "elapsedMs": 7,
+          "marginalNodes": 18,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 52,
+          "elapsedMs": 8,
+          "marginalNodes": 34,
+          "pv": "f1h i4"
+        },
+        {
+          "depth": 3,
+          "score": -573,
+          "nodes": 105,
+          "elapsedMs": 9,
+          "marginalNodes": 53,
+          "pv": "a6 i4 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -447,
+          "nodes": 163,
+          "elapsedMs": 9,
+          "marginalNodes": 58,
+          "pv": "a6 i4 f1h i3"
+        },
+        {
+          "depth": 5,
+          "score": -465,
+          "nodes": 385,
+          "elapsedMs": 11,
+          "marginalNodes": 222,
+          "pv": "a6 i4 f1h i3 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -345,
+          "nodes": 494,
+          "elapsedMs": 12,
+          "marginalNodes": 109,
+          "pv": "a6 i4 f1h i3 d1h i2"
+        },
+        {
+          "depth": 7,
+          "score": -363,
+          "nodes": 1048,
+          "elapsedMs": 18,
+          "marginalNodes": 554,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -197,
+          "nodes": 1462,
+          "elapsedMs": 22,
+          "marginalNodes": 414,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h h2"
+        },
+        {
+          "depth": 9,
+          "score": -357,
+          "nodes": 2842,
+          "elapsedMs": 34,
+          "marginalNodes": 1380,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h g3 a7"
+        },
+        {
+          "depth": 10,
+          "score": -191,
+          "nodes": 3845,
+          "elapsedMs": 47,
+          "marginalNodes": 1003,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h g3 a7 g2"
+        },
+        {
+          "depth": 11,
+          "score": -357,
+          "nodes": 7203,
+          "elapsedMs": 95,
+          "marginalNodes": 3358,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h g3 a7 f3 b7"
+        },
+        {
+          "depth": 12,
+          "score": -191,
+          "nodes": 9855,
+          "elapsedMs": 132,
+          "marginalNodes": 2652,
+          "pv": "a6 i4 f1h i3 d1h h3 b1h g3 a7 f3 b7 f2"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 2,
+      "stoppedBy": "minimax",
+      "elapsedMs": 132,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 36,
+      "engine": "Gorisanson (JS, original)",
+      "move": "i4",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 3,
+      "blackDist": 5,
+      "margin": 2,
+      "simulations": 64327,
+      "rootWinRate": 0.5611117224466697,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.04269999999,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 37,
+      "engine": "Titanium αβ + CAT",
+      "move": "a7",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 11,
+      "blackDist": 5,
+      "margin": -6,
+      "nodes": 14225,
+      "simulations": 0,
+      "rootScore": -191,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -573,
+          "nodes": 19,
+          "elapsedMs": 7,
+          "marginalNodes": 19,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 56,
+          "elapsedMs": 10,
+          "marginalNodes": 37,
+          "pv": "f1h i3"
+        },
+        {
+          "depth": 3,
+          "score": -567,
+          "nodes": 131,
+          "elapsedMs": 11,
+          "marginalNodes": 75,
+          "pv": "a7 i3 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -447,
+          "nodes": 196,
+          "elapsedMs": 20,
+          "marginalNodes": 65,
+          "pv": "a7 i3 f1h i2"
+        },
+        {
+          "depth": 5,
+          "score": -465,
+          "nodes": 497,
+          "elapsedMs": 25,
+          "marginalNodes": 301,
+          "pv": "a7 i3 f1h h3 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -339,
+          "nodes": 626,
+          "elapsedMs": 27,
+          "marginalNodes": 129,
+          "pv": "a7 i3 f1h h3 d1h h2"
+        },
+        {
+          "depth": 7,
+          "score": -357,
+          "nodes": 1234,
+          "elapsedMs": 36,
+          "marginalNodes": 608,
+          "pv": "a7 i3 f1h h3 d1h g3 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -191,
+          "nodes": 1859,
+          "elapsedMs": 45,
+          "marginalNodes": 625,
+          "pv": "a7 i3 f1h h3 d1h g3 b1h g2"
+        },
+        {
+          "depth": 9,
+          "score": -357,
+          "nodes": 3740,
+          "elapsedMs": 80,
+          "marginalNodes": 1881,
+          "pv": "a7 i3 f1h h3 d1h g3 b1h f3 b7"
+        },
+        {
+          "depth": 10,
+          "score": -191,
+          "nodes": 5512,
+          "elapsedMs": 103,
+          "marginalNodes": 1772,
+          "pv": "a7 i3 f1h h3 d1h g3 b1h f3 b7 f2"
+        },
+        {
+          "depth": 11,
+          "score": -337,
+          "nodes": 10833,
+          "elapsedMs": 168,
+          "marginalNodes": 5321,
+          "pv": "a7 i3 a8 h3 b8 h2 g1v h3 f2h g3 d2h"
+        },
+        {
+          "depth": 12,
+          "score": -191,
+          "nodes": 14225,
+          "elapsedMs": 217,
+          "marginalNodes": 3392,
+          "pv": "a7 i3 f1h h3 d1h g3 b1h f3 b7 e3 b8 e2"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 1,
+      "stoppedBy": "minimax",
+      "elapsedMs": 217,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 38,
+      "engine": "Gorisanson (JS, original)",
+      "move": "i3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 2,
+      "blackDist": 4,
+      "margin": 2,
+      "simulations": 61587,
+      "rootWinRate": 0.6024954351795496,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.039699999965,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 39,
+      "engine": "Titanium αβ + CAT",
+      "move": "a8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 10,
+      "blackDist": 4,
+      "margin": -6,
+      "nodes": 18414,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -567,
+          "nodes": 22,
+          "elapsedMs": 7,
+          "marginalNodes": 22,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 64,
+          "elapsedMs": 8,
+          "marginalNodes": 42,
+          "pv": "f1h i2"
+        },
+        {
+          "depth": 3,
+          "score": -611,
+          "nodes": 178,
+          "elapsedMs": 10,
+          "marginalNodes": 114,
+          "pv": "a8 h3 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -447,
+          "nodes": 235,
+          "elapsedMs": 11,
+          "marginalNodes": 57,
+          "pv": "a8 h3 f1h h2"
+        },
+        {
+          "depth": 5,
+          "score": -459,
+          "nodes": 496,
+          "elapsedMs": 15,
+          "marginalNodes": 261,
+          "pv": "a8 h3 g2h i3 f1h"
+        },
+        {
+          "depth": 6,
+          "score": -339,
+          "nodes": 706,
+          "elapsedMs": 19,
+          "marginalNodes": 210,
+          "pv": "a8 h3 f1h g3 d1h g2"
+        },
+        {
+          "depth": 7,
+          "score": -359,
+          "nodes": 1221,
+          "elapsedMs": 28,
+          "marginalNodes": 515,
+          "pv": "a8 h3 f1h g3 d1h f3 b1h"
+        },
+        {
+          "depth": 8,
+          "score": -203,
+          "nodes": 2612,
+          "elapsedMs": 47,
+          "marginalNodes": 1391,
+          "pv": "a8 h3 g2h g3 f3v h3 f1h i3"
+        },
+        {
+          "depth": 9,
+          "score": -337,
+          "nodes": 4250,
+          "elapsedMs": 74,
+          "marginalNodes": 1638,
+          "pv": "a8 h3 b8 h2 g1v h3 f2h g3 d2h"
+        },
+        {
+          "depth": 10,
+          "score": -191,
+          "nodes": 5757,
+          "elapsedMs": 96,
+          "marginalNodes": 1507,
+          "pv": "a8 h3 f1h g3 d1h f3 b1h e3 b8 e2"
+        },
+        {
+          "depth": 11,
+          "score": -109,
+          "nodes": 11196,
+          "elapsedMs": 171,
+          "marginalNodes": 5439,
+          "pv": "a8 i2 g1v i3 h3v i2 f1h h2 d1h h3 b1h"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 18414,
+          "elapsedMs": 271,
+          "marginalNodes": 7218,
+          "pv": "a8 i2 g1v i3 f2h h3 d2h g3 b2h f3 a1h e3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 271,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 40,
+      "engine": "Gorisanson (JS, original)",
+      "move": "h3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 3,
+      "margin": 2,
+      "simulations": 63491,
+      "rootWinRate": 0.5554137257846523,
+      "stoppedBy": "time",
+      "elapsedMs": 10000.080099999963,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 41,
+      "engine": "Titanium αβ + CAT",
+      "move": "g2h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 9,
+      "blackDist": 3,
+      "margin": -6,
+      "nodes": 20933,
+      "simulations": 0,
+      "rootScore": 121,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -611,
+          "nodes": 25,
+          "elapsedMs": 7,
+          "marginalNodes": 25,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -447,
+          "nodes": 58,
+          "elapsedMs": 8,
+          "marginalNodes": 33,
+          "pv": "f1h h2"
+        },
+        {
+          "depth": 3,
+          "score": -459,
+          "nodes": 145,
+          "elapsedMs": 10,
+          "marginalNodes": 87,
+          "pv": "g2h i3 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -339,
+          "nodes": 202,
+          "elapsedMs": 11,
+          "marginalNodes": 57,
+          "pv": "g2h i3 f1h i2"
+        },
+        {
+          "depth": 5,
+          "score": -351,
+          "nodes": 446,
+          "elapsedMs": 14,
+          "marginalNodes": 244,
+          "pv": "g2h i3 f1h i2 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -203,
+          "nodes": 1318,
+          "elapsedMs": 21,
+          "marginalNodes": 872,
+          "pv": "g2h g3 f3v h3 f1h i3"
+        },
+        {
+          "depth": 7,
+          "score": -103,
+          "nodes": 2111,
+          "elapsedMs": 27,
+          "marginalNodes": 793,
+          "pv": "g2h g3 f3v h3 f1h i3 e1v"
+        },
+        {
+          "depth": 8,
+          "score": -115,
+          "nodes": 3041,
+          "elapsedMs": 39,
+          "marginalNodes": 930,
+          "pv": "g2h g3 f3v h3 f1h i3 e1v i2"
+        },
+        {
+          "depth": 9,
+          "score": 6,
+          "nodes": 4667,
+          "elapsedMs": 64,
+          "marginalNodes": 1626,
+          "pv": "g2h g3 f1h f3 e2h g3 f3v h3 d1h"
+        },
+        {
+          "depth": 10,
+          "score": 6,
+          "nodes": 7741,
+          "elapsedMs": 103,
+          "marginalNodes": 3074,
+          "pv": "g2h g3 f1h f3 e2h g3 d3v h3 d1h i3"
+        },
+        {
+          "depth": 11,
+          "score": 0,
+          "nodes": 9625,
+          "elapsedMs": 127,
+          "marginalNodes": 1884,
+          "pv": "g2h g3 f3v h3 f1h i3 e1v i2 d1h h2 b8"
+        },
+        {
+          "depth": 12,
+          "score": 121,
+          "nodes": 20933,
+          "elapsedMs": 231,
+          "marginalNodes": 11308,
+          "pv": "g2h g3 f1h f3 e2h e3 d3v f3 d1h g3 b8 h3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 1,
+      "stoppedBy": "minimax",
+      "elapsedMs": 231,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 42,
+      "engine": "Gorisanson (JS, original)",
+      "move": "g3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 2,
+      "margin": 1,
+      "simulations": 66000,
+      "rootWinRate": 0.2349628244512711,
+      "stoppedBy": "visits",
+      "elapsedMs": 6465.222100000014,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 43,
+      "engine": "Titanium αβ + CAT",
+      "move": "f3v",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 9,
+      "blackDist": 3,
+      "margin": -6,
+      "nodes": 30039,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -453,
+          "nodes": 23,
+          "elapsedMs": 9,
+          "marginalNodes": 23,
+          "pv": "f3v"
+        },
+        {
+          "depth": 2,
+          "score": -333,
+          "nodes": 50,
+          "elapsedMs": 9,
+          "marginalNodes": 27,
+          "pv": "f2v h3"
+        },
+        {
+          "depth": 3,
+          "score": -185,
+          "nodes": 142,
+          "elapsedMs": 11,
+          "marginalNodes": 92,
+          "pv": "f3v h3 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -203,
+          "nodes": 447,
+          "elapsedMs": 15,
+          "marginalNodes": 305,
+          "pv": "f3v h3 f1h i3"
+        },
+        {
+          "depth": 5,
+          "score": -103,
+          "nodes": 618,
+          "elapsedMs": 18,
+          "marginalNodes": 171,
+          "pv": "f3v h3 f1h i3 e1v"
+        },
+        {
+          "depth": 6,
+          "score": -115,
+          "nodes": 994,
+          "elapsedMs": 24,
+          "marginalNodes": 376,
+          "pv": "f3v h3 f1h i3 e1v i2"
+        },
+        {
+          "depth": 7,
+          "score": 0,
+          "nodes": 1408,
+          "elapsedMs": 28,
+          "marginalNodes": 414,
+          "pv": "f3v h3 f1h i3 e1v i2 d2h"
+        },
+        {
+          "depth": 8,
+          "score": -115,
+          "nodes": 2743,
+          "elapsedMs": 44,
+          "marginalNodes": 1335,
+          "pv": "f3v h3 f1h i3 e1v i2 d1h h2"
+        },
+        {
+          "depth": 9,
+          "score": 0,
+          "nodes": 6295,
+          "elapsedMs": 78,
+          "marginalNodes": 3552,
+          "pv": "f3v h3 f1h i3 e1v i2 d1h h2 b8"
+        },
+        {
+          "depth": 10,
+          "score": 0,
+          "nodes": 9486,
+          "elapsedMs": 121,
+          "marginalNodes": 3191,
+          "pv": "f3v h3 f1h i3 d1h i2 e1v h2 b8"
+        },
+        {
+          "depth": 11,
+          "score": 6,
+          "nodes": 16188,
+          "elapsedMs": 210,
+          "marginalNodes": 6702,
+          "pv": "f3v h3 f1h i3 d1h i2 e1v h2 b8"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 30039,
+          "elapsedMs": 378,
+          "marginalNodes": 13851,
+          "pv": "f3v h3 f1h i3 e1v i2 d1h h2 b8"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 4,
+      "stoppedBy": "minimax",
+      "elapsedMs": 378,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 44,
+      "engine": "Gorisanson (JS, original)",
+      "move": "h3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 3,
+      "margin": 2,
+      "simulations": 66000,
+      "rootWinRate": 0.9443627933756572,
+      "stoppedBy": "visits",
+      "elapsedMs": 2343.498399999982,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 45,
+      "engine": "Titanium αβ + CAT",
+      "move": "b8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 9,
+      "blackDist": 5,
+      "margin": -4,
+      "nodes": 5735,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -353,
+          "nodes": 16,
+          "elapsedMs": 7,
+          "marginalNodes": 16,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -185,
+          "nodes": 38,
+          "elapsedMs": 8,
+          "marginalNodes": 22,
+          "pv": "f1h i3"
+        },
+        {
+          "depth": 3,
+          "score": -343,
+          "nodes": 85,
+          "elapsedMs": 9,
+          "marginalNodes": 47,
+          "pv": "b8 i3 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -191,
+          "nodes": 130,
+          "elapsedMs": 9,
+          "marginalNodes": 45,
+          "pv": "b8 i3 f1h i2"
+        },
+        {
+          "depth": 5,
+          "score": -195,
+          "nodes": 323,
+          "elapsedMs": 12,
+          "marginalNodes": 193,
+          "pv": "b8 i3 f1h i2 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -103,
+          "nodes": 447,
+          "elapsedMs": 14,
+          "marginalNodes": 124,
+          "pv": "b8 i3 f1h i2 e1v h2"
+        },
+        {
+          "depth": 7,
+          "score": -115,
+          "nodes": 788,
+          "elapsedMs": 19,
+          "marginalNodes": 341,
+          "pv": "b8 i3 f1h i2 d1h h2 b1h"
+        },
+        {
+          "depth": 8,
+          "score": 0,
+          "nodes": 1077,
+          "elapsedMs": 23,
+          "marginalNodes": 289,
+          "pv": "b8 i3 f1h i2 e1v h2 d1h g2"
+        },
+        {
+          "depth": 9,
+          "score": -115,
+          "nodes": 1924,
+          "elapsedMs": 32,
+          "marginalNodes": 847,
+          "pv": "b8 i3 f1h i2 d1h h2 c1v g2 c8"
+        },
+        {
+          "depth": 10,
+          "score": 0,
+          "nodes": 2663,
+          "elapsedMs": 37,
+          "marginalNodes": 739,
+          "pv": "b8 i3 f1h i2 e1v h2 d1h g2 c8 f2"
+        },
+        {
+          "depth": 11,
+          "score": -109,
+          "nodes": 4217,
+          "elapsedMs": 47,
+          "marginalNodes": 1554,
+          "pv": "b8 i3 f1h i2 d1h h2 e1v g2 c8 f2 d8"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 5735,
+          "elapsedMs": 58,
+          "marginalNodes": 1518,
+          "pv": "b8 i3 f1h i2 e1v h2 d1h g2 c8 f2 d8 f3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 59,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 46,
+      "engine": "Gorisanson (JS, original)",
+      "move": "i3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 4,
+      "margin": 3,
+      "simulations": 66000,
+      "rootWinRate": 0.9645416995687299,
+      "stoppedBy": "visits",
+      "elapsedMs": 1617.183000000019,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 47,
+      "engine": "Titanium αβ + CAT",
+      "move": "c8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 8,
+      "blackDist": 4,
+      "margin": -4,
+      "nodes": 6080,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -343,
+          "nodes": 17,
+          "elapsedMs": 7,
+          "marginalNodes": 17,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -191,
+          "nodes": 41,
+          "elapsedMs": 8,
+          "marginalNodes": 24,
+          "pv": "f1h i2"
+        },
+        {
+          "depth": 3,
+          "score": -361,
+          "nodes": 92,
+          "elapsedMs": 8,
+          "marginalNodes": 51,
+          "pv": "c8 i2 f1h"
+        },
+        {
+          "depth": 4,
+          "score": -183,
+          "nodes": 144,
+          "elapsedMs": 9,
+          "marginalNodes": 52,
+          "pv": "c8 i2 f1h h2"
+        },
+        {
+          "depth": 5,
+          "score": -195,
+          "nodes": 335,
+          "elapsedMs": 12,
+          "marginalNodes": 191,
+          "pv": "c8 i2 f1h h2 d1h"
+        },
+        {
+          "depth": 6,
+          "score": -103,
+          "nodes": 426,
+          "elapsedMs": 14,
+          "marginalNodes": 91,
+          "pv": "c8 i2 f1h h2 e1v g2"
+        },
+        {
+          "depth": 7,
+          "score": -115,
+          "nodes": 788,
+          "elapsedMs": 18,
+          "marginalNodes": 362,
+          "pv": "c8 i2 f1h h2 d1h g2 b1h"
+        },
+        {
+          "depth": 8,
+          "score": 0,
+          "nodes": 1133,
+          "elapsedMs": 23,
+          "marginalNodes": 345,
+          "pv": "c8 i2 f1h h2 e1v g2 d1h f2"
+        },
+        {
+          "depth": 9,
+          "score": -109,
+          "nodes": 1998,
+          "elapsedMs": 33,
+          "marginalNodes": 865,
+          "pv": "c8 i2 f1h h2 d1h g2 e1v f2 d8"
+        },
+        {
+          "depth": 10,
+          "score": 6,
+          "nodes": 3007,
+          "elapsedMs": 40,
+          "marginalNodes": 1009,
+          "pv": "c8 i2 f1h h2 e1v g2 d1h f2 d8 f3"
+        },
+        {
+          "depth": 11,
+          "score": -101,
+          "nodes": 4412,
+          "elapsedMs": 50,
+          "marginalNodes": 1405,
+          "pv": "c8 i2 f1h h2 e1v g2 d2h f2 d8 f3 e8"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 6080,
+          "elapsedMs": 68,
+          "marginalNodes": 1668,
+          "pv": "c8 i2 f1h h2 d1h g2 e1v f2 d8 f3 e8 e3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 68,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 48,
+      "engine": "Gorisanson (JS, original)",
+      "move": "i2",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 1,
+      "margin": 0,
+      "simulations": 66000,
+      "rootWinRate": 0.9790677567612662,
+      "stoppedBy": "visits",
+      "elapsedMs": 1173.4769000000088,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 49,
+      "engine": "Titanium αβ + CAT",
+      "move": "f1h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 7,
+      "blackDist": 3,
+      "margin": -4,
+      "nodes": 6367,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -361,
+          "nodes": 20,
+          "elapsedMs": 7,
+          "marginalNodes": 20,
+          "pv": "f1h"
+        },
+        {
+          "depth": 2,
+          "score": -183,
+          "nodes": 43,
+          "elapsedMs": 7,
+          "marginalNodes": 23,
+          "pv": "f1h h2"
+        },
+        {
+          "depth": 3,
+          "score": -195,
+          "nodes": 97,
+          "elapsedMs": 8,
+          "marginalNodes": 54,
+          "pv": "f1h h2 d1h"
+        },
+        {
+          "depth": 4,
+          "score": -103,
+          "nodes": 148,
+          "elapsedMs": 9,
+          "marginalNodes": 51,
+          "pv": "f1h h2 e1v g2"
+        },
+        {
+          "depth": 5,
+          "score": -115,
+          "nodes": 375,
+          "elapsedMs": 12,
+          "marginalNodes": 227,
+          "pv": "f1h h2 d1h g2 b1h"
+        },
+        {
+          "depth": 6,
+          "score": 0,
+          "nodes": 552,
+          "elapsedMs": 14,
+          "marginalNodes": 177,
+          "pv": "f1h h2 e1v g2 d1h f2"
+        },
+        {
+          "depth": 7,
+          "score": -109,
+          "nodes": 1107,
+          "elapsedMs": 21,
+          "marginalNodes": 555,
+          "pv": "f1h h2 d1h g2 e1v f2 d8"
+        },
+        {
+          "depth": 8,
+          "score": 6,
+          "nodes": 1466,
+          "elapsedMs": 25,
+          "marginalNodes": 359,
+          "pv": "f1h h2 e1v g2 d1h f2 d8 f3"
+        },
+        {
+          "depth": 9,
+          "score": -101,
+          "nodes": 2286,
+          "elapsedMs": 35,
+          "marginalNodes": 820,
+          "pv": "f1h h2 e1v g2 d2h f2 d8 f3 e8"
+        },
+        {
+          "depth": 10,
+          "score": 6,
+          "nodes": 3120,
+          "elapsedMs": 44,
+          "marginalNodes": 834,
+          "pv": "f1h h2 d1h g2 e1v f2 d8 f3 e8 e3"
+        },
+        {
+          "depth": 11,
+          "score": -147,
+          "nodes": 5154,
+          "elapsedMs": 67,
+          "marginalNodes": 2034,
+          "pv": "f1h h2 e1v g2 d8 f2 e8 f3 e2h e3 f8"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 6367,
+          "elapsedMs": 80,
+          "marginalNodes": 1213,
+          "pv": "f1h h2 d1h g2 e1v f2 d8 f3 e8 e3 f8 d3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 80,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 50,
+      "engine": "Gorisanson (JS, original)",
+      "move": "h2",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 1,
+      "margin": 0,
+      "simulations": 31900,
+      "rootWinRate": 0.9800188205771644,
+      "stoppedBy": "forced",
+      "elapsedMs": 506.99359999998705,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 51,
+      "engine": "Titanium αβ + CAT",
+      "move": "e1v",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 7,
+      "blackDist": 4,
+      "margin": -3,
+      "nodes": 4463,
+      "simulations": 0,
+      "rootScore": 6,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -195,
+          "nodes": 18,
+          "elapsedMs": 7,
+          "marginalNodes": 18,
+          "pv": "d1h"
+        },
+        {
+          "depth": 2,
+          "score": -103,
+          "nodes": 42,
+          "elapsedMs": 7,
+          "marginalNodes": 24,
+          "pv": "e1v g2"
+        },
+        {
+          "depth": 3,
+          "score": -115,
+          "nodes": 104,
+          "elapsedMs": 8,
+          "marginalNodes": 62,
+          "pv": "e1v g2 d2h"
+        },
+        {
+          "depth": 4,
+          "score": 0,
+          "nodes": 160,
+          "elapsedMs": 9,
+          "marginalNodes": 56,
+          "pv": "e1v g2 d1h f2"
+        },
+        {
+          "depth": 5,
+          "score": -109,
+          "nodes": 320,
+          "elapsedMs": 11,
+          "marginalNodes": 160,
+          "pv": "e1v g2 d2h f2 d8"
+        },
+        {
+          "depth": 6,
+          "score": 6,
+          "nodes": 435,
+          "elapsedMs": 13,
+          "marginalNodes": 115,
+          "pv": "e1v g2 d1h f2 d8 f3"
+        },
+        {
+          "depth": 7,
+          "score": -101,
+          "nodes": 751,
+          "elapsedMs": 15,
+          "marginalNodes": 316,
+          "pv": "e1v g2 d2h f2 d8 f3 e8"
+        },
+        {
+          "depth": 8,
+          "score": 6,
+          "nodes": 1026,
+          "elapsedMs": 17,
+          "marginalNodes": 275,
+          "pv": "e1v g2 d1h f2 d8 f3 e8 e3"
+        },
+        {
+          "depth": 9,
+          "score": -147,
+          "nodes": 2113,
+          "elapsedMs": 24,
+          "marginalNodes": 1087,
+          "pv": "e1v g2 d8 f2 e8 f3 e2h e3 f8"
+        },
+        {
+          "depth": 10,
+          "score": 14,
+          "nodes": 2494,
+          "elapsedMs": 28,
+          "marginalNodes": 381,
+          "pv": "e1v g2 d2h f2 d8 f3 e8 e3 f8 d3"
+        },
+        {
+          "depth": 11,
+          "score": -147,
+          "nodes": 3510,
+          "elapsedMs": 39,
+          "marginalNodes": 1016,
+          "pv": "e1v g2 d2h f2 d8 f3 e8 e3 f8 d3 g8"
+        },
+        {
+          "depth": 12,
+          "score": 6,
+          "nodes": 4463,
+          "elapsedMs": 49,
+          "marginalNodes": 953,
+          "pv": "e1v g2 d2h f2 d8 f3 e8 e3 f8 d3 g8 c3"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 1,
+      "stoppedBy": "minimax",
+      "elapsedMs": 49,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 52,
+      "engine": "Gorisanson (JS, original)",
+      "move": "g2",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 1,
+      "margin": 0,
+      "simulations": 2950,
+      "rootWinRate": 0.9803056027164686,
+      "stoppedBy": "forced",
+      "elapsedMs": 41.349500000011176,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 53,
+      "engine": "Titanium αβ + CAT",
+      "move": "d2h",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 7,
+      "blackDist": 5,
+      "margin": -2,
+      "nodes": 2934,
+      "simulations": 0,
+      "rootScore": 4,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -115,
+          "nodes": 24,
+          "elapsedMs": 6,
+          "marginalNodes": 24,
+          "pv": "d2h"
+        },
+        {
+          "depth": 2,
+          "score": 0,
+          "nodes": 54,
+          "elapsedMs": 6,
+          "marginalNodes": 30,
+          "pv": "d1h f2"
+        },
+        {
+          "depth": 3,
+          "score": -109,
+          "nodes": 78,
+          "elapsedMs": 7,
+          "marginalNodes": 24,
+          "pv": "d2h f2 d8"
+        },
+        {
+          "depth": 4,
+          "score": 6,
+          "nodes": 107,
+          "elapsedMs": 7,
+          "marginalNodes": 29,
+          "pv": "d2h f2 d8 f3"
+        },
+        {
+          "depth": 5,
+          "score": -101,
+          "nodes": 499,
+          "elapsedMs": 10,
+          "marginalNodes": 392,
+          "pv": "d2h f2 d8 f3 e8"
+        },
+        {
+          "depth": 6,
+          "score": 14,
+          "nodes": 540,
+          "elapsedMs": 10,
+          "marginalNodes": 41,
+          "pv": "d2h f2 d8 f3 e8 e3"
+        },
+        {
+          "depth": 7,
+          "score": -147,
+          "nodes": 877,
+          "elapsedMs": 13,
+          "marginalNodes": 337,
+          "pv": "d8 f2 e8 f3 e2h e3 f8"
+        },
+        {
+          "depth": 8,
+          "score": 14,
+          "nodes": 998,
+          "elapsedMs": 15,
+          "marginalNodes": 121,
+          "pv": "d2h f2 d8 f3 e8 e3 f8 d3"
+        },
+        {
+          "depth": 9,
+          "score": -147,
+          "nodes": 1096,
+          "elapsedMs": 16,
+          "marginalNodes": 98,
+          "pv": "d2h f2 d8 f3 e8 e3 f8 d3 g8"
+        },
+        {
+          "depth": 10,
+          "score": 6,
+          "nodes": 1225,
+          "elapsedMs": 18,
+          "marginalNodes": 129,
+          "pv": "d2h f2 d8 f3 e8 e3 f8 d3 g8 c3"
+        },
+        {
+          "depth": 11,
+          "score": -156,
+          "nodes": 2694,
+          "elapsedMs": 34,
+          "marginalNodes": 1469,
+          "pv": "d8 f2 e8 f3 f8 e3 g8 d3 h8 d2 i8"
+        },
+        {
+          "depth": 12,
+          "score": 4,
+          "nodes": 2934,
+          "elapsedMs": 37,
+          "marginalNodes": 240,
+          "pv": "d2h f2 d8 f3 e8 e3 f8 d3 g8 c3 h8 c2"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 3,
+      "stoppedBy": "minimax",
+      "elapsedMs": 38,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 54,
+      "engine": "Gorisanson (JS, original)",
+      "move": "f2",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 1,
+      "margin": 0,
+      "simulations": 350,
+      "rootWinRate": 0.9828080229226361,
+      "stoppedBy": "forced",
+      "elapsedMs": 2.241199999989476,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 55,
+      "engine": "Titanium αβ + CAT",
+      "move": "d8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 7,
+      "blackDist": 6,
+      "margin": -1,
+      "nodes": 665,
+      "simulations": 0,
+      "rootScore": -171,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -109,
+          "nodes": 5,
+          "elapsedMs": 6,
+          "marginalNodes": 5,
+          "pv": "d8"
+        },
+        {
+          "depth": 2,
+          "score": 6,
+          "nodes": 12,
+          "elapsedMs": 6,
+          "marginalNodes": 7,
+          "pv": "d8 f3"
+        },
+        {
+          "depth": 3,
+          "score": -101,
+          "nodes": 24,
+          "elapsedMs": 7,
+          "marginalNodes": 12,
+          "pv": "d8 f3 e8"
+        },
+        {
+          "depth": 4,
+          "score": 14,
+          "nodes": 44,
+          "elapsedMs": 7,
+          "marginalNodes": 20,
+          "pv": "d8 f3 e8 e3"
+        },
+        {
+          "depth": 5,
+          "score": -151,
+          "nodes": 73,
+          "elapsedMs": 7,
+          "marginalNodes": 29,
+          "pv": "d8 f3 e8 e3 f8"
+        },
+        {
+          "depth": 6,
+          "score": 14,
+          "nodes": 106,
+          "elapsedMs": 8,
+          "marginalNodes": 33,
+          "pv": "d8 f3 e8 e3 f8 d3"
+        },
+        {
+          "depth": 7,
+          "score": -147,
+          "nodes": 153,
+          "elapsedMs": 8,
+          "marginalNodes": 47,
+          "pv": "d8 f3 e8 e3 f8 d3 g8"
+        },
+        {
+          "depth": 8,
+          "score": 6,
+          "nodes": 205,
+          "elapsedMs": 9,
+          "marginalNodes": 52,
+          "pv": "d8 f3 e8 e3 f8 d3 g8 c3"
+        },
+        {
+          "depth": 9,
+          "score": -167,
+          "nodes": 294,
+          "elapsedMs": 10,
+          "marginalNodes": 89,
+          "pv": "d8 f3 e8 e3 f8 d3 g8 c3 h8"
+        },
+        {
+          "depth": 10,
+          "score": 4,
+          "nodes": 379,
+          "elapsedMs": 10,
+          "marginalNodes": 85,
+          "pv": "d8 f3 e8 e3 f8 d3 g8 c3 h8 c2"
+        },
+        {
+          "depth": 11,
+          "score": -171,
+          "nodes": 494,
+          "elapsedMs": 11,
+          "marginalNodes": 115,
+          "pv": "d8 f3 e8 e3 f8 d3 g8 c3 h8 c2 i8"
+        },
+        {
+          "depth": 12,
+          "score": -171,
+          "nodes": 665,
+          "elapsedMs": 12,
+          "marginalNodes": 171,
+          "pv": "d8 f3 e8 e3 f8 d3 g8 c3 h8 c2 i8 c1"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 13,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 56,
+      "engine": "Gorisanson (JS, original)",
+      "move": "f3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 3,
+      "margin": 2,
+      "simulations": 350,
+      "rootWinRate": 0.9914040114613181,
+      "stoppedBy": "forced",
+      "elapsedMs": 3.3975000000209548,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 57,
+      "engine": "Titanium αβ + CAT",
+      "move": "e8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 6,
+      "blackDist": 5,
+      "margin": -1,
+      "nodes": 690,
+      "simulations": 0,
+      "rootScore": -171,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -101,
+          "nodes": 5,
+          "elapsedMs": 6,
+          "marginalNodes": 5,
+          "pv": "e8"
+        },
+        {
+          "depth": 2,
+          "score": 14,
+          "nodes": 12,
+          "elapsedMs": 6,
+          "marginalNodes": 7,
+          "pv": "e8 e3"
+        },
+        {
+          "depth": 3,
+          "score": -151,
+          "nodes": 24,
+          "elapsedMs": 6,
+          "marginalNodes": 12,
+          "pv": "e8 e3 f8"
+        },
+        {
+          "depth": 4,
+          "score": 14,
+          "nodes": 44,
+          "elapsedMs": 6,
+          "marginalNodes": 20,
+          "pv": "e8 e3 f8 d3"
+        },
+        {
+          "depth": 5,
+          "score": -147,
+          "nodes": 73,
+          "elapsedMs": 7,
+          "marginalNodes": 29,
+          "pv": "e8 e3 f8 d3 g8"
+        },
+        {
+          "depth": 6,
+          "score": 6,
+          "nodes": 106,
+          "elapsedMs": 7,
+          "marginalNodes": 33,
+          "pv": "e8 e3 f8 d3 g8 c3"
+        },
+        {
+          "depth": 7,
+          "score": -167,
+          "nodes": 154,
+          "elapsedMs": 8,
+          "marginalNodes": 48,
+          "pv": "e8 e3 f8 d3 g8 c3 h8"
+        },
+        {
+          "depth": 8,
+          "score": 4,
+          "nodes": 207,
+          "elapsedMs": 8,
+          "marginalNodes": 53,
+          "pv": "e8 e3 f8 d3 g8 c3 h8 c2"
+        },
+        {
+          "depth": 9,
+          "score": -171,
+          "nodes": 300,
+          "elapsedMs": 9,
+          "marginalNodes": 93,
+          "pv": "e8 e3 f8 d3 g8 c3 h8 c2 i8"
+        },
+        {
+          "depth": 10,
+          "score": -171,
+          "nodes": 435,
+          "elapsedMs": 10,
+          "marginalNodes": 135,
+          "pv": "e8 e3 f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 11,
+          "score": -171,
+          "nodes": 552,
+          "elapsedMs": 11,
+          "marginalNodes": 117,
+          "pv": "e8 e3 f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 12,
+          "score": -171,
+          "nodes": 690,
+          "elapsedMs": 12,
+          "marginalNodes": 138,
+          "pv": "e8 e3 f8 d3 g8 c3 h8 c2 i8 c1"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 13,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 58,
+      "engine": "Gorisanson (JS, original)",
+      "move": "e3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 2,
+      "margin": 1,
+      "simulations": 250,
+      "rootWinRate": 0.9919678714859438,
+      "stoppedBy": "forced",
+      "elapsedMs": 2.342499999969732,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 59,
+      "engine": "Titanium αβ + CAT",
+      "move": "f8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 5,
+      "blackDist": 4,
+      "margin": -1,
+      "nodes": 685,
+      "simulations": 0,
+      "rootScore": 4,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -151,
+          "nodes": 5,
+          "elapsedMs": 6,
+          "marginalNodes": 5,
+          "pv": "f8"
+        },
+        {
+          "depth": 2,
+          "score": 14,
+          "nodes": 12,
+          "elapsedMs": 6,
+          "marginalNodes": 7,
+          "pv": "f8 d3"
+        },
+        {
+          "depth": 3,
+          "score": -147,
+          "nodes": 24,
+          "elapsedMs": 6,
+          "marginalNodes": 12,
+          "pv": "f8 d3 g8"
+        },
+        {
+          "depth": 4,
+          "score": 6,
+          "nodes": 44,
+          "elapsedMs": 7,
+          "marginalNodes": 20,
+          "pv": "f8 d3 g8 c3"
+        },
+        {
+          "depth": 5,
+          "score": -167,
+          "nodes": 74,
+          "elapsedMs": 7,
+          "marginalNodes": 30,
+          "pv": "f8 d3 g8 c3 h8"
+        },
+        {
+          "depth": 6,
+          "score": 4,
+          "nodes": 108,
+          "elapsedMs": 8,
+          "marginalNodes": 34,
+          "pv": "f8 d3 g8 c3 h8 c2"
+        },
+        {
+          "depth": 7,
+          "score": -171,
+          "nodes": 158,
+          "elapsedMs": 9,
+          "marginalNodes": 50,
+          "pv": "f8 d3 g8 c3 h8 c2 i8"
+        },
+        {
+          "depth": 8,
+          "score": -171,
+          "nodes": 249,
+          "elapsedMs": 10,
+          "marginalNodes": 91,
+          "pv": "f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 9,
+          "score": -171,
+          "nodes": 335,
+          "elapsedMs": 11,
+          "marginalNodes": 86,
+          "pv": "f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 10,
+          "score": -171,
+          "nodes": 442,
+          "elapsedMs": 12,
+          "marginalNodes": 107,
+          "pv": "f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 11,
+          "score": 4,
+          "nodes": 532,
+          "elapsedMs": 13,
+          "marginalNodes": 90,
+          "pv": "f8 d3 g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 12,
+          "score": 4,
+          "nodes": 685,
+          "elapsedMs": 14,
+          "marginalNodes": 153,
+          "pv": "f8 d3 g8 c3 h8 c2 i8 c1"
+        }
+      ],
+      "searchDepth": 12,
+      "lmrReSearches": 0,
+      "stoppedBy": "minimax",
+      "elapsedMs": 15,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 60,
+      "engine": "Gorisanson (JS, original)",
+      "move": "d3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 2,
+      "margin": 1,
+      "simulations": 350,
+      "rootWinRate": 0.9914040114613181,
+      "stoppedBy": "forced",
+      "elapsedMs": 2.525199999974575,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 61,
+      "engine": "Titanium αβ + CAT",
+      "move": "g8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 4,
+      "blackDist": 3,
+      "margin": -1,
+      "nodes": 645,
+      "simulations": 0,
+      "rootScore": -19994,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -147,
+          "nodes": 5,
+          "elapsedMs": 5,
+          "marginalNodes": 5,
+          "pv": "g8"
+        },
+        {
+          "depth": 2,
+          "score": 6,
+          "nodes": 12,
+          "elapsedMs": 6,
+          "marginalNodes": 7,
+          "pv": "g8 c3"
+        },
+        {
+          "depth": 3,
+          "score": -167,
+          "nodes": 24,
+          "elapsedMs": 6,
+          "marginalNodes": 12,
+          "pv": "g8 c3 h8"
+        },
+        {
+          "depth": 4,
+          "score": 4,
+          "nodes": 45,
+          "elapsedMs": 7,
+          "marginalNodes": 21,
+          "pv": "g8 c3 h8 c2"
+        },
+        {
+          "depth": 5,
+          "score": -171,
+          "nodes": 78,
+          "elapsedMs": 7,
+          "marginalNodes": 33,
+          "pv": "g8 c3 h8 c2 i8"
+        },
+        {
+          "depth": 6,
+          "score": -171,
+          "nodes": 156,
+          "elapsedMs": 8,
+          "marginalNodes": 78,
+          "pv": "g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 7,
+          "score": 4,
+          "nodes": 206,
+          "elapsedMs": 9,
+          "marginalNodes": 50,
+          "pv": "g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 8,
+          "score": 4,
+          "nodes": 252,
+          "elapsedMs": 10,
+          "marginalNodes": 46,
+          "pv": "g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 9,
+          "score": 4,
+          "nodes": 298,
+          "elapsedMs": 10,
+          "marginalNodes": 46,
+          "pv": "g8 c3 h8 c2 i8 c1"
+        },
+        {
+          "depth": 10,
+          "score": -19994,
+          "nodes": 645,
+          "elapsedMs": 12,
+          "marginalNodes": 347,
+          "pv": "g8 c3 h8 c2 i8 c1"
+        }
+      ],
+      "searchDepth": 10,
+      "lmrReSearches": 2,
+      "stoppedBy": "minimax",
+      "elapsedMs": 13,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 62,
+      "engine": "Gorisanson (JS, original)",
+      "move": "c3",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 2,
+      "margin": 1,
+      "simulations": 350,
+      "rootWinRate": 0.9914040114613181,
+      "stoppedBy": "forced",
+      "elapsedMs": 1.6837999999988824,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 63,
+      "engine": "Titanium αβ + CAT",
+      "move": "h8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 3,
+      "blackDist": 2,
+      "margin": -1,
+      "nodes": 288,
+      "simulations": 0,
+      "rootScore": -19996,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -167,
+          "nodes": 5,
+          "elapsedMs": 6,
+          "marginalNodes": 5,
+          "pv": "h8"
+        },
+        {
+          "depth": 2,
+          "score": 4,
+          "nodes": 13,
+          "elapsedMs": 6,
+          "marginalNodes": 8,
+          "pv": "h8 c2"
+        },
+        {
+          "depth": 3,
+          "score": -171,
+          "nodes": 28,
+          "elapsedMs": 6,
+          "marginalNodes": 15,
+          "pv": "h8 c2 i8"
+        },
+        {
+          "depth": 4,
+          "score": 4,
+          "nodes": 56,
+          "elapsedMs": 7,
+          "marginalNodes": 28,
+          "pv": "h8 c2 i8 c1"
+        },
+        {
+          "depth": 5,
+          "score": 4,
+          "nodes": 92,
+          "elapsedMs": 7,
+          "marginalNodes": 36,
+          "pv": "h8 c2 i8 c1"
+        },
+        {
+          "depth": 6,
+          "score": -19996,
+          "nodes": 136,
+          "elapsedMs": 8,
+          "marginalNodes": 44,
+          "pv": "h8 c2 i8 c1"
+        },
+        {
+          "depth": 7,
+          "score": -19775,
+          "nodes": 178,
+          "elapsedMs": 9,
+          "marginalNodes": 42,
+          "pv": "h8 c2 i8 c1"
+        },
+        {
+          "depth": 8,
+          "score": -19551,
+          "nodes": 261,
+          "elapsedMs": 9,
+          "marginalNodes": 83,
+          "pv": "h8 c2 i8 c1"
+        },
+        {
+          "depth": 9,
+          "score": -19996,
+          "nodes": 288,
+          "elapsedMs": 10,
+          "marginalNodes": 27,
+          "pv": "h8 c2 i8 c1"
+        }
+      ],
+      "searchDepth": 9,
+      "lmrReSearches": 2,
+      "stoppedBy": "minimax",
+      "elapsedMs": 10,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 64,
+      "engine": "Gorisanson (JS, original)",
+      "move": "c2",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 1,
+      "margin": 0,
+      "simulations": 200,
+      "rootWinRate": 1,
+      "stoppedBy": "forced",
+      "elapsedMs": 1.2093999999924563,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 65,
+      "engine": "Titanium αβ + CAT",
+      "move": "i8",
+      "budgetHint": "Rust Titanium Minimax (10s/10B cap): 10s · ≤10B cap",
+      "whiteDist": 2,
+      "blackDist": 1,
+      "margin": -1,
+      "nodes": 42,
+      "simulations": 0,
+      "rootScore": -19998,
+      "depthLog": [
+        {
+          "depth": 1,
+          "score": -171,
+          "nodes": 5,
+          "elapsedMs": 6,
+          "marginalNodes": 5,
+          "pv": "i8"
+        },
+        {
+          "depth": 2,
+          "score": 4,
+          "nodes": 12,
+          "elapsedMs": 6,
+          "marginalNodes": 7,
+          "pv": "i8 c1"
+        },
+        {
+          "depth": 3,
+          "score": -19998,
+          "nodes": 25,
+          "elapsedMs": 7,
+          "marginalNodes": 13,
+          "pv": "i8 c1"
+        },
+        {
+          "depth": 4,
+          "score": -19786,
+          "nodes": 30,
+          "elapsedMs": 7,
+          "marginalNodes": 5,
+          "pv": "i8 c1"
+        },
+        {
+          "depth": 5,
+          "score": -19571,
+          "nodes": 35,
+          "elapsedMs": 7,
+          "marginalNodes": 5,
+          "pv": "i8 c1"
+        },
+        {
+          "depth": 6,
+          "score": -19998,
+          "nodes": 42,
+          "elapsedMs": 7,
+          "marginalNodes": 7,
+          "pv": "i8 c1"
+        }
+      ],
+      "searchDepth": 6,
+      "lmrReSearches": 2,
+      "stoppedBy": "minimax",
+      "elapsedMs": 7,
+      "error": null,
+      "fallback": null
+    },
+    {
+      "ply": 66,
+      "engine": "Gorisanson (JS, original)",
+      "move": "c1",
+      "budgetHint": "Gorisanson MCTS (10s/66000 cap): 10s · ≤66000 cap",
+      "whiteDist": 1,
+      "blackDist": 0,
+      "margin": -1,
+      "simulations": 0,
+      "stoppedBy": "win-in-1",
+      "elapsedMs": 0.11700000002747402,
+      "error": null,
+      "fallback": null
+    }
+  ]
+}

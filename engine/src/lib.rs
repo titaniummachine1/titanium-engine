@@ -39,6 +39,7 @@ pub use opening::{ply_number, BOOK_MAX_PLY};
 pub use path::{both_players_reach_goals, can_reach_goal, shortest_distance, BfsScratch};
 pub use search::greedy::choose_greedy_move;
 #[allow(deprecated)]
+pub use search::lmr_viz::lmr_snapshot_json;
 pub use search::{
     genmove_algebraic, search_best_move, search_mcts, search_phase, walls_placed, Engine,
     GenmoveConfig, GenmoveEngine, MctsConfig, MctsReport, SearchConfig, SearchPhase, SearchReport,
