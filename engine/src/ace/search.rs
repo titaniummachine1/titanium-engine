@@ -678,17 +678,20 @@ impl AceSearch {
                     if sc > MATE - 200 || sc < -(MATE - 200) {
                         break; // forced result
                     }
+                    // v8 easy-move stop (acev8_engine.js)
                     if !full
-                        && d >= 6
-                        && stable >= 2
-                        && t0.elapsed().as_millis() as u64 > time_ms / 10
+                        && d >= 9
+                        && stable >= 3
+                        && last_score > -120
+                        && t0.elapsed().as_millis() as u64 > time_ms * 3 / 10
                     {
-                        break; // easy move
+                        break;
                     }
                 }
                 Err(TimeUp) => break, // state already restored by unwinding unmakes
             }
-            if t0.elapsed().as_millis() as f64 > time_ms as f64 * 0.6 {
+            let time_frac = if last_score < -80 { 0.92 } else { 0.85 };
+            if t0.elapsed().as_millis() as f64 > time_ms as f64 * time_frac {
                 break;
             }
         }

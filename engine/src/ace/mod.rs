@@ -1,4 +1,5 @@
-//! ACE v7 — faithful Rust port of the reference JS engine (`_vendor/acev7_engine.js`).
+//! ACE v8 — faithful 1:1 Rust port of `_vendor/acev8_engine.js` (from `quoridor (5).html`).
+//! Differs from v7 only in `Search.think()` time scheduling; board/search/net are otherwise identical.
 //!
 //! Self-contained: own board representation, search, and HalfPW net eval.
 //! Only this module's `genmove` entry translates between Titanium algebraic

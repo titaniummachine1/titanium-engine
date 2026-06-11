@@ -412,9 +412,20 @@ fn run_genmove(args: &[String]) {
 
 // ── ACE v7 port (pure) ───────────────────────────────────────────────────────
 
+fn ace_engine_flag(args: &[String]) -> Option<&str> {
+    args.windows(2).find_map(|w| {
+        if w[0] != "--engine" {
+            return None;
+        }
+        match w[1].as_str() {
+            "ace" | "ace-v8" => Some(w[1].as_str()),
+            _ => None,
+        }
+    })
+}
+
 fn is_ace_engine(args: &[String]) -> bool {
-    args.windows(2)
-        .any(|w| w[0] == "--engine" && w[1] == "ace")
+    ace_engine_flag(args).is_some()
 }
 
 fn run_genmove_ace(args: &[String]) {
@@ -458,11 +469,12 @@ fn run_genmove_ace(args: &[String]) {
         i += 1;
     }
 
+    let label = ace_engine_flag(args).unwrap_or("ace");
     match titanium::ace::ace_genmove(&moves, params) {
         Some((algebraic, info)) => {
             eprintln!(
-                "info json {{\"engine\":\"ace\",\"rootScore\":{},\"searchDepth\":{},\"nodes\":{},\"elapsedMs\":{}}}",
-                info.score, info.depth, info.nodes, info.ms
+                "info json {{\"engine\":\"{}\",\"rootScore\":{},\"searchDepth\":{},\"nodes\":{},\"elapsedMs\":{}}}",
+                label, info.score, info.depth, info.nodes, info.ms
             );
             println!("bestmove {}", algebraic);
         }
