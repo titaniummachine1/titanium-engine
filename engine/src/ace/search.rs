@@ -9,6 +9,11 @@ use std::time::{Duration, Instant};
 
 use crate::ace::game::{AceGame, ZOBRIST};
 use crate::ace::net::{net, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
+use crate::cat::prune::{gap_play_zone_mask, get_shortest_path, wall_should_search};
+use crate::cat::CorridorAttention;
+use crate::core::board::{Board, Move as BoardMove, Player, Undo, WallOrientation};
+use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::path::BfsScratch;
 
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
@@ -20,6 +25,88 @@ const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 
 /// Time-abort marker — propagates like the JS `throw "time"`.
 pub struct TimeUp;
+
+/// ACE move encoding → Titanium board move (row flip between coordinate systems).
+pub fn ace_move_to_board(m: i16) -> BoardMove {
+    if m < 100 {
+        BoardMove::Pawn {
+            row: 8 - (m / 9) as u8,
+            col: (m % 9) as u8,
+        }
+    } else {
+        let (base, orientation) = if m < 200 {
+            (100, WallOrientation::Horizontal)
+        } else {
+            (200, WallOrientation::Vertical)
+        };
+        let slot = m - base;
+        BoardMove::Wall {
+            row: 7 - (slot / 8) as u8,
+            col: (slot % 8) as u8,
+            orientation,
+        }
+    }
+}
+
+/// Titanium `Board` kept in sync with the ACE game — fast movegen + optional CAT.
+pub struct TiBridge {
+    pub board: Board,
+    pub bfs: BfsScratch,
+    undo_stack: Vec<Undo>,
+}
+
+impl TiBridge {
+    fn from_game(g: &AceGame) -> Box<Self> {
+        let mut board = Board::new();
+        for i in 0..g.hist_len {
+            let _ = board.make_move(ace_move_to_board(g.hist_m[i]));
+        }
+        Box::new(Self {
+            board,
+            bfs: BfsScratch::new(),
+            undo_stack: Vec::with_capacity(256),
+        })
+    }
+
+    fn push(&mut self, m: i16) {
+        let undo = self.board.make_move(ace_move_to_board(m));
+        self.undo_stack.push(undo);
+    }
+
+    fn pop(&mut self) {
+        if let Some(undo) = self.undo_stack.pop() {
+            self.board.unmake_move(undo);
+        }
+    }
+
+    /// Full legal moves via Titanium `movegen` → ACE encoding.
+    fn gen_legal_ace(&mut self, out: &mut [i16; 160]) -> usize {
+        let mut ti_buf = [BoardMove::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+        let n = generate_legal_moves_slice(&mut self.board, &mut ti_buf, &mut self.bfs);
+        for i in 0..n {
+            out[i] = board_move_to_ace(ti_buf[i]);
+        }
+        n
+    }
+}
+
+/// Titanium board move → ACE numeric encoding.
+pub fn board_move_to_ace(mv: BoardMove) -> i16 {
+    match mv {
+        BoardMove::Pawn { row, col } => ((8 - row as i16) * 9 + col as i16) as i16,
+        BoardMove::Wall {
+            row,
+            col,
+            orientation,
+        } => {
+            let slot = (7 - row as i16) * 8 + col as i16;
+            match orientation {
+                WallOrientation::Horizontal => 100 + slot,
+                WallOrientation::Vertical => 200 + slot,
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ThinkResult {
@@ -55,6 +142,12 @@ pub struct AceSearch {
     np_b1v: i32,
     np_stamp: i32,
     net: &'static Net,
+    /// Mirrored Titanium board (movegen and/or CAT).
+    bridge: Option<Box<TiBridge>>,
+    /// Use Titanium `generate_legal_moves_slice` instead of ACE `wall_legal`.
+    ti_movegen: bool,
+    /// CAT-filter walls at inner nodes (requires `bridge`).
+    cat_walls: bool,
     pub nodes: u64,
     deadline: Instant,
     root_best: i16,
@@ -87,11 +180,37 @@ impl AceSearch {
             np_b1v: -1,
             np_stamp: -1,
             net: net(),
+            bridge: None,
+            ti_movegen: false,
+            cat_walls: false,
             nodes: 0,
             deadline: Instant::now(),
             root_best: 0,
             root_score: 0,
         })
+    }
+
+    /// Titanium movegen on a mirrored board — same legal set, much faster than `wall_legal`.
+    pub fn with_ti_movegen(g: AceGame) -> Box<Self> {
+        let mut search = Self::new(g);
+        search.bridge = Some(TiBridge::from_game(&search.g));
+        search.ti_movegen = true;
+        search
+    }
+
+    /// CAT hybrid: walls at inner nodes must pass `wall_should_search`.
+    pub fn with_cat(g: AceGame) -> Box<Self> {
+        let mut search = Self::new(g);
+        search.bridge = Some(TiBridge::from_game(&search.g));
+        search.cat_walls = true;
+        search
+    }
+
+    /// Fast Titanium movegen + CAT wall filter.
+    pub fn with_ti_movegen_and_cat(g: AceGame) -> Box<Self> {
+        let mut search = Self::with_ti_movegen(g);
+        search.cat_walls = true;
+        search
     }
 
     #[inline(always)]
@@ -311,29 +430,106 @@ impl AceSearch {
         out as i32
     }
 
-    fn gen_moves(&mut self, check_legal: bool, out: &mut [i16; 160]) -> usize {
+    fn gen_moves(&mut self, ply: usize, depth: i32, tt_move: i16, out: &mut [i16; 160]) -> usize {
+        let check_legal = ply == 0;
+        if self.ti_movegen && check_legal {
+            return self
+                .bridge
+                .as_mut()
+                .expect("ti movegen needs bridge")
+                .gen_legal_ace(out);
+        }
         let mut n = self.g.gen_pawn_moves(out, 0);
-        if self.g.wl[self.g.turn] > 0 {
-            for slot in 0..64 {
-                if check_legal {
-                    if self.g.wall_legal(0, slot) {
-                        out[n] = 100 + slot as i16;
-                        n += 1;
-                    }
-                    if self.g.wall_legal(1, slot) {
-                        out[n] = 200 + slot as i16;
-                        n += 1;
-                    }
-                } else {
-                    // lazy: geometry only; path-seal checked when the move is searched
-                    if self.g.wall_fits(0, slot) {
-                        out[n] = 100 + slot as i16;
-                        n += 1;
-                    }
-                    if self.g.wall_fits(1, slot) {
-                        out[n] = 200 + slot as i16;
-                        n += 1;
-                    }
+        if self.g.wl[self.g.turn] <= 0 {
+            return n;
+        }
+        if self.cat_walls && !check_legal {
+            return self.gen_walls_cat_filtered(depth, tt_move, out, n);
+        }
+        for slot in 0..64 {
+            if check_legal {
+                if self.g.wall_legal(0, slot) {
+                    out[n] = 100 + slot as i16;
+                    n += 1;
+                }
+                if self.g.wall_legal(1, slot) {
+                    out[n] = 200 + slot as i16;
+                    n += 1;
+                }
+            } else {
+                // lazy: geometry only; path-seal checked when the move is searched
+                if self.g.wall_fits(0, slot) {
+                    out[n] = 100 + slot as i16;
+                    n += 1;
+                }
+                if self.g.wall_fits(1, slot) {
+                    out[n] = 200 + slot as i16;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Hybrid wall generation: lazy geometry + CAT relevance filter.
+    ///
+    /// CAT (multi-route corridor heat) only above the leaf layer — depth-1 nodes
+    /// dominate the tree and only need witness-path tactics, not breadth
+    /// (mirrors `search::alphabeta`). The TT move always survives the filter.
+    fn gen_walls_cat_filtered(
+        &mut self,
+        depth: i32,
+        tt_move: i16,
+        out: &mut [i16; 160],
+        mut n: usize,
+    ) -> usize {
+        let me = self.g.turn;
+        let our_dist = if me == 0 {
+            self.d0[self.dist0_idx][self.g.pawn[0]]
+        } else {
+            self.d1[self.dist1_idx][self.g.pawn[1]]
+        };
+        let opp_dist = if me == 0 {
+            self.d1[self.dist1_idx][self.g.pawn[1]]
+        } else {
+            self.d0[self.dist0_idx][self.g.pawn[0]]
+        };
+        let opp_player = if me == 0 { Player::Two } else { Player::One };
+
+        let bridge = self.bridge.as_mut().expect("cat bridge");
+        let cat = if depth >= 2 {
+            bridge.bfs.build_corridor_attention(&bridge.board)
+        } else {
+            CorridorAttention::default()
+        };
+        let mut opp_path = [0u8; 81];
+        let opp_path_len =
+            get_shortest_path(&bridge.board, opp_player, &mut bridge.bfs, &mut opp_path);
+        let reachable = bridge.bfs.both_reachable_mask(&bridge.board);
+        let gap_zone = gap_play_zone_mask(reachable);
+
+        for slot in 0..64 {
+            for (wall_type, base) in [(0usize, 100i16), (1usize, 200i16)] {
+                if !self.g.wall_fits(wall_type, slot) {
+                    continue;
+                }
+                let m = base + slot as i16;
+                let keep = m == tt_move
+                    || wall_should_search(
+                        ace_move_to_board(m),
+                        &cat,
+                        reachable,
+                        gap_zone,
+                        &mut bridge.board,
+                        our_dist,
+                        opp_dist,
+                        &opp_path,
+                        opp_path_len,
+                        &mut bridge.bfs,
+                    );
+                if keep {
+                    out[n] = m;
+                    n += 1;
                 }
             }
         }
@@ -471,11 +667,18 @@ impl AceSearch {
                 self.g.turn ^= 1;
                 self.g.hash_lo ^= z.turn_lo;
                 self.g.hash_hi ^= z.turn_hi;
+                if let Some(bridge) = self.bridge.as_mut() {
+                    // keep the mirrored board's side in sync (wall accounting)
+                    bridge.board.side_to_move = bridge.board.side_to_move.opposite();
+                }
                 let res = self.ab(depth - 3, -beta, -beta + 1, ply + 1, false, 0);
                 let z = &ZOBRIST;
                 self.g.turn ^= 1;
                 self.g.hash_lo ^= z.turn_lo;
                 self.g.hash_hi ^= z.turn_hi;
+                if let Some(bridge) = self.bridge.as_mut() {
+                    bridge.board.side_to_move = bridge.board.side_to_move.opposite();
+                }
                 self.dist0_idx = nd0;
                 self.dist1_idx = nd1;
                 self.cached_stamp = nst;
@@ -487,7 +690,7 @@ impl AceSearch {
         }
 
         let mut moves = [0i16; 160];
-        let n = self.gen_moves(ply == 0, &mut moves);
+        let n = self.gen_moves(ply, depth, tt_move, &mut moves);
         if n == 0 {
             return Ok(self.evaluate());
         }
@@ -528,6 +731,9 @@ impl AceSearch {
                 }
             }
             self.g.make_move(m);
+            if let Some(bridge) = self.bridge.as_mut() {
+                bridge.push(m);
+            }
             let new_depth = depth - 1;
             let result = if i >= 4 && depth >= 3 && m >= 100 && m != tt_move {
                 // graduated LMR
@@ -572,6 +778,9 @@ impl AceSearch {
                 self.ab(new_depth, -beta, -alpha, ply + 1, true, m).map(|s| -s)
             };
             self.g.unmake_move();
+            if let Some(bridge) = self.bridge.as_mut() {
+                bridge.pop();
+            }
             self.dist0_idx = nd0;
             self.dist1_idx = nd1;
             self.cached_stamp = nst;
@@ -629,6 +838,9 @@ impl AceSearch {
     /// Restore after a time abort mid-move (JS `finally` semantics).
     fn unwind_move(&mut self, nd0: usize, nd1: usize, nst: i32) {
         self.g.unmake_move();
+        if let Some(bridge) = self.bridge.as_mut() {
+            bridge.pop();
+        }
         self.dist0_idx = nd0;
         self.dist1_idx = nd1;
         self.cached_stamp = nst;
@@ -699,7 +911,7 @@ impl AceSearch {
         if last_best == 0 {
             self.refresh_dist(0);
             let mut moves = [0i16; 160];
-            let n = self.gen_moves(true, &mut moves);
+            let n = self.gen_moves(0, 1, 0, &mut moves);
             if n > 0 {
                 last_best = moves[0];
             }

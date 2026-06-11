@@ -26,6 +26,7 @@ fn main() {
         "moves" => run_moves(),
         "genmove" => run_genmove(&args),
         "ace-bench" => run_ace_bench(&args),
+        "ace-perft" => run_ace_perft(&args),
         "cat" => run_cat(&args),
         "lmr" => run_lmr(&args),
         "session" => run_session_stdio(),
@@ -51,6 +52,9 @@ fn print_usage() {
     );
     println!(
         "  titanium session                       — long-lived REPL (TT persists between plies)"
+    );
+    println!(
+        "  titanium ace-perft [depth] [--iters N] — ACE vs Titanium movegen perft compare"
     );
 }
 
@@ -418,10 +422,18 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
             return None;
         }
         match w[1].as_str() {
-            "ace" | "ace-v8" => Some(w[1].as_str()),
+            "ace" | "ace-v8" | "ace-cat" | "ace-ti" | "ace-v8-ti" => Some(w[1].as_str()),
             _ => None,
         }
     })
+}
+
+fn ace_engine_mode(flag: &str) -> &'static str {
+    match flag {
+        "ace-cat" => "ace-cat",
+        "ace-ti" | "ace-v8-ti" => "ace-ti",
+        _ => "ace",
+    }
 }
 
 fn is_ace_engine(args: &[String]) -> bool {
@@ -429,7 +441,13 @@ fn is_ace_engine(args: &[String]) -> bool {
 }
 
 fn run_genmove_ace(args: &[String]) {
-    let mut params = titanium::ace::AceParams::default();
+    let label = ace_engine_flag(args).unwrap_or("ace");
+    let mode = ace_engine_mode(label);
+    let mut params = titanium::ace::AceParams {
+        cat: mode == "ace-cat",
+        ti_movegen: mode == "ace-ti",
+        ..Default::default()
+    };
     let mut moves = Vec::new();
     let mut i = 2usize;
     while i < args.len() {
@@ -469,7 +487,6 @@ fn run_genmove_ace(args: &[String]) {
         i += 1;
     }
 
-    let label = ace_engine_flag(args).unwrap_or("ace");
     match titanium::ace::ace_genmove(&moves, params) {
         Some((algebraic, info)) => {
             eprintln!(
@@ -483,7 +500,9 @@ fn run_genmove_ace(args: &[String]) {
 }
 
 /// Parity harness vs the JS reference — fixed depth, ACE numeric moves.
+/// `--cat` switches to the hybrid wall filter.
 fn run_ace_bench(args: &[String]) {
+    let use_cat = args.iter().any(|a| a == "--cat");
     let depth: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
     let mut g = titanium::ace::AceGame::new();
     for arg in args.iter().skip(3) {
@@ -492,10 +511,95 @@ fn run_ace_bench(args: &[String]) {
         }
     }
     println!("hash {} {}", g.hash_lo, g.hash_hi);
-    let mut search = titanium::ace::AceSearch::new(g);
+    let mut search = if use_cat {
+        titanium::ace::AceSearch::with_cat(g)
+    } else {
+        titanium::ace::AceSearch::new(g)
+    };
     let r = search.think(1_000_000_000, depth, true);
     println!(
         "{{\"move\":{},\"score\":{},\"depth\":{},\"nodes\":{},\"ms\":{}}}",
         r.mv, r.score, r.depth, r.nodes, r.ms
     );
+}
+
+/// Compare perft: ACE v7 native movegen vs Titanium `perft_fast` (10s cap at depth 4).
+fn run_ace_perft(args: &[String]) {
+    use std::time::Duration;
+
+    let depth: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+    let mut timeout_secs = titanium::ace::default_timeout(depth).as_secs();
+    let mut i = 3usize;
+    while i < args.len() {
+        if args[i] == "--timeout" {
+            if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                timeout_secs = sec;
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    let timeout = Duration::from_secs(timeout_secs);
+
+    fn print_line(r: &titanium::ace::TimedPerftResult) {
+        if r.timed_out {
+            println!(
+                "  {:12} TIMEOUT after {:.1}s (no result)",
+                r.label,
+                r.elapsed_ms as f64 / 1000.0
+            );
+            return;
+        }
+        let nodes = r.nodes.unwrap_or(0);
+        let secs = r.elapsed_ms as f64 / 1000.0;
+        let nps = if secs > 0.0 { nodes as f64 / secs } else { 0.0 };
+        println!(
+            "  {:12} nodes={} time={:.3}s nps={:.0}",
+            r.label, nodes, secs, nps
+        );
+    }
+
+    println!(
+        "ace-perft depth={} timeout={}s (oracle perft_fast + TT vs ACE v7 wall_legal)",
+        depth,
+        timeout_secs
+    );
+
+    let ti = titanium::ace::perft_titanium_timed(depth, timeout);
+    print_line(&ti);
+
+    let ace_ti = titanium::ace::perft_ace_ti_timed(depth, timeout);
+    print_line(&ace_ti);
+
+    let ace = titanium::ace::perft_ace_timed(depth, timeout);
+    print_line(&ace);
+
+    if let Some(exp) = titanium::ace::oracle_nodes(depth) {
+        println!("  oracle depth{}={}", depth, exp);
+        println!(
+            "  perft_fast_ok={} ace_ti_ok={} ace_native_ok={}",
+            ti.nodes == Some(exp),
+            ace_ti.nodes == Some(exp),
+            ace.nodes == Some(exp)
+        );
+        if let (Some(ti_n), Some(ati_n)) = (ti.nodes, ace_ti.nodes) {
+            if ti_n == ati_n {
+                let ratio = ace_ti.elapsed_ms as f64 / ti.elapsed_ms.max(1) as f64;
+                println!("  ace_ti vs perft_fast: {:.2}x (1.0 = same speed)", ratio);
+            }
+        }
+        if ace.timed_out {
+            println!("  ace-v7-native: TIMEOUT — ported wall_legal path unusable at depth {}", depth);
+        } else if let (Some(an), Some(ati_n)) = (ace.nodes, ace_ti.nodes) {
+            if an == ati_n {
+                let ratio = ace.elapsed_ms as f64 / ace_ti.elapsed_ms.max(1) as f64;
+                println!("  ace_ti vs ace-v7-native: {:.2}x faster", ratio);
+            }
+        }
+    }
+
+    if ace_ti.timed_out || (ace.nodes.is_some() && ace.nodes != ace_ti.nodes) {
+        std::process::exit(1);
+    }
 }

@@ -1,5 +1,4 @@
-//! ACE v8 — faithful 1:1 Rust port of `_vendor/acev8_engine.js` (from `quoridor (5).html`).
-//! Differs from v7 only in `Search.think()` time scheduling; board/search/net are otherwise identical.
+//! ACE v8 hybrid port — v8 search (_vendor/acev8_engine.js) plus optional Titanium root movegen.
 //!
 //! Self-contained: own board representation, search, and HalfPW net eval.
 //! Only this module's `genmove` entry translates between Titanium algebraic
@@ -11,10 +10,15 @@
 
 pub mod game;
 pub mod net;
+pub mod perft;
 pub mod search;
 
 pub use game::AceGame;
-pub use search::{AceSearch, ThinkResult};
+pub use perft::{
+    default_timeout, oracle_nodes, perft_ace_timed, perft_ace_ti_timed, perft_engine_timed,
+    perft_titanium_timed, ACE_PERFT4_STARTPOS, TimedPerftResult,
+};
+pub use search::{board_move_to_ace, AceSearch, ThinkResult};
 
 /// Algebraic ("e2", "e3h") → ACE move encoding.
 pub fn algebraic_to_ace(text: &str) -> i16 {
@@ -54,6 +58,10 @@ pub struct AceParams {
     pub max_depth: i32,
     /// Disable the easy-move early stop (search the full time budget).
     pub full: bool,
+    /// Hybrid: CAT-filter wall moves at inner nodes.
+    pub cat: bool,
+    /// Titanium `movegen` on mirrored board (fast full-legal generation).
+    pub ti_movegen: bool,
 }
 
 impl Default for AceParams {
@@ -62,6 +70,8 @@ impl Default for AceParams {
             time_ms: 4000,
             max_depth: 30,
             full: false,
+            cat: false,
+            ti_movegen: false,
         }
     }
 }
@@ -75,7 +85,15 @@ pub fn ace_genmove(moves: &[String], params: AceParams) -> Option<(String, Think
     if g.winner() >= 0 {
         return None;
     }
-    let mut search = AceSearch::new(g);
+    let mut search = if params.ti_movegen && params.cat {
+        AceSearch::with_ti_movegen_and_cat(g)
+    } else if params.ti_movegen {
+        AceSearch::with_ti_movegen(g)
+    } else if params.cat {
+        AceSearch::with_cat(g)
+    } else {
+        AceSearch::new(g)
+    };
     let result = search.think(params.time_ms, params.max_depth, params.full);
     if result.mv == 0 && search.g.winner() >= 0 {
         return None;
