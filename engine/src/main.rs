@@ -422,7 +422,7 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
             return None;
         }
         match w[1].as_str() {
-            "ace" | "ace-v8" | "ace-cat" | "ace-ti" | "ace-v8-ti" => Some(w[1].as_str()),
+            "ace" | "ace-v8" | "ace-cat" | "ace-ti" | "ace-v8-ti" | "ace-v8-ti-pmc" | "ace-pmc" => Some(w[1].as_str()),
             _ => None,
         }
     })
@@ -431,7 +431,7 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
 fn ace_engine_mode(flag: &str) -> &'static str {
     match flag {
         "ace-cat" => "ace-cat",
-        "ace-ti" | "ace-v8-ti" => "ace-ti",
+        "ace-ti" | "ace-v8-ti" | "ace-v8-ti-pmc" => "ace-ti",
         _ => "ace",
     }
 }
@@ -446,6 +446,7 @@ fn run_genmove_ace(args: &[String]) {
     let mut params = titanium::ace::AceParams {
         cat: mode == "ace-cat",
         ti_movegen: mode == "ace-ti",
+        pseudo_mcts: label.contains("pmc"),
         ..Default::default()
     };
     let mut moves = Vec::new();
@@ -470,6 +471,10 @@ fn run_genmove_ace(args: &[String]) {
             continue;
         } else if arg == "--log" {
             params.log = true;
+            i += 1;
+            continue;
+        } else if arg == "--pseudo-mcts" {
+            params.pseudo_mcts = true;
             i += 1;
             continue;
         } else if arg == "--engine" {

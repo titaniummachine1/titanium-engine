@@ -64,6 +64,8 @@ pub struct AceParams {
     pub ti_movegen: bool,
     /// Stream iterative-deepening progress on stderr (`info json`).
     pub log: bool,
+    /// Root pseudo-MCTS: UCB ordering and selective pruning from ID visits.
+    pub pseudo_mcts: bool,
 }
 
 impl Default for AceParams {
@@ -75,6 +77,7 @@ impl Default for AceParams {
             cat: false,
             ti_movegen: false,
             log: false,
+            pseudo_mcts: false,
         }
     }
 }
@@ -101,6 +104,9 @@ pub fn ace_genmove(
     } else {
         AceSearch::new(g)
     };
+    if params.pseudo_mcts {
+        search.enable_pseudo_mcts();
+    }
     let result = search.think(
         params.time_ms,
         params.max_depth,

@@ -196,6 +196,11 @@ pub struct AceSearch {
     ti_movegen: bool,
     /// CAT-filter walls at inner nodes (requires `bridge`).
     cat_walls: bool,
+    /// Root UCB ordering from ID visit counts (pseudo-MCTS in minimax).
+    pseudo_mcts: bool,
+    root_visits: [u32; 512],
+    root_value_sum: [i32; 512],
+    root_iters: u32,
     pub nodes: u64,
     deadline: Instant,
     root_best: i16,
@@ -231,11 +236,23 @@ impl AceSearch {
             bridge: None,
             ti_movegen: false,
             cat_walls: false,
+            pseudo_mcts: false,
+            root_visits: [0; 512],
+            root_value_sum: [0; 512],
+            root_iters: 0,
             nodes: 0,
             deadline: Instant::now(),
             root_best: 0,
             root_score: 0,
         })
+    }
+
+    /// Enable root pseudo-MCTS: UCB move ordering and selective wall pruning from ID visits.
+    pub fn enable_pseudo_mcts(&mut self) {
+        self.pseudo_mcts = true;
+        self.root_visits = [0; 512];
+        self.root_value_sum = [0; 512];
+        self.root_iters = 0;
     }
 
     /// Titanium movegen on a mirrored board — same legal set, much faster than `wall_legal`.
@@ -609,6 +626,17 @@ impl AceSearch {
                 self.history_tbl[m as usize]
             };
         }
+        if ply == 0 && self.pseudo_mcts && self.root_iters >= 2 {
+            let log_n = (self.root_iters as f64).ln();
+            let c = 1400.0;
+            for i in 0..n {
+                let v = self.root_visits[moves[i] as usize];
+                if v > 0 {
+                    let q = self.root_value_sum[moves[i] as usize] as f64 / v as f64;
+                    sc[i] += (q + c * (log_n / v as f64).sqrt()) as i32;
+                }
+            }
+        }
         // stable insertion sort, descending — must match JS tie order exactly
         for a in 1..n {
             let mv = moves[a];
@@ -755,6 +783,17 @@ impl AceSearch {
 
         for i in 0..n {
             let m = moves[i];
+            if ply == 0
+                && self.pseudo_mcts
+                && depth >= 6
+                && i >= 3
+                && m >= 100
+                && m != tt_move
+                && self.root_visits[m as usize] == 0
+                && self.history_tbl[m as usize] <= 0
+            {
+                continue;
+            }
             // frontier LMP
             if depth <= 2
                 && ply > 0
@@ -944,6 +983,12 @@ impl AceSearch {
                     last_best = self.root_best;
                     last_score = sc;
                     last_depth = d;
+                    if self.pseudo_mcts && last_best != 0 {
+                        let idx = last_best as usize;
+                        self.root_visits[idx] = self.root_visits[idx].saturating_add(1);
+                        self.root_value_sum[idx] += last_score;
+                        self.root_iters += 1;
+                    }
                     let elapsed_ms = t0.elapsed().as_millis() as u64;
                     let pv = if last_best != 0 {
                         super::ace_to_algebraic(last_best)
