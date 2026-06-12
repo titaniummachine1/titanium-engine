@@ -33,6 +33,7 @@ See `docs/` — start with `docs/STATE.md` for session handoff and `docs/video/R
 
 ## License
 
-**GPL-3.0-or-later** (same copyleft family as [Stockfish](https://github.com/official-stockfish/Stockfish)).
-See `LICENSE`. If you distribute binaries or derivatives, you must provide
-corresponding source under the same license.
+**AGPL-3.0-or-later** — GPLv3 plus the network-use clause (Section 13): if
+someone runs this engine as a web/service API, users must be offered the
+corresponding source. Stricter than [Stockfish](https://github.com/official-stockfish/Stockfish)'s
+GPLv3 for SaaS deployments. See `LICENSE`.
