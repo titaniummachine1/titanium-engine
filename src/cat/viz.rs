@@ -168,7 +168,7 @@ mod tests {
         let end = json.find("],\"reachable\"").unwrap();
         json[start..end]
             .split(',')
-            .filter_map(|s| s.trim().parse().ok())
+            .filter_map(|s| s.trim().parse::<u16>().ok())
             .collect()
     }
 }

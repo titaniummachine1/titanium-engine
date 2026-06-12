@@ -9,10 +9,7 @@ use super::pawn::{
     discover_all_pawn_tables, ENEMY_LAYERS, MAX_WALL_SLOTS, PHYS_WALL_COMBOS, WALL_KEYS,
 };
 use super::progress::phase_bar;
-use super::wall::{
-    discover_all_wall_tables, MAX_PSEUDO_PROBES, MAX_TOPO_PROBES, PHYS_PSEUDO_COMBOS,
-    PHYS_TOPO_COMBOS, WALL_PSEUDO_KEYS, WALL_TOPO_KEYS,
-};
+use super::wall::discover_all_wall_tables;
 
 pub fn generate(out_path: &Path) {
     let t0 = Instant::now();
@@ -22,7 +19,7 @@ pub fn generate(out_path: &Path) {
 
     let bar = phase_bar();
     let pawn = discover_all_pawn_tables(&bar);
-    let (wall, wall_pseudo, wall_topo) = discover_all_wall_tables(&bar);
+    let wall = discover_all_wall_tables(&bar);
 
     let file = File::create(out_path).expect("create tables file");
     let mut w = BufWriter::new(file);
@@ -179,247 +176,12 @@ pub fn generate(out_path: &Path) {
     writeln!(w, "];").unwrap();
     writeln!(w).unwrap();
 
-    let pseudo_h_remap_path = out_path
-        .parent()
-        .expect("parent dir")
-        .join("generated_wall_pseudo_h_remap.bin");
-    let pseudo_v_remap_path = out_path
-        .parent()
-        .expect("parent dir")
-        .join("generated_wall_pseudo_v_remap.bin");
-    write_padded_remap(
-        &pseudo_h_remap_path,
-        &wall_pseudo.h_remap,
-        PHYS_PSEUDO_COMBOS,
-    );
-    write_padded_remap(
-        &pseudo_v_remap_path,
-        &wall_pseudo.v_remap,
-        PHYS_PSEUDO_COMBOS,
-    );
-
-    writeln!(
-        w,
-        "// Layer-1 pseudo-legal wall masks (overlap/cross only — no pawns, no path flood)."
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const PHYS_PSEUDO_COMBOS: usize = {PHYS_PSEUDO_COMBOS};"
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_H_PROBE_COUNT: u8 = {};",
-        wall_pseudo.h_probes.len()
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_V_PROBE_COUNT: u8 = {};",
-        wall_pseudo.v_probes.len()
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_H_KEY_COUNT: u16 = {};",
-        wall_pseudo.h_key_count
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_V_KEY_COUNT: u16 = {};",
-        wall_pseudo.v_key_count
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_H_PROBE_ROW: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.h_probes, |p| p.0)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_H_PROBE_COL: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.h_probes, |p| p.1)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_H_PROBE_H: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.h_probes, |p| u8::from(p.2))
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_V_PROBE_ROW: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.v_probes, |p| p.0)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_V_PROBE_COL: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.v_probes, |p| p.1)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_PSEUDO_V_PROBE_H: [u8; {MAX_PSEUDO_PROBES}] = {:?};",
-        probe_pad(&wall_pseudo.v_probes, |p| u8::from(p.2))
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-
-    write_u64_table(
-        &mut w,
-        "WALL_PSEUDO_H",
-        &wall_pseudo.h_table,
-        WALL_PSEUDO_KEYS,
-    );
-    write_u64_table(
-        &mut w,
-        "WALL_PSEUDO_V",
-        &wall_pseudo.v_table,
-        WALL_PSEUDO_KEYS,
-    );
-
-    let topo_h_remap_path = out_path
-        .parent()
-        .expect("parent dir")
-        .join("generated_wall_topo_h_remap.bin");
-    let topo_v_remap_path = out_path
-        .parent()
-        .expect("parent dir")
-        .join("generated_wall_topo_v_remap.bin");
-    write_padded_remap(&topo_h_remap_path, &wall_topo.h_remap, PHYS_TOPO_COMBOS);
-    write_padded_remap(&topo_v_remap_path, &wall_topo.v_remap, PHYS_TOPO_COMBOS);
-
-    writeln!(
-        w,
-        "// Topology flood-skip (`can_wall_block_topology`) — O(1) opt between L2 and L3."
-    )
-    .unwrap();
-    writeln!(w, "pub const PHYS_TOPO_COMBOS: usize = {PHYS_TOPO_COMBOS};").unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_H_PROBE_COUNT: u8 = {};",
-        wall_topo.h_probes.len()
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_V_PROBE_COUNT: u8 = {};",
-        wall_topo.v_probes.len()
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_H_KEY_COUNT: u16 = {};",
-        wall_topo.h_key_count
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_V_KEY_COUNT: u16 = {};",
-        wall_topo.v_key_count
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-
-    writeln!(
-        w,
-        "pub const WALL_TOPO_H_PROBE_ROW: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.h_probes, |p| p.0)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_H_PROBE_COL: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.h_probes, |p| p.1)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_H_PROBE_H: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.h_probes, |p| u8::from(p.2))
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_V_PROBE_ROW: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.v_probes, |p| p.0)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_V_PROBE_COL: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.v_probes, |p| p.1)
-    )
-    .unwrap();
-    writeln!(
-        w,
-        "pub const WALL_TOPO_V_PROBE_H: [u8; {MAX_TOPO_PROBES}] = {:?};",
-        topo_probe_pad(&wall_topo.v_probes, |p| u8::from(p.2))
-    )
-    .unwrap();
-    writeln!(w).unwrap();
-
-    write_u64_table(&mut w, "WALL_TOPO_H", &wall_topo.h_table, WALL_TOPO_KEYS);
-    write_u64_table(&mut w, "WALL_TOPO_V", &wall_topo.v_table, WALL_TOPO_KEYS);
-
     w.flush().unwrap();
     eprintln!(
         "movegen-o1-gen: finished in {:.1}s → {}",
         t0.elapsed().as_secs_f64(),
         out_path.display()
     );
-}
-
-fn write_padded_remap(path: &std::path::Path, remap: &[u8], pad_to: usize) {
-    let mut bytes = remap.to_vec();
-    if bytes.len() < pad_to {
-        bytes.resize(pad_to, 0);
-    }
-    std::fs::write(path, &bytes).expect("write remap bin");
-    eprintln!(
-        "movegen-o1-gen: remap {} bytes → {}",
-        bytes.len(),
-        path.display()
-    );
-}
-
-fn write_u64_table(w: &mut BufWriter<File>, name: &str, table: &[u64; 1024], len: usize) {
-    writeln!(w, "pub const {name}: [u64; {len}] = [").unwrap();
-    for (i, &mv) in table.iter().enumerate() {
-        if i > 0 {
-            write!(w, ",").unwrap();
-        }
-        if i % 8 == 0 {
-            write!(w, "\n    ").unwrap();
-        }
-        write!(w, "{mv}").unwrap();
-    }
-    writeln!(w, "\n];").unwrap();
-}
-
-fn topo_probe_pad<F>(probes: &[(u8, u8, bool)], f: F) -> Vec<u8>
-where
-    F: Fn(&(u8, u8, bool)) -> u8,
-{
-    let mut row: Vec<u8> = probes.iter().map(f).collect();
-    row.resize(MAX_TOPO_PROBES, 255);
-    row
-}
-
-fn probe_pad<F>(probes: &[(u8, u8, bool)], f: F) -> Vec<u8>
-where
-    F: Fn(&(u8, u8, bool)) -> u8,
-{
-    let mut row: Vec<u8> = probes.iter().map(f).collect();
-    row.resize(MAX_PSEUDO_PROBES, 255);
-    row
 }
 
 fn write_wall_desc<F>(

@@ -37,10 +37,6 @@ pub fn pseudo_catalog(sr: u8, sc: u8) -> [u8; PSEUDO_SLOTS] {
     ]
 }
 
-pub fn on_board_pseudo_count(catalog: &[u8; PSEUDO_SLOTS]) -> u8 {
-    catalog.iter().filter(|&&sq| sq != OFF_BOARD).count() as u8
-}
-
 /// Map true legal destination squares → subset bitmask over the pseudo catalog.
 pub fn legal_subset_mask(catalog: &[u8; PSEUDO_SLOTS], legal_dests: &[u8], n: usize) -> u16 {
     let mut mask = 0u16;
@@ -55,34 +51,4 @@ pub fn legal_subset_mask(catalog: &[u8; PSEUDO_SLOTS], legal_dests: &[u8], n: us
     mask
 }
 
-/// Opponent modes that can affect our pawn: not adjacent, or on one in-bounds cardinal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EnemyMode {
-    /// Opponent placed far away — only cardinal steps / no jump interaction.
-    Far,
-    /// Opponent on `cardinals[i]` offset from our pawn.
-    Cardinal(usize),
-}
-
 pub const CARDINAL_OFFSETS: [(i8, i8); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-pub fn in_bounds_cardinals(sr: u8, sc: u8) -> Vec<(i8, i8)> {
-    CARDINAL_OFFSETS
-        .iter()
-        .copied()
-        .filter(|&(dr, dc)| {
-            let nr = sr as i16 + dr as i16;
-            let nc = sc as i16 + dc as i16;
-            (0..=8).contains(&nr) && (0..=8).contains(&nc)
-        })
-        .collect()
-}
-
-pub fn enemy_modes(sr: u8, sc: u8) -> Vec<EnemyMode> {
-    let cardinals = in_bounds_cardinals(sr, sc);
-    let mut modes = vec![EnemyMode::Far];
-    for i in 0..cardinals.len() {
-        modes.push(EnemyMode::Cardinal(i));
-    }
-    modes
-}

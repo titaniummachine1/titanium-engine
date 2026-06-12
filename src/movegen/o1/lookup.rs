@@ -12,12 +12,9 @@ use crate::core::board::{Board, Move, WallOrientation};
 use crate::util::grid::{has_wall, square_index};
 
 use super::tables::{
-    wall_remap_byte, wall_topo_h_remap_byte, wall_topo_v_remap_byte, PAWN_CATALOG, PAWN_LAYER_VALID,
-    PAWN_LEGAL, PAWN_WALL_COMBO_COUNT, PAWN_WALL_DESC_COL, PAWN_WALL_DESC_H, PAWN_WALL_DESC_ROW,
-    PAWN_WALL_SLOT_COUNT, WALL_COLLISION_MASK, WALL_PHYSICAL_TABLE, WALL_SLOT_COL,
-    WALL_SLOT_HORIZONTAL, WALL_SLOT_ROW, WALL_TOPO_H, WALL_TOPO_H_PROBE_COL, WALL_TOPO_H_PROBE_COUNT,
-    WALL_TOPO_H_PROBE_H, WALL_TOPO_H_PROBE_ROW, WALL_TOPO_V, WALL_TOPO_V_PROBE_COL,
-    WALL_TOPO_V_PROBE_COUNT, WALL_TOPO_V_PROBE_H, WALL_TOPO_V_PROBE_ROW,
+    wall_remap_byte, PAWN_CATALOG, PAWN_LAYER_VALID, PAWN_LEGAL, PAWN_WALL_COMBO_COUNT,
+    PAWN_WALL_DESC_COL, PAWN_WALL_DESC_H, PAWN_WALL_DESC_ROW, PAWN_WALL_SLOT_COUNT,
+    WALL_COLLISION_MASK, WALL_PHYSICAL_TABLE, WALL_SLOT_COL, WALL_SLOT_HORIZONTAL, WALL_SLOT_ROW,
 };
 
 /// Layer 1: 0=opponent absent, 1=up, 2=down, 3=left, 4=right (edge-invalid → 0).
@@ -224,63 +221,68 @@ pub fn generate_wall_candidates_o1(board: &Board, horizontal: bool, out: &mut [(
     n
 }
 
+// Topology masks — branchless bitboard form of `can_wall_block_topology`.
+// Slot bit = row*8 + col. A candidate wall can change connectivity only when at
+// least two of {side_a, side_b, middle} anchor to an edge or an existing wall,
+// so the whole 64-slot mask is a fixed shift/OR expression of the two wall
+// bitboards. No table can do this: the mask depends on all 128 wall bits.
+
+const COL_0: u64 = 0x0101_0101_0101_0101;
+const COL_7: u64 = COL_0 << 7;
+const ROW_0: u64 = 0xFF;
+const ROW_7: u64 = 0xFF << 56;
+
+/// Value at slot (r,c) = source at (r,c-1).
 #[inline]
-pub fn pack_wall_topo_h_key(board: &Board) -> u8 {
-    pack_wall_probe_key(
-        board,
-        &WALL_TOPO_H_PROBE_ROW[..],
-        &WALL_TOPO_H_PROBE_COL[..],
-        &WALL_TOPO_H_PROBE_H[..],
-        WALL_TOPO_H_PROBE_COUNT,
-        wall_topo_h_remap_byte,
-    )
+fn east1(x: u64) -> u64 {
+    (x << 1) & !COL_0
+}
+
+/// Value at slot (r,c) = source at (r,c-2).
+#[inline]
+fn east2(x: u64) -> u64 {
+    (x << 2) & !(COL_0 | COL_0 << 1)
+}
+
+/// Value at slot (r,c) = source at (r,c+1).
+#[inline]
+fn west1(x: u64) -> u64 {
+    (x >> 1) & !COL_7
+}
+
+/// Value at slot (r,c) = source at (r,c+2).
+#[inline]
+fn west2(x: u64) -> u64 {
+    (x >> 2) & !(COL_7 | COL_7 >> 1)
 }
 
 #[inline]
-pub fn pack_wall_topo_v_key(board: &Board) -> u8 {
-    pack_wall_probe_key(
-        board,
-        &WALL_TOPO_V_PROBE_ROW[..],
-        &WALL_TOPO_V_PROBE_COL[..],
-        &WALL_TOPO_V_PROBE_H[..],
-        WALL_TOPO_V_PROBE_COUNT,
-        wall_topo_v_remap_byte,
-    )
+fn two_of_three(a: u64, b: u64, m: u64) -> u64 {
+    (a & b) | (m & (a | b))
 }
 
 /// Bit set ⇒ `can_wall_block_topology` — must run L3 flood before accepting.
 #[inline]
 pub fn wall_needs_flood_h_mask(board: &Board) -> u64 {
-    WALL_TOPO_H[pack_wall_topo_h_key(board) as usize]
+    let h = board.horizontal_walls;
+    let v = board.vertical_walls;
+    // side_a anchors west of slot (r,c): V(r,c-1), V(r±1,c-1), H(r,c-2); col 0 is on-edge.
+    let side_a = COL_0 | east1(v) | east1(v >> 8) | east1(v << 8) | east2(h);
+    let side_b = COL_7 | west1(v) | west1(v >> 8) | west1(v << 8) | west2(h);
+    let middle = (v >> 8) | (v << 8);
+    two_of_three(side_a, side_b, middle)
 }
 
 /// Bit set ⇒ `can_wall_block_topology` — must run L3 flood before accepting.
 #[inline]
 pub fn wall_needs_flood_v_mask(board: &Board) -> u64 {
-    WALL_TOPO_V[pack_wall_topo_v_key(board) as usize]
-}
-
-fn pack_wall_probe_key(
-    board: &Board,
-    rows: &[u8],
-    cols: &[u8],
-    hs: &[u8],
-    count: u8,
-    remap: fn(usize) -> u8,
-) -> u8 {
-    let nw = count as usize;
-    let mut phys = 0usize;
-    for i in 0..nw {
-        let orient = if hs[i] != 0 {
-            WallOrientation::Horizontal
-        } else {
-            WallOrientation::Vertical
-        };
-        if has_wall(board, rows[i], cols[i], orient) {
-            phys |= 1 << i;
-        }
-    }
-    remap(phys)
+    let h = board.horizontal_walls;
+    let v = board.vertical_walls;
+    // side_a anchors south of slot (r,c): H(r+1,c±{0,1}), V(r+2,c); row 7 is on-edge.
+    let side_a = ROW_7 | (h >> 8) | east1(h >> 8) | west1(h >> 8) | (v >> 16);
+    let side_b = ROW_0 | (h << 8) | east1(h << 8) | west1(h << 8) | (v << 16);
+    let middle = east1(h) | west1(h);
+    two_of_three(side_a, side_b, middle)
 }
 
 #[cfg(test)]
@@ -440,12 +442,6 @@ mod tests {
             }
         }
         m
-    }
-
-    #[test]
-    fn topo_probe_count_fits_ten_bits() {
-        assert!(WALL_TOPO_H_PROBE_COUNT as usize <= 10);
-        assert!(WALL_TOPO_V_PROBE_COUNT as usize <= 10);
     }
 
     #[test]

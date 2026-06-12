@@ -326,7 +326,8 @@ pub fn wall_path_ok_after_place(
     ctx.wall_keeps_paths_open(row, col, orientation)
 }
 
-/// Matches scraped `collidesWithExistingWall`.
+/// Matches scraped `collidesWithExistingWall` — scalar reference for the L2 table.
+#[cfg(test)]
 fn wall_collides(board: &Board, row: u8, col: u8, orientation: WallOrientation) -> bool {
     let perpendicular = match orientation {
         WallOrientation::Horizontal => WallOrientation::Vertical,
