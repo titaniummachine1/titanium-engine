@@ -2,8 +2,8 @@
 
 use crate::core::board::{Board, Move, Player, WallOrientation};
 use crate::movegen::o1::{
-    generate_pawn_moves_o1, wall_collision_clear_h_mask, wall_collision_clear_v_mask,
-    wall_needs_flood_h_mask, wall_needs_flood_v_mask, wall_physically_legal_o1,
+    generate_pawn_moves_o1, wall_l12_h_mask, wall_l12_v_mask, wall_needs_flood_h_mask,
+    wall_needs_flood_v_mask, wall_physically_legal_o1,
 };
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
@@ -206,18 +206,19 @@ fn generate_wall_moves_slice(
     _scratch: &mut BfsScratch,
 ) -> usize {
     // Walls: L1 empty ∧ L2 collision → topo flood-skip → L3 parallel flood when needed.
-    let mut ctx = WallTrialCtx::new(board);
+    // Flood grids are built only if some candidate actually needs L3.
+    let mut ctx: Option<WallTrialCtx> = None;
     let mut n = 0usize;
     n += collect_wall_orientation(
         board,
-        !board.horizontal_walls & wall_collision_clear_h_mask(board),
+        wall_l12_h_mask(board),
         WallOrientation::Horizontal,
         &mut out[n..],
         &mut ctx,
     );
     n += collect_wall_orientation(
         board,
-        !board.vertical_walls & wall_collision_clear_v_mask(board),
+        wall_l12_v_mask(board),
         WallOrientation::Vertical,
         &mut out[n..],
         &mut ctx,
@@ -231,7 +232,7 @@ fn collect_wall_orientation(
     candidates: u64,
     orientation: WallOrientation,
     out: &mut [Move],
-    ctx: &mut WallTrialCtx,
+    ctx: &mut Option<WallTrialCtx>,
 ) -> usize {
     let needs_flood = match orientation {
         WallOrientation::Horizontal => wall_needs_flood_h_mask(board),
@@ -251,7 +252,11 @@ fn collect_wall_orientation(
             orientation == WallOrientation::Horizontal
         ));
         let flood = (needs_flood >> bit) & 1 != 0;
-        if !flood || ctx.wall_keeps_paths_open(row, col, orientation) {
+        if !flood
+            || ctx
+                .get_or_insert_with(|| WallTrialCtx::new(board))
+                .wall_keeps_paths_open(row, col, orientation)
+        {
             out[n] = Move::Wall {
                 row,
                 col,

@@ -9,7 +9,6 @@ use super::pawn::{
     discover_all_pawn_tables, ENEMY_LAYERS, MAX_WALL_SLOTS, PHYS_WALL_COMBOS, WALL_KEYS,
 };
 use super::progress::phase_bar;
-use super::wall::discover_all_wall_tables;
 
 pub fn generate(out_path: &Path) {
     let t0 = Instant::now();
@@ -19,7 +18,6 @@ pub fn generate(out_path: &Path) {
 
     let bar = phase_bar();
     let pawn = discover_all_pawn_tables(&bar);
-    let wall = discover_all_wall_tables(&bar);
 
     let file = File::create(out_path).expect("create tables file");
     let mut w = BufWriter::new(file);
@@ -133,46 +131,6 @@ pub fn generate(out_path: &Path) {
         bar.tick(&format!("write square {sq}/80"));
     }
     bar.finish("tables written");
-    writeln!(w, "];").unwrap();
-    writeln!(w).unwrap();
-
-    writeln!(w, "pub const WALL_COLLISION_MASK: [u8; 128] = [").unwrap();
-    for slot in &wall {
-        writeln!(w, "    {},", slot.collision_mask).unwrap();
-    }
-    writeln!(w, "];").unwrap();
-    writeln!(w).unwrap();
-
-    writeln!(w, "pub const WALL_PHYSICAL_TABLE: [[u8; 256]; 128] = [").unwrap();
-    for slot in &wall {
-        write!(w, "    [").unwrap();
-        for (i, &ok) in slot.table.iter().enumerate() {
-            if i > 0 {
-                write!(w, ",").unwrap();
-            }
-            write!(w, "{}", u8::from(ok)).unwrap();
-        }
-        writeln!(w, "],").unwrap();
-    }
-    writeln!(w, "];").unwrap();
-    writeln!(w).unwrap();
-
-    writeln!(w, "pub const WALL_SLOT_ROW: [u8; 128] = [").unwrap();
-    for slot in &wall {
-        writeln!(w, "    {},", slot.row).unwrap();
-    }
-    writeln!(w, "];").unwrap();
-
-    writeln!(w, "pub const WALL_SLOT_COL: [u8; 128] = [").unwrap();
-    for slot in &wall {
-        writeln!(w, "    {},", slot.col).unwrap();
-    }
-    writeln!(w, "];").unwrap();
-
-    writeln!(w, "pub const WALL_SLOT_HORIZONTAL: [u8; 128] = [").unwrap();
-    for slot in &wall {
-        writeln!(w, "    {},", u8::from(slot.horizontal)).unwrap();
-    }
     writeln!(w, "];").unwrap();
     writeln!(w).unwrap();
 

@@ -31,16 +31,6 @@ fn has_vertical(b: &MiniBoard, js_row: u8, col: u8) -> bool {
 }
 
 #[inline]
-pub fn has_wall(b: &MiniBoard, row: u8, col: u8, horizontal: bool) -> bool {
-    let js_row = row + 1;
-    if horizontal {
-        has_horizontal(b, js_row, col)
-    } else {
-        has_vertical(b, js_row, col)
-    }
-}
-
-#[inline]
 pub fn can_step(b: &MiniBoard, row: u8, col: u8, dr: i8, dc: i8) -> bool {
     let nr = row as i16 + dr as i16;
     let nc = col as i16 + dc as i16;
@@ -115,26 +105,6 @@ pub fn pawn_move_dests(b: &MiniBoard, side: usize, from_sq: u8) -> ([u8; 8], usi
         }
     }
     (dests, n)
-}
-
-/// Physical wall placement — overlap/cross only (no path check).
-pub fn wall_physically_legal(b: &MiniBoard, row: u8, col: u8, horizontal: bool) -> bool {
-    if has_wall(b, row, col, horizontal) || has_wall(b, row, col, !horizontal) {
-        return false;
-    }
-    if horizontal {
-        if col > 0 && has_wall(b, row, col - 1, true) {
-            return false;
-        }
-        if col < 7 && has_wall(b, row, col + 1, true) {
-            return false;
-        }
-    } else if row > 0 && has_wall(b, row - 1, col, false) {
-        return false;
-    } else if row < 7 && has_wall(b, row + 1, col, false) {
-        return false;
-    }
-    true
 }
 
 pub fn set_wall(b: &mut MiniBoard, row: u8, col: u8, horizontal: bool) {

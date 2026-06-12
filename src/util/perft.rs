@@ -55,14 +55,20 @@ pub fn perft_fast_mode_ctx(
 
     let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
     let move_count = generate_legal_moves_slice_mode(board, &mut move_buf, &mut worker.bfs, mode);
-    let mut nodes = 0u64;
 
-    for i in 0..move_count {
-        let mv = move_buf[i];
-        let undo = board.make_move(mv);
-        nodes += perft_fast_mode_ctx(board, depth - 1, mode, shared.as_deref_mut(), worker);
-        board.unmake_move(undo);
-    }
+    // Bulk count: every depth-0 child is one node — no make/unmake needed.
+    let nodes = if depth == 1 {
+        move_count as u64
+    } else {
+        let mut nodes = 0u64;
+        for i in 0..move_count {
+            let mv = move_buf[i];
+            let undo = board.make_move(mv);
+            nodes += perft_fast_mode_ctx(board, depth - 1, mode, shared.as_deref_mut(), worker);
+            board.unmake_move(undo);
+        }
+        nodes
+    };
 
     if let Some(shared) = shared {
         shared.tt.store(board.hash, depth as u8, nodes);
@@ -95,6 +101,9 @@ pub fn perft_no_tt_mode_ctx(
 
     let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
     let move_count = generate_legal_moves_slice_mode(board, &mut move_buf, scratch, mode);
+    if depth == 1 {
+        return move_count as u64;
+    }
     let mut nodes = 0u64;
 
     for i in 0..move_count {

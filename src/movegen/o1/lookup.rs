@@ -14,7 +14,6 @@ use crate::util::grid::{has_wall, square_index};
 use super::tables::{
     wall_remap_byte, PAWN_CATALOG, PAWN_LAYER_VALID, PAWN_LEGAL, PAWN_WALL_COMBO_COUNT,
     PAWN_WALL_DESC_COL, PAWN_WALL_DESC_H, PAWN_WALL_DESC_ROW, PAWN_WALL_SLOT_COUNT,
-    WALL_COLLISION_MASK, WALL_PHYSICAL_TABLE, WALL_SLOT_COL, WALL_SLOT_HORIZONTAL, WALL_SLOT_ROW,
 };
 
 /// Layer 1: 0=opponent absent, 1=up, 2=down, 3=left, 4=right (edge-invalid → 0).
@@ -96,102 +95,29 @@ pub fn generate_pawn_moves_o1(board: &Board, out: &mut [Move]) -> usize {
     n
 }
 
-#[inline]
-pub fn wall_slot_id(row: u8, col: u8, horizontal: bool) -> usize {
-    let base = if horizontal { 0 } else { 64 };
-    base + (row as usize) * 8 + col as usize
-}
-
-fn collision_occupied(board: &Board, probe: (u8, u8, bool)) -> bool {
-    let (r, c, h) = probe;
-    has_wall(
-        board,
-        r,
-        c,
-        if h {
-            WallOrientation::Horizontal
-        } else {
-            WallOrientation::Vertical
-        },
-    )
-}
-
-fn collision_probes(row: u8, col: u8, horizontal: bool) -> [(u8, u8, bool); 6] {
-    let mut out = [(255u8, 255, false); 6];
-    out[0] = (row, col, true);
-    out[1] = (row, col, false);
-    let mut n = 2usize;
-    if horizontal {
-        if col > 0 {
-            out[n] = (row, col - 1, true);
-            n += 1;
-        }
-        if col < 7 {
-            out[n] = (row, col + 1, true);
-        }
-    } else {
-        if row > 0 {
-            out[n] = (row - 1, col, false);
-            n += 1;
-        }
-        if row < 7 {
-            out[n] = (row + 1, col, false);
-        }
-    }
-    out
-}
-
-#[inline]
-pub fn pack_wall_collision_bits(board: &Board, slot: usize) -> u8 {
-    let row = WALL_SLOT_ROW[slot];
-    let col = WALL_SLOT_COL[slot];
-    let horizontal = WALL_SLOT_HORIZONTAL[slot] != 0;
-    let probes = collision_probes(row, col, horizontal);
-    let mask = WALL_COLLISION_MASK[slot];
-    let mut local = 0u8;
-    let mut bit = 0u8;
-    let mut m = mask;
-    while m != 0 {
-        let idx = m.trailing_zeros() as usize;
-        m &= m - 1;
-        if idx < 6 && probes[idx].0 != 255 && collision_occupied(board, probes[idx]) {
-            local |= 1 << bit;
-        }
-        bit += 1;
-    }
-    local
-}
-
 /// L2: passes overlap / cross / neighbor collision rules (`wall_collides` inverse).
 #[inline]
 pub fn wall_physically_legal_o1(board: &Board, row: u8, col: u8, horizontal: bool) -> bool {
-    let slot = wall_slot_id(row, col, horizontal);
-    let local = pack_wall_collision_bits(board, slot);
-    WALL_PHYSICAL_TABLE[slot][local as usize] != 0
+    let mask = if horizontal {
+        wall_collision_clear_h_mask(board)
+    } else {
+        wall_collision_clear_v_mask(board)
+    };
+    (mask >> ((row as u64) * 8 + col as u64)) & 1 != 0
 }
 
-fn collision_clear_mask(board: &Board, horizontal: bool) -> u64 {
-    let mut m = 0u64;
-    for row in 0..8u8 {
-        for col in 0..8u8 {
-            if wall_physically_legal_o1(board, row, col, horizontal) {
-                m |= 1 << ((row as u64) * 8 + col as u64);
-            }
-        }
-    }
-    m
-}
-
-/// L2 horizontal: bit set ⇒ no collision with existing walls.
+/// L2 horizontal: bit set ⇒ no collision — slot empty (H/V), no H neighbor left/right.
 #[inline]
 pub fn wall_collision_clear_h_mask(board: &Board) -> u64 {
-    collision_clear_mask(board, true)
+    let h = board.horizontal_walls;
+    !(h | board.vertical_walls | east1(h) | west1(h))
 }
 
-/// L2 vertical: bit set ⇒ no collision with existing walls.
+/// L2 vertical: bit set ⇒ no collision — slot empty (H/V), no V neighbor above/below.
 #[inline]
 pub fn wall_collision_clear_v_mask(board: &Board) -> u64 {
-    collision_clear_mask(board, false)
+    let v = board.vertical_walls;
+    !(v | board.horizontal_walls | (v << 8) | (v >> 8))
 }
 
 /// L1∧L2 horizontal candidates (empty ∧ collision-clear).
