@@ -2,7 +2,6 @@
 //! measured on the 15 canta midgame positions (wall-heavy, realistic).
 use std::time::Instant;
 use titanium::core::board::{Board, Player, WallOrientation};
-use titanium::movegen::legal::can_wall_block_topology;
 use titanium::oracle::canta::board_after_canta_game;
 use titanium::path::flood::{flood_to_goal, goal_square_mask};
 use titanium::path::masks::DirMasks;
@@ -30,13 +29,13 @@ fn collides(b: &Board, r: u8, c: u8, o: WallOrientation) -> bool {
     }
 }
 
-/// Candidate walls that survive collision + topology gates (flood actually runs).
+/// Candidate walls that survive L2 collision (every one runs flood in L3).
 fn flood_candidates(b: &Board) -> Vec<(u8, u8, WallOrientation)> {
     let mut out = Vec::new();
     for o in [WallOrientation::Horizontal, WallOrientation::Vertical] {
         for r in 0..8u8 {
             for c in 0..8u8 {
-                if !collides(b, r, c, o) && can_wall_block_topology(b, r, c, o) {
+                if !collides(b, r, c, o) {
                     out.push((r, c, o));
                 }
             }

@@ -3,9 +3,7 @@
 
 use std::time::Instant;
 
-use titanium::{
-    perft_no_tt_mode, Board, PawnGenMode, PERFT3_STARTPOS, PERFT4_STARTPOS,
-};
+use titanium::{perft_no_tt_mode, Board, PawnGenMode, PERFT3_STARTPOS, PERFT4_STARTPOS};
 
 fn main() {
     const DEPTH: u32 = 4;
@@ -18,8 +16,15 @@ fn main() {
     let modes = [
         (PawnGenMode::Scalar, "scalar_can_step"),
         (PawnGenMode::ShiftCanStep, "shift_bit_can_step"),
-        (PawnGenMode::BitboardFreshDirMasks, "bitboard_fresh_dirmasks"),
-        (PawnGenMode::BitboardCachedDirMasks, "bitboard_cached_dirmasks"),
+        (
+            PawnGenMode::BitboardFreshDirMasks,
+            "bitboard_fresh_dirmasks",
+        ),
+        (
+            PawnGenMode::BitboardCachedDirMasks,
+            "bitboard_cached_dirmasks",
+        ),
+        (PawnGenMode::O1Lookup, "o1_lookup"),
     ];
 
     println!("perft({DEPTH}) oracle={oracle} startpos — no TT, BFS mask cache shared");
@@ -42,8 +47,6 @@ fn main() {
     for (label, nodes, ok, secs) in &rows {
         let ratio = secs / fastest;
         let mark = if *ok { "yes" } else { "NO" };
-        println!(
-            "| {label} | {nodes} | {mark} | {secs:.3} | {ratio:.3}x |",
-        );
+        println!("| {label} | {nodes} | {mark} | {secs:.3} | {ratio:.3}x |",);
     }
 }

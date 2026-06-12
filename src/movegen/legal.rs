@@ -1,6 +1,10 @@
 //! Legal move generation — pawn jumps + wall placements with path validation.
 
 use crate::core::board::{Board, Move, Player, WallOrientation};
+use crate::movegen::o1::{
+    generate_pawn_moves_o1, wall_collision_clear_h_mask, wall_collision_clear_v_mask,
+    wall_needs_flood_h_mask, wall_needs_flood_v_mask, wall_physically_legal_o1,
+};
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
@@ -27,6 +31,8 @@ pub enum PawnGenMode {
     BitboardCachedDirMasks,
     /// Blind bit shift + `can_step` wall check — no `DirMasks`.
     ShiftCanStep,
+    /// Precomputed O(1) localized pawn table + O(1) wall physical gate (`movegen::o1`).
+    O1Lookup,
 }
 
 impl Default for PawnGenMode {
@@ -52,6 +58,7 @@ fn generate_pawn_moves_with_mode(
             generate_pawn_moves_bitboard_with_masks(board, &masks, out)
         }
         PawnGenMode::ShiftCanStep => generate_pawn_moves_shift_slice(board, out),
+        PawnGenMode::O1Lookup => generate_pawn_moves_o1(board, out),
     }
 }
 
@@ -198,21 +205,19 @@ fn generate_wall_moves_slice(
     out: &mut [Move],
     _scratch: &mut BfsScratch,
 ) -> usize {
-    // Movegen V11: wall topology + pawn bits packed once, then every candidate
-    // wall is a speculative mask flip + parallel flood — no per-trial
-    // `set_wall`/zobrist juggling or `DirMasks` rebuild.
+    // Walls: L1 empty ∧ L2 collision → topo flood-skip → L3 parallel flood when needed.
     let mut ctx = WallTrialCtx::new(board);
     let mut n = 0usize;
     n += collect_wall_orientation(
         board,
-        !board.horizontal_walls,
+        !board.horizontal_walls & wall_collision_clear_h_mask(board),
         WallOrientation::Horizontal,
         &mut out[n..],
         &mut ctx,
     );
     n += collect_wall_orientation(
         board,
-        !board.vertical_walls,
+        !board.vertical_walls & wall_collision_clear_v_mask(board),
         WallOrientation::Vertical,
         &mut out[n..],
         &mut ctx,
@@ -220,21 +225,33 @@ fn generate_wall_moves_slice(
     n
 }
 
-/// Iterate only **empty** wall slots via `trailing_zeros` — skips occupied bits early.
+/// L1∧L2 candidates — isolated walls (topo O(1)) skip flood; others run L3.
 fn collect_wall_orientation(
     board: &Board,
-    mut free: u64,
+    candidates: u64,
     orientation: WallOrientation,
     out: &mut [Move],
     ctx: &mut WallTrialCtx,
 ) -> usize {
+    let needs_flood = match orientation {
+        WallOrientation::Horizontal => wall_needs_flood_h_mask(board),
+        WallOrientation::Vertical => wall_needs_flood_v_mask(board),
+    };
     let mut n = 0usize;
-    while free != 0 {
-        let bit = free.trailing_zeros();
-        free &= free - 1;
+    let mut bits = candidates;
+    while bits != 0 {
+        let bit = bits.trailing_zeros();
+        bits &= bits - 1;
         let row = (bit / 8) as u8;
         let col = (bit % 8) as u8;
-        if is_legal_wall(board, row, col, orientation, ctx) {
+        debug_assert!(wall_physically_legal_o1(
+            board,
+            row,
+            col,
+            orientation == WallOrientation::Horizontal
+        ));
+        let flood = (needs_flood >> bit) & 1 != 0;
+        if !flood || ctx.wall_keeps_paths_open(row, col, orientation) {
             out[n] = Move::Wall {
                 row,
                 col,
@@ -246,6 +263,7 @@ fn collect_wall_orientation(
     n
 }
 
+#[cfg(test)]
 fn is_legal_wall(
     board: &Board,
     row: u8,
@@ -253,14 +271,17 @@ fn is_legal_wall(
     orientation: WallOrientation,
     ctx: &mut WallTrialCtx,
 ) -> bool {
-    if wall_collides(board, row, col, orientation) {
+    if !wall_physically_legal_o1(
+        board,
+        row,
+        col,
+        orientation == WallOrientation::Horizontal,
+    ) {
         return false;
     }
-    // Matches scraped `canWallBlock` — isolated walls cannot cage anyone (perft fast path).
     if !can_wall_block_topology(board, row, col, orientation) {
         return true;
     }
-    // Do NOT skip the flood when the wall is off the witness shortest path — unsound (a1h/a5h).
     ctx.wall_keeps_paths_open(row, col, orientation)
 }
 
@@ -335,6 +356,16 @@ fn wall_collides(board: &Board, row: u8, col: u8, orientation: WallOrientation) 
         }
     }
     false
+}
+
+#[cfg(test)]
+pub(crate) fn wall_collides_test(
+    board: &Board,
+    row: u8,
+    col: u8,
+    orientation: WallOrientation,
+) -> bool {
+    wall_collides(board, row, col, orientation)
 }
 
 /// Matches scraped `canWallBlock` — wall must touch existing topology to matter.

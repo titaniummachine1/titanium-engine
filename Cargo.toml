@@ -19,6 +19,10 @@ name = "titanium"
 path = "src/main.rs"
 required-features = ["parallel"]
 
+[[bin]]
+name = "movegen-o1-gen"
+path = "src/bin/movegen_o1_gen.rs"
+
 [features]
 default = ["parallel"]
 # Multi-threaded perft / Lazy SMP (rayon). Disable for wasm.
@@ -29,6 +33,7 @@ parallel = ["dep:rayon"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
+indicatif = "0.17"
 rand = "0.8"
 rayon = { version = "1.10", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }

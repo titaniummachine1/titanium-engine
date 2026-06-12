@@ -1,6 +1,7 @@
 //! Legal move generation (no pruning — see `cat::prune`).
 
 pub mod legal;
+pub mod o1;
 pub mod pawn_bits;
 
 pub use legal::{

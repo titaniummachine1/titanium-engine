@@ -54,7 +54,8 @@ pub use search::{
     MCTS_DEFAULT_UCT,
 };
 pub use util::perft::{
-    format_move, perft, perft_divide, perft_fast, perft_fast_ctx, perft_iterative, perft_naive,
+    format_move, perft, perft_divide, perft_fast, perft_fast_ctx, perft_fast_mode,
+    perft_fast_mode_ctx, perft_iterative, perft_naive,
     perft_no_tt_mode, PerftContext, PERFT3_STARTPOS, PERFT4_STARTPOS,
 };
 #[cfg(feature = "parallel")]
