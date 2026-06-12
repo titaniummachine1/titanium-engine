@@ -242,20 +242,14 @@ mod tests {
             .collect();
         let ace_ok = g.wall_legal(0, slot);
         let can_block = can_wall_block_topology(&board, row, col, WallOrientation::Horizontal);
-        eprintln!(
-            "ti={} ace={} can_block={} ti_count={}",
+        // a6h keeps both goal paths open here (naive BFS confirms); the old
+        // rejection was V10's partial-component false negative. ACE and the
+        // Titanium oracle must agree on acceptance.
+        assert!(can_block, "a6h touches topology — path flood must run");
+        assert!(ace_ok, "ACE must accept a6h when both goal paths survive");
+        assert!(
             ti_legal.iter().any(|m| m == "a6h"),
-            ace_ok,
-            can_block,
-            ti_legal.len()
-        );
-        assert!(
-            !g.wall_legal(0, slot),
-            "ACE must reject a6h when Titanium path check fails"
-        );
-        assert!(
-            !ti_legal.iter().any(|m| m == "a6h"),
-            "Titanium oracle must reject a6h on h3v line"
+            "Titanium oracle must accept a6h on h3v line"
         );
     }
 }

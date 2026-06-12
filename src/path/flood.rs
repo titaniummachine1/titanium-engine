@@ -41,6 +41,36 @@ pub fn flood_fill(start_sq: u8, masks: DirMasks) -> u128 {
     pack_flood_mask(flood_fill_flood_bits(start_sq, masks))
 }
 
+/// Flood with bit theft: on first contact with `cache` (a flood component the
+/// other player already visited) annex the whole region — pawn connectivity is
+/// undirected — and goal-test the annexed pool immediately, since those cells
+/// never re-enter the frontier.
+#[inline]
+pub fn flood_to_goal_seeded(start_sq: u8, cache: u128, masks: DirMasks, goal_mask: u128) -> bool {
+    let mut reached = flood_bit_sq(start_sq);
+    if reached & goal_mask != 0 {
+        return true;
+    }
+    let mut frontier = reached;
+    let mut pool = cache & !reached;
+    while frontier != 0 {
+        if frontier & pool != 0 {
+            if pool & goal_mask != 0 {
+                return true;
+            }
+            reached |= pool;
+            frontier |= pool;
+            pool = 0;
+        }
+        frontier = expand_frontier(frontier, masks) & !reached & FLOOD_PLAYABLE;
+        if frontier & goal_mask != 0 {
+            return true;
+        }
+        reached |= frontier;
+    }
+    false
+}
+
 #[inline]
 pub fn flood_to_goal(start_sq: u8, masks: DirMasks, goal_mask: u128) -> (bool, u128) {
     let mut reached = flood_bit_sq(start_sq);

@@ -1,13 +1,15 @@
 //! Legal move generation — pawn jumps + wall placements with path validation.
 
 use crate::core::board::{Board, Move, Player, WallOrientation};
-use crate::core::zobrist;
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
 use crate::path::masks::DirMasks;
+use crate::path::parallel::{
+    both_players_reach_goals_grids, pawn_bit, wall_delta, WallGrids,
+};
 use crate::path::BfsScratch;
-use crate::util::grid::{can_step, goal_row, has_wall, set_wall, square_index, unpack_square};
+use crate::util::grid::{can_step, has_wall};
 
 const DIRS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
@@ -194,37 +196,37 @@ pub fn generate_wall_moves_into(board: &mut Board, out: &mut Vec<Move>, scratch:
 fn generate_wall_moves_slice(
     board: &mut Board,
     out: &mut [Move],
-    scratch: &mut BfsScratch,
+    _scratch: &mut BfsScratch,
 ) -> usize {
-    let mut path_cache = None;
+    // Movegen V11: wall topology + pawn bits packed once, then every candidate
+    // wall is a speculative mask flip + parallel flood — no per-trial
+    // `set_wall`/zobrist juggling or `DirMasks` rebuild.
+    let mut ctx = WallTrialCtx::new(board);
     let mut n = 0usize;
     n += collect_wall_orientation(
         board,
         !board.horizontal_walls,
         WallOrientation::Horizontal,
         &mut out[n..],
-        scratch,
-        &mut path_cache,
+        &mut ctx,
     );
     n += collect_wall_orientation(
         board,
         !board.vertical_walls,
         WallOrientation::Vertical,
         &mut out[n..],
-        scratch,
-        &mut path_cache,
+        &mut ctx,
     );
     n
 }
 
 /// Iterate only **empty** wall slots via `trailing_zeros` — skips occupied bits early.
 fn collect_wall_orientation(
-    board: &mut Board,
+    board: &Board,
     mut free: u64,
     orientation: WallOrientation,
     out: &mut [Move],
-    scratch: &mut BfsScratch,
-    path_cache: &mut Option<WallPathCache>,
+    ctx: &mut WallTrialCtx,
 ) -> usize {
     let mut n = 0usize;
     while free != 0 {
@@ -232,7 +234,7 @@ fn collect_wall_orientation(
         free &= free - 1;
         let row = (bit / 8) as u8;
         let col = (bit % 8) as u8;
-        if is_legal_wall(board, row, col, orientation, scratch, path_cache) {
+        if is_legal_wall(board, row, col, orientation, ctx) {
             out[n] = Move::Wall {
                 row,
                 col,
@@ -245,12 +247,11 @@ fn collect_wall_orientation(
 }
 
 fn is_legal_wall(
-    board: &mut Board,
+    board: &Board,
     row: u8,
     col: u8,
     orientation: WallOrientation,
-    scratch: &mut BfsScratch,
-    _path_cache: &mut Option<WallPathCache>,
+    ctx: &mut WallTrialCtx,
 ) -> bool {
     if wall_collides(board, row, col, orientation) {
         return false;
@@ -259,128 +260,38 @@ fn is_legal_wall(
     if !can_wall_block_topology(board, row, col, orientation) {
         return true;
     }
-    // Do NOT skip BFS when the wall is off the witness shortest path — unsound (a1h/a5h).
-    path_ok_after_wall(board, row, col, orientation, scratch)
+    // Do NOT skip the flood when the wall is off the witness shortest path — unsound (a1h/a5h).
+    ctx.wall_keeps_paths_open(row, col, orientation)
 }
 
-struct WallPathCache {
-    p1: [u8; 81],
-    p2: [u8; 81],
-    p1_len: usize,
-    p2_len: usize,
+/// Per-node wall-trial state: directional blocked-step grids + pawn flood bits.
+struct WallTrialCtx {
+    grids: WallGrids,
+    p1_bit: u128,
+    p2_bit: u128,
 }
 
-impl WallPathCache {
-    fn new(board: &Board, scratch: &mut BfsScratch) -> Self {
-        let mut p1 = [u8::MAX; 81];
-        let mut p2 = [u8::MAX; 81];
-        let p1_len = shortest_path(board, Player::One, scratch, &mut p1);
-        let p2_len = shortest_path(board, Player::Two, scratch, &mut p2);
+impl WallTrialCtx {
+    fn new(board: &Board) -> Self {
+        let (r1, c1) = board.pawn(Player::One);
+        let (r2, c2) = board.pawn(Player::Two);
         Self {
-            p1,
-            p2,
-            p1_len,
-            p2_len,
+            grids: WallGrids::from_board(board),
+            p1_bit: pawn_bit(r1, c1),
+            p2_bit: pawn_bit(r2, c2),
         }
     }
 
+    /// Speculative trial: place the wall's blocked-edge delta, flood both
+    /// players (P2 reuses P1's visited cache via bit theft), roll back.
     #[inline]
-    fn wall_intersects_either_path(&self, row: u8, col: u8, orientation: WallOrientation) -> bool {
-        wall_intersects_path(row, col, orientation, &self.p1, self.p1_len)
-            || wall_intersects_path(row, col, orientation, &self.p2, self.p2_len)
+    fn wall_keeps_paths_open(&mut self, row: u8, col: u8, orientation: WallOrientation) -> bool {
+        let delta = wall_delta(row, col, orientation);
+        self.grids.place(delta);
+        let ok = both_players_reach_goals_grids(self.p1_bit, self.p2_bit, &self.grids);
+        self.grids.remove(delta);
+        ok
     }
-}
-
-fn shortest_path(
-    board: &Board,
-    player: Player,
-    scratch: &mut BfsScratch,
-    path_out: &mut [u8; 81],
-) -> usize {
-    let mut next_out = [u8::MAX; 81];
-    scratch.fill_next_toward_goal(board, player, &mut next_out);
-
-    let (pr, pc) = board.pawn(player);
-    let mut current = square_index(pr, pc);
-    let mut len = 0usize;
-    while len < path_out.len() {
-        path_out[len] = current;
-        len += 1;
-
-        let (row, _) = unpack_square(current);
-        if row == goal_row(player) {
-            break;
-        }
-
-        let next = next_out[current as usize];
-        if next == u8::MAX {
-            break;
-        }
-        current = next;
-    }
-    len
-}
-
-#[inline]
-fn wall_intersects_path(
-    row: u8,
-    col: u8,
-    orientation: WallOrientation,
-    path: &[u8; 81],
-    len: usize,
-) -> bool {
-    if len <= 1 {
-        return false;
-    }
-    for i in 0..(len - 1) {
-        if wall_blocks_path_step(row, col, orientation, path[i], path[i + 1]) {
-            return true;
-        }
-    }
-    false
-}
-
-#[inline]
-fn wall_blocks_path_step(row: u8, col: u8, orientation: WallOrientation, sq1: u8, sq2: u8) -> bool {
-    let (r1, c1) = unpack_square(sq1);
-    let (r2, c2) = unpack_square(sq2);
-    match orientation {
-        WallOrientation::Horizontal => {
-            if c1 == c2 && r1.abs_diff(r2) == 1 {
-                let min_r = r1.min(r2);
-                min_r == row && (c1 == col || c1 == col + 1)
-            } else {
-                false
-            }
-        }
-        WallOrientation::Vertical => {
-            if r1 == r2 && c1.abs_diff(c2) == 1 {
-                let min_c = c1.min(c2);
-                min_c == col && (r1 == row || r1 == row + 1)
-            } else {
-                false
-            }
-        }
-    }
-}
-
-/// Trial wall in-place — set, BFS both goals, unset. No `Board::clone`.
-#[inline]
-fn path_ok_after_wall(
-    board: &mut Board,
-    row: u8,
-    col: u8,
-    orientation: WallOrientation,
-    scratch: &mut BfsScratch,
-) -> bool {
-    // `set_wall` does not update `board.hash`; XOR so `dir_masks` rebuilds for the trial
-    // topology instead of reusing a stale cache (a1h ply-22 illegal-move bug).
-    zobrist::xor_wall(&mut board.hash, orientation, row, col);
-    set_wall(board, row, col, orientation, true);
-    let ok = scratch.both_players_reach_goals(board);
-    set_wall(board, row, col, orientation, false);
-    zobrist::xor_wall(&mut board.hash, orientation, row, col);
-    ok
 }
 
 /// Trial wall placement — both players must still reach goals (website rules oracle).
@@ -390,8 +301,8 @@ pub fn wall_path_ok_after_place(
     col: u8,
     orientation: WallOrientation,
 ) -> bool {
-    let mut scratch = BfsScratch::new();
-    path_ok_after_wall(board, row, col, orientation, &mut scratch)
+    let mut ctx = WallTrialCtx::new(board);
+    ctx.wall_keeps_paths_open(row, col, orientation)
 }
 
 /// Matches scraped `collidesWithExistingWall`.
@@ -437,8 +348,10 @@ pub fn can_wall_block_topology(
     let js_row = row + 1;
 
     let (on_a, on_b) = match orientation {
-        // Scraped `sideOnEdge`: horizontal right edge is col 9 (`numCols`), not wall slot h (js_col 8).
-        WallOrientation::Horizontal => (js_col == 1, js_col == 9),
+        // Scraped `sideOnEdge` compared against col 9 (`numCols`) — unreachable for our
+        // 0-based slots (rightmost H slot is js_col 8), so right-edge H walls skipped the
+        // path flood and trapping walls were accepted (canta game 0 depth 2: 5980 ≠ 5978).
+        WallOrientation::Horizontal => (js_col == 1, js_col == 8),
         WallOrientation::Vertical => (js_row == 8, js_row == 1),
     };
 

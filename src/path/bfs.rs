@@ -3,7 +3,9 @@
 use crate::cat::attention::CorridorAttention;
 use crate::cat::build::{build_corridor_attention, corridor_bottleneck_count};
 use crate::core::board::{Board, Player};
-use crate::path::flood::{expand_frontier, flood_fill_flood_bits, flood_to_goal, goal_square_mask};
+use crate::path::flood::{
+    expand_frontier, flood_fill_flood_bits, flood_to_goal, flood_to_goal_seeded, goal_square_mask,
+};
 use crate::path::masks::DirMasks;
 use crate::util::grid::{
     can_step, flood_bit_sq, goal_row, pack_flood_mask, square_index, unpack_square, FLOOD_PLAYABLE,
@@ -187,13 +189,12 @@ pub fn both_players_reach_goals_with_masks(board: &Board, masks: DirMasks) -> bo
     let (r2, c2) = board.pawn(Player::Two);
     let start2 = square_index(r2, c2);
     let goal2 = goal_square_mask(Player::Two);
-    let start2_bit = flood_bit_sq(start2);
 
-    if comp1 & start2_bit != 0 {
-        return comp1 & goal2 != 0;
-    }
-
-    flood_to_goal(start2, masks, goal2).0
+    // `comp1` is a *partial* component (P1's flood exits early at its goal), so
+    // "start2 ∈ comp1 ⇒ answer is comp1 ∩ goal2" was a false negative whenever
+    // P2 needed cells beyond P1's early exit. Seeded flood annexes comp1 on
+    // contact and keeps expanding instead.
+    flood_to_goal_seeded(start2, comp1, masks, goal2)
 }
 
 #[inline]
