@@ -25,10 +25,21 @@ const TT_CLUSTER: usize = 4;
 ///
 /// Flag guidance: `TT_BITS=23` (768 MB) is a good choice for deeper-than-d5
 /// searches (ties 22 at d5, more headroom beyond), and `24` (1.5 GB) for even
-/// deeper still. Default stays 22. (An adaptive table that starts small — sized
-/// to the d3/d4 working set — and grows a bit at a time while preserving stored
-/// entries is prototyped on the `adaptive-tt` branch for A/B testing vs this.)
+/// deeper still. Default stays 22.
 const DEFAULT_TT_BITS: usize = 22;
+
+// ── adaptive sizing (this `adaptive-tt` branch) ──────────────────────────────
+// Instead of pre-allocating the static default, start small — sized to the
+// d3/d4 working set (measured: d3 fits by ~14 bits, d4's knee is ~18) — and grow
+// ONE bit at a time when the table passes a load threshold, REHASHING the live
+// entries into the bigger table so nothing already computed is thrown away. RAM
+// then tracks the actual depth reached instead of a fixed 384 MB. A/B vs `main`:
+//   adaptive (default here):   `cargo run --bin titanium -- perft 5`
+//   static, like main:         `TT_BITS=22 cargo run --bin titanium -- perft 5`
+/// Adaptive start (env `TT_START_BITS`): holds the d3 working set in ~1.5 MB.
+const DEFAULT_START_BITS: usize = 14;
+/// Adaptive ceiling (env `TT_MAX_BITS`): 24 = 1.5 GB; growth stops here.
+const DEFAULT_MAX_BITS: usize = 24;
 
 // NOTE: a 16-byte packed layout (`key` + `depth<<56 | nodes`, cluster = one
 // 64-byte cache line) was tried and measured at BOTH perft(4) and perft(5) — no
@@ -59,6 +70,13 @@ impl Default for Cluster {
 pub struct TranspositionTable {
     clusters: Vec<Cluster>,
     mask: usize,
+    bits: usize,
+    /// Non-empty slots currently held (the grow trigger).
+    filled: usize,
+    /// Growth ceiling; `bits == max_bits` (or `!adaptive`) disables growth.
+    max_bits: usize,
+    /// Adaptive grow-on-load is on iff `TT_BITS` was NOT pinned.
+    adaptive: bool,
 }
 
 impl Default for TranspositionTable {
@@ -67,22 +85,48 @@ impl Default for TranspositionTable {
     }
 }
 
+fn env_bits(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&b| (10..=27).contains(&b))
+}
+
 impl TranspositionTable {
     pub fn new() -> Self {
-        let bits = std::env::var("TT_BITS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&b| (10..=27).contains(&b))
-            .unwrap_or(DEFAULT_TT_BITS);
+        // `TT_BITS` pins a static size (A/B baseline, matches `main`); otherwise
+        // start small and grow adaptively.
+        if let Some(bits) = env_bits("TT_BITS") {
+            return Self::with_size(bits, bits, false);
+        }
+        let start = env_bits("TT_START_BITS").unwrap_or(DEFAULT_START_BITS);
+        let max = env_bits("TT_MAX_BITS")
+            .unwrap_or(DEFAULT_MAX_BITS)
+            .max(start);
+        Self::with_size(start, max, true)
+    }
+
+    fn with_size(bits: usize, max_bits: usize, adaptive: bool) -> Self {
         let size = 1usize << bits;
         Self {
             clusters: vec![Cluster::default(); size],
             mask: size - 1,
+            bits,
+            filled: 0,
+            max_bits,
+            adaptive,
         }
     }
 
     pub fn clear(&mut self) {
         self.clusters.fill(Cluster::default());
+        self.filled = 0;
+    }
+
+    /// Total slots = `TT_CLUSTER` per index. Grow at load factor ≥ 1/2.
+    #[inline]
+    fn should_grow(&self) -> bool {
+        self.adaptive && self.bits < self.max_bits && self.filled * 2 >= self.clusters.len() * TT_CLUSTER
     }
 
     #[inline]
@@ -98,27 +142,65 @@ impl TranspositionTable {
 
     #[inline]
     pub fn store(&mut self, key: u64, depth: u8, nodes: u64) {
-        let cluster = &mut self.clusters[(key as usize) & self.mask];
+        if Self::insert_into(&mut self.clusters, self.mask, key, depth, nodes) {
+            self.filled += 1;
+            if self.should_grow() {
+                self.grow();
+            }
+        }
+    }
+
+    /// Insert into a (clusters, mask) table. Returns `true` iff a previously
+    /// EMPTY slot was consumed (a new distinct entry), so the caller can track
+    /// occupancy. Matching-key updates and shallowest-evictions return `false`.
+    #[inline]
+    fn insert_into(
+        clusters: &mut [Cluster],
+        mask: usize,
+        key: u64,
+        depth: u8,
+        nodes: u64,
+    ) -> bool {
+        let cluster = &mut clusters[(key as usize) & mask];
         let mut replace = 0usize;
         let mut shallowest = u8::MAX;
-
         for (i, entry) in cluster.entries.iter().enumerate() {
             if entry.key == key {
                 if entry.depth <= depth {
                     cluster.entries[i] = Entry { key, depth, nodes };
                 }
-                return;
+                return false;
             }
             if entry.key == 0 {
                 cluster.entries[i] = Entry { key, depth, nodes };
-                return;
+                return true;
             }
             if entry.depth < shallowest {
                 shallowest = entry.depth;
                 replace = i;
             }
         }
-
         cluster.entries[replace] = Entry { key, depth, nodes };
+        false
+    }
+
+    /// Step up one bit, REHASHING the live entries into the doubled table so
+    /// nothing already computed is lost. O(old slots); cheap vs the search that
+    /// fills it (and amortised — each entry is rehashed ≤ once per doubling).
+    fn grow(&mut self) {
+        let new_bits = self.bits + 1;
+        let new_size = 1usize << new_bits;
+        let new_mask = new_size - 1;
+        let mut next = vec![Cluster::default(); new_size];
+        for cluster in &self.clusters {
+            for e in &cluster.entries {
+                if e.key != 0 {
+                    Self::insert_into(&mut next, new_mask, e.key, e.depth, e.nodes);
+                }
+            }
+        }
+        self.clusters = next;
+        self.mask = new_mask;
+        self.bits = new_bits;
     }
 }
