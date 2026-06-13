@@ -1,7 +1,8 @@
 # Titanium Engine — Session State Handoff
 
 **Purpose:** Carry context into a new chat without re-discovery.  
-**Last updated:** movegen closed on `main` (Jun 2026).
+**Last updated:** Jun 2026 — O1 pawn LUT is production (cold-start built; binary
+2.8MB→1.0MB), perft d5/d6 gates added, gen13 ACE port landed (`acev13/`).
 
 ---
 
@@ -12,7 +13,8 @@
 | **Movegen** | **Closed.** Shift walls + **`O1Lookup` pawns (production default — perft-proven fastest at d4/d5)**; shift/scalar retained as bench/test alts (`docs/MOVEGEN.md`). |
 | **Perft** | Gates exact. Bench d3 ~**210–240M nps** (Zobrist §A on `main`). |
 | **Search** | Pure **ID negamax** + aspiration + adaptive LMR + qsearch + TT + CAT v3 prune. |
-| **ACE** | v11 port (pathfix gen11_ghi). |
+| **ACE** | v11 port (`ace/`, pathfix gen11_ghi) **and v13 port (`acev13/`, ACEV13.html)** — gen13 inlines `certify_win.js`, so the certificate solver runs (eval floor + last-wall refutation gate). CLI: `--engine ace-v13[-ti]`. |
+| **Tables** | Pawn O1 tables built at **cold start** (`movegen::o1::runtime`, ~0.1s); `embed-tables` feature bakes them in for prewarmed builds. Binary 2.8MB→1.0MB. |
 | **Eval** | Path-distance + CAT; opening depth still shallow. |
 
 ---
@@ -25,6 +27,8 @@ Single-thread only. No GPU. No movegen multithreading.
 | ----- | ----- | ----- |
 | 3 | 2_062_264 | CI gate |
 | 4 | 247_569_030 | Stress oracle |
+| 5 | 28_837_934_502 | sub-12s, public record (`PERFT5_STARTPOS`) |
+| 6 | 3_257_436_276_501 | full enumeration (`PERFT6_STARTPOS`) |
 
 **Next perf wins are not movegen:** L3 in wall-heavy search, eval cache — see `docs/MOVEGEN-HANDOFF.md`. §A (Zobrist/Undo) merged on `main`.
 
@@ -38,7 +42,12 @@ engine/src/
 ├── movegen/
 │   ├── legal.rs           legal moves, lazy WallTrialCtx, O1Lookup default
 │   ├── pawn_bits.rs       pawn variants (bench/tests)
-│   └── o1/lookup.rs       wall_masks(), shift L2/TOPO; pawn O1 LUT (production)
+│   └── o1/
+│       ├── lookup.rs      wall_masks(), shift L2/TOPO; pawn O1 LUT hot path
+│       ├── gen/           table-compute (single source of truth, shared w/ emitter)
+│       ├── runtime.rs     cold-start PawnTables + OnceLock tables() + prewarm()
+│       └── embedded.rs    baked consts (only under `--features embed-tables`)
+├── acev13/                gen13 ACE port (game/net/race/search/certify/session)
 ├── path/parallel.rs       u128 flood + bit theft (L3)
 ├── search/alphabeta.rs    ID negamax, LMR, CAT prune
 └── util/perft.rs          perft_fast, bulk d1, timed d4 test

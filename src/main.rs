@@ -67,6 +67,7 @@ fn main() {
         "lmr" => run_lmr(&args),
         "uci" => titanium::run_uci_stdio(),
         "session" => match ace_engine_flag(&args) {
+            Some(flag) if is_acev13(flag) => titanium::acev13::run_ace_session_stdio(flag),
             Some(flag) => titanium::ace::run_ace_session_stdio(flag),
             None => run_session_stdio(),
         },
@@ -92,7 +93,10 @@ fn print_usage() {
         "  titanium lmr [moves...] [--time SEC] [--depth N] — root LMR plan JSON (default depth 8)"
     );
     println!(
-        "  titanium session [--engine ace-v8-ti-pmc] — long-lived REPL (TT persists between plies)"
+        "  titanium session [--engine ace-v13-ti] — long-lived REPL (TT persists between plies)"
+    );
+    println!(
+        "  titanium genmove --engine ace-v13[-ti] [moves...] — gen13 ACE port (ACEV13.html)"
     );
     println!("  titanium ace-perft [depth] [--iters N] — ACE vs Titanium movegen perft compare");
 }
@@ -463,7 +467,9 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
         match w[1].as_str() {
             "ace" | "ace-v8" | "ace-v10" | "ace-v11" | "ace-cat" | "ace-ti" | "ace-v8-ti"
             | "ace-v8-ti-pmc" | "ace-v10-ti" | "ace-v10-ti-pmc" | "ace-v11-ti"
-            | "ace-v11-ti-pmc" | "ace-pmc" => Some(w[1].as_str()),
+            | "ace-v11-ti-pmc" | "ace-pmc" | "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc" => {
+                Some(w[1].as_str())
+            }
             _ => None,
         }
     })
@@ -473,9 +479,14 @@ fn ace_engine_mode(flag: &str) -> &'static str {
     match flag {
         "ace-cat" => "ace-cat",
         "ace-ti" | "ace-v8-ti" | "ace-v8-ti-pmc" | "ace-v10-ti" | "ace-v10-ti-pmc"
-        | "ace-v11-ti" | "ace-v11-ti-pmc" => "ace-ti",
+        | "ace-v11-ti" | "ace-v11-ti-pmc" | "ace-v13-ti" | "ace-v13-ti-pmc" => "ace-ti",
         _ => "ace",
     }
+}
+
+/// gen13 engine (`ACEV13.html` port in `crate::acev13`) vs the v11 `crate::ace`.
+fn is_acev13(flag: &str) -> bool {
+    flag.starts_with("ace-v13")
 }
 
 fn is_ace_engine(args: &[String]) -> bool {
@@ -485,38 +496,40 @@ fn is_ace_engine(args: &[String]) -> bool {
 fn run_genmove_ace(args: &[String]) {
     let label = ace_engine_flag(args).unwrap_or("ace");
     let mode = ace_engine_mode(label);
-    let mut params = titanium::ace::AceParams {
-        cat: mode == "ace-cat",
-        ti_movegen: mode == "ace-ti",
-        eme: label.contains("pmc"),
-        ..Default::default()
-    };
+    let cat = mode == "ace-cat";
+    let ti_movegen = mode == "ace-ti";
+    let eme0 = label.contains("pmc");
+    let mut time_ms = 4000u64;
+    let mut max_depth = 30i32;
+    let mut full = false;
+    let mut log = false;
+    let mut eme = eme0;
     let mut moves = Vec::new();
     let mut i = 2usize;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--time" {
             if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                params.time_ms = (sec * 1000.0) as u64;
+                time_ms = (sec * 1000.0) as u64;
                 i += 2;
                 continue;
             }
         } else if arg == "--depth" {
             if let Some(d) = args.get(i + 1).and_then(|s| s.parse::<i32>().ok()) {
-                params.max_depth = d;
+                max_depth = d;
                 i += 2;
                 continue;
             }
         } else if arg == "--full" {
-            params.full = true;
+            full = true;
             i += 1;
             continue;
         } else if arg == "--log" {
-            params.log = true;
+            log = true;
             i += 1;
             continue;
         } else if arg == "--eme" || arg == "--pseudo-mcts" {
-            params.eme = true;
+            eme = true;
             i += 1;
             continue;
         } else if arg == "--engine" {
@@ -538,36 +551,53 @@ fn run_genmove_ace(args: &[String]) {
         i += 1;
     }
 
-    match titanium::ace::ace_genmove(&moves, params, label) {
-        Some((algebraic, info)) => {
-            if !params.log {
-                let mut depth_json = String::new();
-                for (i, e) in info.depth_log.iter().enumerate() {
-                    if i > 0 {
-                        depth_json.push(',');
+    // Both modules expose an identical `AceParams` / `ace_genmove` surface, so
+    // the output handling is shared via a macro (field names match) and only
+    // the module path differs between the v11 (`ace`) and gen13 (`acev13`) ports.
+    macro_rules! emit_genmove {
+        ($module:path) => {{
+            use $module as ace_mod;
+            let params = ace_mod::AceParams {
+                cat,
+                ti_movegen,
+                eme,
+                time_ms,
+                max_depth,
+                full,
+                log,
+                ..Default::default()
+            };
+            match ace_mod::ace_genmove(&moves, params, label) {
+                Some((algebraic, info)) => {
+                    if !log {
+                        let mut depth_json = String::new();
+                        for (j, e) in info.depth_log.iter().enumerate() {
+                            if j > 0 {
+                                depth_json.push(',');
+                            }
+                            let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
+                            depth_json.push_str(&format!(
+                                "{{\"depth\":{},\"score\":{},\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
+                                e.depth, e.score, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
+                            ));
+                        }
+                        eprintln!(
+                            "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"depthLog\":[{}]}}",
+                            label, label, info.depth, info.nodes, info.score,
+                            info.white_dist, info.black_dist, info.ms, depth_json
+                        );
                     }
-                    let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
-                    depth_json.push_str(&format!(
-                        "{{\"depth\":{},\"score\":{},\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
-                        e.depth, e.score, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
-                    ));
+                    println!("bestmove {}", algebraic);
                 }
-                eprintln!(
-                    "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"depthLog\":[{}]}}",
-                    label,
-                    label,
-                    info.depth,
-                    info.nodes,
-                    info.score,
-                    info.white_dist,
-                    info.black_dist,
-                    info.ms,
-                    depth_json
-                );
+                None => println!("bestmove (none)"),
             }
-            println!("bestmove {}", algebraic);
-        }
-        None => println!("bestmove (none)"),
+        }};
+    }
+
+    if is_acev13(label) {
+        emit_genmove!(titanium::acev13);
+    } else {
+        emit_genmove!(titanium::ace);
     }
 }
 

@@ -24,7 +24,7 @@ fn build_search(engine_flag: &str, g: AceGame) -> Box<AceSearch> {
     let mut search = match engine_flag {
         "ace-cat" => AceSearch::with_cat(g),
         "ace-ti" | "ace-v8-ti" | "ace-v8-ti-pmc" | "ace-v10-ti" | "ace-v10-ti-pmc"
-        | "ace-v11-ti" | "ace-v11-ti-pmc" => {
+        | "ace-v11-ti" | "ace-v11-ti-pmc" | "ace-v13-ti" | "ace-v13-ti-pmc" => {
             AceSearch::with_ti_movegen(g)
         }
         _ => AceSearch::new(g),
