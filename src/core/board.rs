@@ -63,6 +63,33 @@ impl Default for Board {
 }
 
 impl Board {
+    /// Independent 32-bit board signature for TT collision verification.
+    ///
+    /// The Zobrist `hash` alone can't prove two boards are identical (distinct
+    /// positions can share a 64-bit key). `tt_verify` is a SECOND hash with
+    /// different mixing over the full position state (both wall bitboards, both
+    /// pawns, side to move), so a false TT hit needs both `hash` and this to
+    /// collide (~2^-96/pair). Cheap: a handful of mul/xor over fields already in
+    /// registers — no per-move accumulation. Mirrors the Zobrist's state coverage
+    /// (walls + pawns + turn; move number is irrelevant to perft/search value).
+    #[inline]
+    pub fn tt_verify(&self) -> u32 {
+        // Pawns + side-to-move packed into one word (no collisions: 4×4 bits +
+        // a turn bit), then XOR-mixed with the two wall bitboards under distinct
+        // odd multipliers and folded to 32 bits. 2 mul + a few xor/shift — much
+        // cheaper than a full avalanche finalizer, still effectively independent
+        // of the Zobrist key (different inputs+mixing).
+        let p = ((self.pawns[0].0 as u64) << 21)
+            | ((self.pawns[0].1 as u64) << 14)
+            | ((self.pawns[1].0 as u64) << 7)
+            | (self.pawns[1].1 as u64)
+            | ((self.side_to_move as u64) << 28);
+        let x = self.horizontal_walls.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ self.vertical_walls.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ (p << 32);
+        ((x >> 32) as u32) ^ (x as u32)
+    }
+
     pub fn new() -> Self {
         let mut board = Self {
             pawns: [(0, 4), (8, 4)],

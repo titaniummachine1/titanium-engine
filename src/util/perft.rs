@@ -54,8 +54,9 @@ pub fn perft_fast_mode_ctx(
         return 1;
     }
 
+    let verify = board.tt_verify();
     if let Some(shared) = shared.as_mut() {
-        if let Some(nodes) = shared.tt.probe(board.hash, depth as u8) {
+        if let Some(nodes) = shared.tt.probe(board.hash, verify, depth as u8) {
             return nodes;
         }
     }
@@ -78,7 +79,7 @@ pub fn perft_fast_mode_ctx(
     };
 
     if let Some(shared) = shared {
-        shared.tt.store(board.hash, depth as u8, nodes);
+        shared.tt.store(board.hash, verify, depth as u8, nodes);
     }
     nodes
 }

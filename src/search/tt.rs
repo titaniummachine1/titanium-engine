@@ -36,11 +36,21 @@ const DEFAULT_TT_BITS: usize = 22;
 // at depth 5, where the TT thrashes, halving the cluster cache footprint did
 // nothing: the engine is compute-bound on TT-miss nodes, not TT-memory-bound.
 // Kept the clear 24-byte struct. See `benches/tt_speedup.rs`.
+//
+// COLLISION SAFETY: the 64-bit `key` alone can't prove two boards are identical
+// (distinct positions can share a Zobrist key → a wrong stored `nodes` would be
+// served as if correct). `verify` is a SECOND, independent 32-bit hash of the
+// board (`Board::tt_verify`); a false hit now needs BOTH `key` (64) and `verify`
+// (32) to collide (~2^-96/pair — negligible even at game-solve scale). It is
+// FREE: { key:8, nodes:8, verify:4, depth:1 } = 21 bytes, still padded to the
+// same 24-byte align-8 entry, so the cluster stays 96 B (no cache cost). A probe
+// only returns `nodes` when key AND verify match.
 #[derive(Clone, Copy, Default)]
 struct Entry {
     key: u64,
-    depth: u8,
     nodes: u64,
+    verify: u32,
+    depth: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -86,10 +96,14 @@ impl TranspositionTable {
     }
 
     #[inline]
-    pub fn probe(&self, key: u64, depth: u8) -> Option<u64> {
+    pub fn probe(&self, key: u64, verify: u32, depth: u8) -> Option<u64> {
         let cluster = &self.clusters[(key as usize) & self.mask];
         for entry in &cluster.entries {
-            if entry.key == key && entry.depth == depth {
+            // Both the 64-bit key AND the independent 32-bit verify must match —
+            // guards against a Zobrist collision serving the wrong node count.
+            // (Measured: 0 such collisions at perft d4/d5; this is insurance that
+            // only bites at far deeper / game-solve scale.)
+            if entry.key == key && entry.verify == verify && entry.depth == depth {
                 return Some(entry.nodes);
             }
         }
@@ -97,20 +111,20 @@ impl TranspositionTable {
     }
 
     #[inline]
-    pub fn store(&mut self, key: u64, depth: u8, nodes: u64) {
+    pub fn store(&mut self, key: u64, verify: u32, depth: u8, nodes: u64) {
         let cluster = &mut self.clusters[(key as usize) & self.mask];
         let mut replace = 0usize;
         let mut shallowest = u8::MAX;
 
         for (i, entry) in cluster.entries.iter().enumerate() {
-            if entry.key == key {
+            if entry.key == key && entry.verify == verify {
                 if entry.depth <= depth {
-                    cluster.entries[i] = Entry { key, depth, nodes };
+                    cluster.entries[i] = Entry { key, nodes, verify, depth };
                 }
                 return;
             }
             if entry.key == 0 {
-                cluster.entries[i] = Entry { key, depth, nodes };
+                cluster.entries[i] = Entry { key, nodes, verify, depth };
                 return;
             }
             if entry.depth < shallowest {
@@ -119,6 +133,6 @@ impl TranspositionTable {
             }
         }
 
-        cluster.entries[replace] = Entry { key, depth, nodes };
+        cluster.entries[replace] = Entry { key, nodes, verify, depth };
     }
 }
