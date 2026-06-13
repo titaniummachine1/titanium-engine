@@ -12,6 +12,7 @@
 //! ```
 
 pub mod ace;
+pub mod acev13;
 pub mod cat;
 pub mod core;
 pub mod eval;
