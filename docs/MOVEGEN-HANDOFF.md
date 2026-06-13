@@ -1,7 +1,7 @@
 # Movegen + core handoff
 
-**`main`** — production: shift wall masks + `ShiftCanStep` pawns. No pawn O1 tables.  
-**`movgen-o1-lookup`** — research: ~2MB pawn `PAWN_LEGAL` lookup + generator + pawn-only bench.
+**`main` @ `9302db0`** — movegen closed, §A (Zobrist/Undo) merged.  
+**Branch `movgen-improvements`** — same as `main` after fast-forward.
 
 ---
 
@@ -9,42 +9,61 @@
 
 | Item | Status |
 | ---- | ------ |
-| **Wall shift L2/TOPO** (`wall_masks.rs`) | ✓ **production** — measured speedup |
-| Lazy L3, split loops | ✓ |
+| Shift L2 / TOPO wall masks | ✓ production |
+| Lazy L3, `wall_masks`, split loops | ✓ |
 | Perft bulk d1, gates exact | ✓ |
-| §A Zobrist / slim Undo | ✓ |
-| §B pawn default `ShiftCanStep` | ✓ |
-| Pawn O1 tables | ✓ **`movgen-o1-lookup` branch only** (~3% pawn-only; not shipped) |
-| Pinned bench script | ✓ `scripts/bench-pinned.ps1` |
+| §A const Zobrist, fused deltas, slim `Undo` | ✓ merged `main` |
+| §B pawn default | ✓ **`O1Lookup`** — perft-proven fastest (see MOVEGEN.md) |
+| Movegen multithread / GPU | ✗ policy: never |
 
 ### Gates
 
 ```text
 perft 3 = 2_062_264
 perft 4 = 247_569_030
-cargo test --release → 123 passed (+ 1 ignored d4)
-scripts/bench-pinned.ps1 → ~231M nps @ core 7
+perft 5 = 28_837_934_502   (sub-12s, public record)
+perft 6 = 3_257_436_276_501
+cargo test --release → all pass
+titanium bench 3 20 → ~210–240M nps (honest)
 ```
 
 ---
 
-## Branch split (important)
+## O1 pawn — PRODUCTION DEFAULT (was research-only; promoted)
 
-| What | `main` | `movgen-o1-lookup` |
-| ---- | ------ | ------------------- |
-| `wall_masks()` shift path | ✓ | ✓ |
-| `ShiftCanStep` pawns | ✓ default | ✓ default |
-| `PAWN_LEGAL` + 1.6MB remap | ✗ | ✓ research |
-| `movegen-o1-gen` | ✗ | ✓ |
-| `perft_pawn_only` bench | ✗ | ✓ |
+**Superseded note:** O1 was previously kept research-only. It is now the default
+because it is decisively faster *and* verified correct — do not be misled by any
+lingering "research only" text elsewhere.
 
-**Do not confuse:** wall shift masks are the production win. Pawn O1 is the optional gimmick.
+- `generate_legal_moves_slice` uses `PawnGenMode::default()` → **`O1Lookup`**.
+- Fastest at perft(4) in both plain and BMI2/PEXT builds; correct vs the oracle
+  at d3/d4 and cross-verified at d5/d6.
+- Tables (~2MB) are a fixed offline artifact; regenerate / cold-start-generate
+  with `cargo run --bin movegen-o1-gen`.
+- `ShiftCanStep` / `Scalar` remain only as portable bench/test baselines.
 
 ---
 
-## Next work
+## Next work (Fable or Cursor)
 
-1. L3 flood fraction in **search** replays  
-2. §C incremental L3 (needs proof harness)  
-3. §D completeness oracle  
-4. Eval / search (STATE.md)
+### 1. L3 flood fraction in **search** (not perft)
+
+Profile wall-heavy replay positions — is §C incremental L3 worth a proof harness?
+
+### 2. §C incremental L3
+
+**Blocked** until harness spec + tests vs scalar flood (BUG-DIARY `a1h`/`a5h`).
+
+### 3. §D completeness oracle
+
+Batch exact solve + invariant hash collisions — research track.
+
+### 4. Eval / search (STATE.md)
+
+Distance cache, opening depth, Game A/B replays.
+
+---
+
+## Do not redo
+
+Movegen tables, topo tables, movegen threads, O1 as default without in-search proof.

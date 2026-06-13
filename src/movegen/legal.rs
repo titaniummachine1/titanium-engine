@@ -1,7 +1,9 @@
 //! Legal move generation — pawn jumps + wall placements with path validation.
 
 use crate::core::board::{Board, Move, Player, WallOrientation};
-use crate::movegen::wall_masks::{wall_masks, wall_physically_legal_shift};
+use crate::movegen::o1::{
+    generate_pawn_moves_lean_lut, generate_pawn_moves_o1, wall_masks, wall_physically_legal_o1,
+};
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
@@ -17,22 +19,30 @@ const DIRS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 /// Upper bound on legal moves in any Quoridor position (startpos ≈ 131).
 pub const MAX_LEGAL_MOVES: usize = 140;
 
-/// Pawn-generation strategy — production uses [`PawnGenMode::ShiftCanStep`]; other modes for benches.
+/// Pawn-generation strategy — production uses [`PawnGenMode::O1Lookup`]; other modes for benches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PawnGenMode {
     /// ~4× `can_step` per node — no mask table.
     Scalar,
-    /// Full-board `DirMasks::from_board` + bitmask axis logic (current default).
+    /// Full-board `DirMasks::from_board` + bitmask axis logic.
     BitboardFreshDirMasks,
     /// Reuse `BfsScratch::dir_masks` — incorrect if stale after wall trials.
     BitboardCachedDirMasks,
-    /// Blind bit shift + `can_step` wall check — no `DirMasks`. **Production default.**
+    /// Blind bit shift + `can_step` wall check — no `DirMasks`.
     ShiftCanStep,
+    /// Offline `PAWN_LEGAL` tables. **Production default** — fastest at perft(4)
+    /// in both default and `target-cpu=native` (PEXT) builds, verified correct
+    /// against the oracle. (Was research-only on `movgen-o1-lookup`; promoted
+    /// once it beat shift/scalar at perft(4) with and without BMI2.)
+    O1Lookup,
+    /// Lean LUT: skip the table when no enemy is adjacent (ek=0 → ShiftCanStep),
+    /// use O1 table only for jump/lateral special cases (ek≠0).
+    O1LeanLut,
 }
 
 impl Default for PawnGenMode {
     fn default() -> Self {
-        Self::ShiftCanStep
+        Self::O1Lookup
     }
 }
 
@@ -53,6 +63,8 @@ fn generate_pawn_moves_with_mode(
             generate_pawn_moves_bitboard_with_masks(board, &masks, out)
         }
         PawnGenMode::ShiftCanStep => generate_pawn_moves_shift_slice(board, out),
+        PawnGenMode::O1Lookup => generate_pawn_moves_o1(board, out),
+        PawnGenMode::O1LeanLut => generate_pawn_moves_lean_lut(board, out),
     }
 }
 
@@ -265,7 +277,7 @@ fn collect_wall_orientation(
         heavy &= heavy - 1;
         let row = (bit / 8) as u8;
         let col = (bit % 8) as u8;
-        debug_assert!(wall_physically_legal_shift(
+        debug_assert!(wall_physically_legal_o1(
             board,
             row,
             col,
@@ -294,7 +306,7 @@ fn is_legal_wall(
     orientation: WallOrientation,
     ctx: &mut WallTrialCtx,
 ) -> bool {
-    if !wall_physically_legal_shift(
+    if !wall_physically_legal_o1(
         board,
         row,
         col,

@@ -6,6 +6,9 @@ use std::time::Instant;
 use titanium::{perft_no_tt_mode, Board, PawnGenMode, PERFT3_STARTPOS, PERFT4_STARTPOS};
 
 fn main() {
+    // Build the cold-start pawn tables BEFORE timing so the ~1-2s build never
+    // lands inside a measured perft run.
+    titanium::movegen::prewarm();
     const DEPTH: u32 = 4;
     let oracle = if DEPTH == 3 {
         PERFT3_STARTPOS
@@ -24,6 +27,8 @@ fn main() {
             PawnGenMode::BitboardCachedDirMasks,
             "bitboard_cached_dirmasks",
         ),
+        (PawnGenMode::O1Lookup, "o1_full_lut"),
+        (PawnGenMode::O1LeanLut, "o1_lean_lut"),
     ];
 
     println!("perft({DEPTH}) oracle={oracle} startpos — no TT, BFS mask cache shared");
