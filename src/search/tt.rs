@@ -19,12 +19,16 @@ const TT_CLUSTER_BYTES: usize = TT_CLUSTER * 24;
 ///
 /// **Adaptive mode (default) — overflow-driven cache-tier jumps:**
 ///
-///   L1  (bits=9,  48 KB) — start here; d1/d2 never overflow, zero page-fault cost.
-///   L2  (bits=11, 192 KB) — on L1 overflow; rehashes 48 KB. d3 working set fits here.
-///   L3  (bits=16,  6 MB) — on L2 overflow; rehashes 192 KB.
-///   d4  (bits=18, 24 MB) — on L3 overflow; rehashes 6 MB.   d4 optimal landing.
-///   d5  (bits=22, 384 MB) — on d4 overflow; rehashes 24 MB. d5 optimal landing.
-///   +1  past d5           — +1 bit per overflow (d6+ territory).
+///   L1  (detected via CPUID) — start here; d1/d2 never overflow.
+///   L2  (detected via CPUID) — on L1 overflow; d3 working set fits here.
+///   L3  (detected via CPUID) — on L2 overflow.
+///   d4  (bits=18, 24 MB)     — on L3 overflow; d4 measured optimal.
+///   d5  (bits=22, 384 MB)    — on d4 overflow; d5 measured optimal.
+///   +1  past d5              — +1 bit per overflow (d6+ territory).
+///
+/// L1/L2/L3 tier bits are computed from actual cache sizes (CPUID leaf 4 on
+/// x86_64; fallback constants on other architectures). A Threadripper with
+/// 48 KB L1 / 1 MB L2 / 32 MB L3 gets bits 9/13/18 automatically.
 ///
 /// Each overflow jumps to the next calibrated level, rehashing only the
 /// CURRENT (small) table. Cleared TT retains its size — in game search the
@@ -43,18 +47,72 @@ const TT_CLUSTER_BYTES: usize = TT_CLUSTER * 24;
 ///   `TT_D5_BITS`     — d4→d5 jump target (default 22)
 ///   `TT_MAX_BITS`    — growth ceiling (default 25, ~3.2 GB)
 
-// Hardware calibration (i7-4900MQ, 4 cores):
-//   L1/core = 64 KB → 2^9 clusters × 96 B = 48 KB fits
-//   L2/core = 256 KB → 2^11 × 96 B = 192 KB fits
-//   L3      = 8 MB  → 2^16 × 96 B = 6 MB fits
-//   d4 measured optimal = bits=18 (24 MB)
-//   d5 measured optimal = bits=22 (384 MB)
-const DEFAULT_START_BITS: usize = 9;
-const DEFAULT_L2_BITS: usize = 11;
-const DEFAULT_L3_BITS: usize = 16;
-const DEFAULT_D4_BITS: usize = 18;
-const DEFAULT_D5_BITS: usize = 22;
-const DEFAULT_MAX_BITS: usize = 25;
+// d4/d5 working-set optima are Quoridor-tree constants (not hardware-specific).
+// L1/L2/L3 tier bits are detected at runtime from actual cache sizes.
+const DEFAULT_D4_BITS: usize = 18; // 24 MB — d4 measured optimal
+const DEFAULT_D5_BITS: usize = 22; // 384 MB — d5 measured optimal
+const DEFAULT_MAX_BITS: usize = 25; // 3.2 GB ceiling
+// Fallback tier bits used when CPUID detection is unavailable (non-x86 etc.).
+const FALLBACK_START_BITS: usize = 9;
+const FALLBACK_L2_BITS: usize = 11;
+const FALLBACK_L3_BITS: usize = 16;
+
+/// Compute index bits for a cache tier: largest N such that `2^N` clusters
+/// of `TT_CLUSTER_BYTES` each fit within `cache_bytes`.
+fn cache_to_bits(cache_bytes: usize) -> usize {
+    let clusters = cache_bytes / TT_CLUSTER_BYTES;
+    if clusters < 2 {
+        return 8;
+    }
+    // floor(log2(clusters)), clamped to 8..=27
+    let bits = (usize::BITS - clusters.leading_zeros() - 1) as usize;
+    bits.clamp(8, 27)
+}
+
+/// Detect (L1_data_per_core, L2_per_core, L3_total) in bytes via CPUID leaf 4.
+/// Returns `None` on non-x86 or if the leaf reports no caches.
+fn detect_cache_bytes() -> Option<(usize, usize, usize)> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut l1d = 0usize;
+        let mut l2 = 0usize;
+        let mut l3 = 0usize;
+        for sub in 0u32..64 {
+            // SAFETY: CPUID is always safe to call on x86_64.
+            let r = unsafe { std::arch::x86_64::__cpuid_count(4, sub) };
+            let cache_type = r.eax & 0x1f;
+            if cache_type == 0 { break; } // no more caches
+            let level = ((r.eax >> 5) & 0x7) as usize;
+            let is_data = (cache_type & 1) != 0; // 1=data, 3=unified
+            if !is_data { continue; }
+            let line_size = ((r.ebx & 0xfff) + 1) as usize;
+            let partitions = (((r.ebx >> 12) & 0x3ff) + 1) as usize;
+            let ways = (((r.ebx >> 22) & 0x3ff) + 1) as usize;
+            let sets = (r.ecx as usize) + 1;
+            let size = line_size * partitions * ways * sets;
+            match level {
+                1 if l1d == 0 => l1d = size,
+                2 if l2 == 0  => l2  = size,
+                3 if l3 == 0  => l3  = size,
+                _ => {}
+            }
+        }
+        if l1d > 0 && l2 > 0 && l3 > 0 { return Some((l1d, l2, l3)); }
+    }
+    None
+}
+
+/// Compute (start_bits, l2_bits, l3_bits) from detected or fallback cache sizes.
+/// `start_bits` targets L1 data/core, `l2_bits` targets L2/core, `l3_bits` targets L3.
+fn tier_bits() -> (usize, usize, usize) {
+    if let Some((l1d, l2, l3)) = detect_cache_bytes() {
+        let start = cache_to_bits(l1d);
+        let l2b   = cache_to_bits(l2).max(start + 1);
+        let l3b   = cache_to_bits(l3).max(l2b + 1);
+        return (start, l2b, l3b);
+    }
+    (FALLBACK_START_BITS, FALLBACK_L2_BITS, FALLBACK_L3_BITS)
+}
 
 // NOTE: 16-byte packed layout tried at perft(4) and (5) — no speedup. Engine
 // is compute-bound on TT-miss nodes, not memory-bound. See `benches/tt_speedup.rs`.
@@ -115,9 +173,10 @@ impl TranspositionTable {
         if let Some(bits) = env_bits("TT_BITS") {
             return Self::make(bits, bits, bits, bits, bits, bits, false);
         }
-        let start = env_bits("TT_START_BITS").unwrap_or(DEFAULT_START_BITS);
-        let l2 = env_bits("TT_L2_BITS").unwrap_or(DEFAULT_L2_BITS).max(start);
-        let l3 = env_bits("TT_L3_BITS").unwrap_or(DEFAULT_L3_BITS).max(l2);
+        let (det_start, det_l2, det_l3) = tier_bits();
+        let start = env_bits("TT_START_BITS").unwrap_or(det_start);
+        let l2 = env_bits("TT_L2_BITS").unwrap_or(det_l2).max(start);
+        let l3 = env_bits("TT_L3_BITS").unwrap_or(det_l3).max(l2);
         let d4 = env_bits("TT_D4_BITS").unwrap_or(DEFAULT_D4_BITS).max(l3);
         let d5 = env_bits("TT_D5_BITS").unwrap_or(DEFAULT_D5_BITS).max(d4);
         let max = env_bits("TT_MAX_BITS").unwrap_or(DEFAULT_MAX_BITS).max(d5);
