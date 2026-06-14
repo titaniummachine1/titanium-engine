@@ -176,7 +176,7 @@ fn main() {
             for &(r, c, o) in cs {
                 let d = wall_delta(r, c, o);
                 grids.place(d);
-                std::hint::black_box(titanium::path::both_players_reach_goals_grids(
+                std::hint::black_box(titanium::path::pbff_wall_legal(
                     p1, p2, &grids,
                 ));
                 grids.remove(d);

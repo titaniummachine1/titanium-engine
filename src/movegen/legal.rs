@@ -9,7 +9,7 @@ use crate::movegen::pawn_bits::{
 };
 use crate::path::masks::DirMasks;
 use crate::path::parallel::{
-    both_players_reach_goals_grids, pawn_bit, wall_delta, WallGrids,
+    pbff_wall_legal, pawn_bit, wall_delta, WallGrids,
 };
 use crate::path::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
@@ -344,7 +344,7 @@ impl WallTrialCtx {
     fn wall_keeps_paths_open(&mut self, row: u8, col: u8, orientation: WallOrientation) -> bool {
         let delta = wall_delta(row, col, orientation);
         self.grids.place(delta);
-        let ok = both_players_reach_goals_grids(self.p1_bit, self.p2_bit, &self.grids);
+        let ok = pbff_wall_legal(self.p1_bit, self.p2_bit, &self.grids);
         self.grids.remove(delta);
         ok
     }
