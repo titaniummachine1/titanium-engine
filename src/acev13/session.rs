@@ -25,7 +25,8 @@ fn build_search(engine_flag: &str, g: AceGame) -> Box<AceSearch> {
     // `ace-v13-pure` is the faithful 1:1 JS-matching reference.
     // `ace-v13-grafted` is the same as titanium-v14 (kept for internal benchmarks).
     let mut search = match engine_flag {
-        "ace-v13-pure" => AceSearch::new(g),
+        "ace-v13-pure"    => AceSearch::new(g),
+        "ace-v13-ti-pure" => AceSearch::with_ti_movegen_pure(g),
         "ace-v13-grafted" | "titanium-v14" => AceSearch::grafted(g, None),
         _ => AceSearch::with_ti_movegen(g),
     };

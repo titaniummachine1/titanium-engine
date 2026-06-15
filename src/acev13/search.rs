@@ -275,6 +275,10 @@ pub struct AceSearch {
     /// Lague partial-iteration: on time-abort, adopt the best FULLY-searched
     /// root move from the unfinished deepest iteration instead of discarding it.
     use_partial_iter: bool,
+    /// Pure-JS-port mode: disables all Rust-side state-retention extras
+    /// (gen TT, history aging, dynamic ID startup, accumulator retention).
+    /// Use with `ti_movegen=true` as the fair baseline opponent.
+    pure_mode: bool,
     // ---------- pathfix feature flags (gen11 shipping config) ----------
     /// Exact k=0 race endgame + last-wall gate (JS `raceProof`, ships true).
     race_proof: bool,
@@ -393,6 +397,7 @@ impl AceSearch {
             root_best: super::ACE_NO_MOVE,
             root_score: 0,
             use_partial_iter: true,
+            pure_mode: false,
             race_proof: true,
             refused_cuts: 0,
             rb1_stores: 0,
@@ -452,6 +457,18 @@ impl AceSearch {
         let mut search = Self::new(g);
         search.bridge = Some(TiBridge::from_game(&search.g));
         search.ti_movegen = true;
+        search
+    }
+
+    /// Pure JS-port baseline + O1 movegen only. All Rust-side state-retention extras
+    /// (gen TT, history aging, dynamic ID startup, accumulator retention) are disabled
+    /// so this is a faithful 1:1 JS v13 reference, just with the faster movegen.
+    /// Use as the fair B-engine when measuring compounded advantage of titanium-v14.
+    pub fn with_ti_movegen_pure(g: AceGame) -> Box<Self> {
+        let mut search = Self::new(g);
+        search.bridge = Some(TiBridge::from_game(&search.g));
+        search.ti_movegen = true;
+        search.pure_mode = true;
         search
     }
 
@@ -621,14 +638,15 @@ impl AceSearch {
     /// Long-lived session path — the next `think` reuses prior analysis.
     pub fn apply_move(&mut self, m: i16) {
         self.g.make_move(m);
-        // Only invalidate the wall-stamp cache when a wall was placed; pawn moves
-        // leave the BFS distance arrays valid (all 81 cells are precomputed).
         if m >= 100 {
             self.cached_stamp = -1;
         }
-        // Do NOT reset np_b0/np_b1v: evaluate()'s bucket-aware diff handles any
+        if self.pure_mode {
+            // Faithful JS baseline: reset accumulator every move (no retention).
+            self.np_b0 = -1;
+        }
+        // non-pure: do NOT reset np_b0/np_b1v — evaluate()'s bucket-aware diff handles any
         // accumulator transition (wall diff or full rebuild on bucket cross).
-        // Do NOT rebuild bridge: think_search() rebuilds it safely before each search.
     }
 
     /// Replace the position outright (undo, new game) without clearing the
@@ -1746,12 +1764,11 @@ impl AceSearch {
                 self.rb1_stores += 1;
             }
         }
-        // Depth-preferred, generation-aware replacement:
-        //   • empty slot            → always store
-        //   • stale generation slot → always replace (prior search, can evict any depth)
-        //   • same generation slot  → replace only if new entry is >= existing depth
+        // Depth-preferred replacement (gen-aware when pure_mode=false).
+        //   pure_mode: only deeper entries overwrite (faithful JS TT semantics).
+        //   normal:    stale-gen entries always evictable; same-gen: depth-preferred.
         let was_empty = self.tt_meta[idx] == 0;
-        let stale_gen = !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
+        let stale_gen = !self.pure_mode && !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
         let deeper = !was_empty && !stale_gen && depth >= (self.tt_meta[idx] >> 12);
         if was_empty || stale_gen || deeper {
             self.tt_key_hi[idx] = self.g.hash_hi;
@@ -1904,14 +1921,16 @@ impl AceSearch {
         self.nodes = 0;
         self.root_best = super::ACE_NO_MOVE;
         self.root_score = 0;
-        // Advance TT generation: depth-preferred replacement will now protect entries
-        // from this search over shallower rewrites, while stale (prior-gen) entries
-        // are always evictable regardless of their depth.
-        self.tt_gen = self.tt_gen.wrapping_add(1);
-        // Decay history table before each search: halve all values so stale tactical
-        // patterns from several moves ago don't dominate current move ordering.
-        for h in self.history_tbl.iter_mut() {
-            *h >>= 1;
+        if !self.pure_mode {
+            // Advance TT generation: depth-preferred replacement will now protect entries
+            // from this search over shallower rewrites, while stale (prior-gen) entries
+            // are always evictable regardless of their depth.
+            self.tt_gen = self.tt_gen.wrapping_add(1);
+            // Decay history table before each search: halve all values so stale tactical
+            // patterns from several moves ago don't dominate current move ordering.
+            for h in self.history_tbl.iter_mut() {
+                *h >>= 1;
+            }
         }
         // RaceProof per-think solve budgets + caps
         self.rc_think_solve_ms = 0;
@@ -1950,7 +1969,8 @@ impl AceSearch {
         // shallow iterations we already know the answer to and resume from near
         // that depth. last_score is seeded from the TT so aspiration windows are
         // correctly centred on the first iteration we actually run.
-        let start_depth = {
+        // Disabled in pure_mode (faithful JS baseline).
+        let start_depth = if !self.pure_mode {
             let ridx = (self.g.hash_lo & self.tt_mask) as usize;
             let rmeta = self.tt_meta[ridx];
             if rmeta != 0
@@ -1969,6 +1989,8 @@ impl AceSearch {
             } else {
                 1
             }
+        } else {
+            1
         };
 
         for d in start_depth..=max_depth {
