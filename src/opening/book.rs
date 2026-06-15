@@ -130,7 +130,15 @@ const BOOK_LINES: &[BookLine] = &[
         name: "mined-ply7-a3h",
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
         reply: "a3h",
-        priority: 140,
+        priority: 155,
+        stm_bias: 0,
+    },
+    // Ka line 2 & 3: d3h at ply 7 (horizontal wall; different from d3v below).
+    BookLine {
+        name: "ka-d3h-ply7",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6"],
+        reply: "d3h",
+        priority: 148,
         stm_bias: 0,
     },
     // Shiller center vertical — kept as a documented PV but demoted: d4h+c3v refutes.
@@ -312,6 +320,66 @@ const BOOK_LINES: &[BookLine] = &[
         prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "e5", "e4", "e3h", "d5h"],
         reply: "d5",
         priority: 120,
+        stm_bias: 0,
+    },
+    // ── Ka FORCE_OPENING_LIST deep continuations ──────────────────────────
+    // After a3h, Black's strongest reply is h6h (then c3h refutation pair);
+    // Ka self-play: a3h,h6h,c3h → only 34.6% P1 win.  Black's h6h is the hint.
+    BookLine {
+        name: "ka-black-vs-a3h-h6h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h"],
+        reply: "h6h",
+        priority: 120,
+        stm_bias: 0,
+    },
+    // After a3h h6h White must advance e5 — NOT c3h (c3h is the 34.6% trap).
+    BookLine {
+        name: "ka-a3h-h6h-e5",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "h6h"],
+        reply: "e5",
+        priority: 118,
+        stm_bias: 0,
+    },
+    // After a3h, Black c6h (61.8% P1 win) — White advances e5.
+    BookLine {
+        name: "ka-a3h-c6h-e5",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "c6h"],
+        reply: "e5",
+        priority: 118,
+        stm_bias: 0,
+    },
+    // After a3h, Black d4v — White advances e5 (leads to 65.1% P1 win after Black e5h).
+    // d4v blocks the d4↔e4 / d5↔e5 lateral gap; White's forward e4→e5 is unaffected.
+    BookLine {
+        name: "ka-a3h-d4v-e5",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "d4v"],
+        reply: "e5",
+        priority: 118,
+        stm_bias: 0,
+    },
+    // After d3h, Black mirrors with c6h — Ka line 2: e6v continuation.
+    BookLine {
+        name: "ka-d3h-c6h-e6v",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "d3h", "c6h"],
+        reply: "e6v",
+        priority: 120,
+        stm_bias: 0,
+    },
+    // After d3h c6h — Ka line 3: d5v alternative.
+    BookLine {
+        name: "ka-d3h-c6h-d5v",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "d3h", "c6h"],
+        reply: "d5v",
+        priority: 118,
+        stm_bias: 0,
+    },
+    // Ka line 4: after e2 e8 e3 e7 e4, Black plays d4v (ply 6) instead of e6.
+    // d4v is an aggressive early wall; White advances e5 maintaining tempo.
+    BookLine {
+        name: "ka-black-d4v-ply6",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "d4v"],
+        reply: "e5",
+        priority: 115,
         stm_bias: 0,
     },
 ];
@@ -691,6 +759,48 @@ mod tests {
             opening_guard(&mut board).map(format_move).as_deref(),
             Some("e5")
         );
+    }
+
+    #[test]
+    fn ka_a3h_is_primary_ply7_wall() {
+        // a3h is now the highest-priority non-e3h ply-7 wall (Ka primary mainline)
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6"]);
+        let hint = book_hint(&mut board);
+        assert!(hint.is_some());
+        let prio = hint.unwrap().priority;
+        assert!(prio >= 155, "a3h priority should be ≥155, got {prio}");
+    }
+
+    #[test]
+    fn ka_a3h_c6h_continues_e5() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "c6h"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("e5"));
+    }
+
+    #[test]
+    fn ka_a3h_d4v_continues_e5() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "d4v"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("e5"));
+    }
+
+    #[test]
+    fn ka_a3h_h6h_avoids_c3h_trap() {
+        // White must play e5, NOT c3h (which leads to 34.6% win rate)
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "h6h"]);
+        let reply = lookup_text(&mut board);
+        assert_eq!(reply.as_deref(), Some("e5"), "must avoid c3h trap; got {reply:?}");
+    }
+
+    #[test]
+    fn ka_d3h_c6h_plays_e6v() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "d3h", "c6h"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("e6v"));
+    }
+
+    #[test]
+    fn ka_early_d4v_continues_e5() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "d4v"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("e5"));
     }
 
     #[test]

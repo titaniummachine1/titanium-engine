@@ -1,11 +1,18 @@
 //! ACE v10 HalfPW net — weights from `net_weights.bin` (H=32 NET_DATA blob).
 //!
-//! Blob layout (little-endian f64): Wskip[13] B1[32] W2[32] W1C[36864] PO[2592] PX[2592].
+//! Blob layout (little-endian f64): Wskip[16] B1[32] W2[32] W1C[36864] PO[2592] PX[2592].
+//!
+//! ws[0..12] = original scalar terms (unchanged).
+//! ws[13] = tempo × opp-wall-count (fragile-lead cross-term).
+//! ws[14] = corridor-width-me  (cells sharing the pawn's distance-to-goal rank).
+//! ws[15] = corridor-width-opp (same for opponent).
+//! ws[13..15] are zero-initialised so the net is behaviour-identical before retraining.
 
 use std::sync::OnceLock;
 
 pub const NET_H: usize = 32;
-const WSKIP_LEN: usize = 13;
+/// Number of scalar skip-connection weights.  Was 13; extended to 16 for new geometry inputs.
+pub const WSKIP_LEN: usize = 16;
 const W1C_LEN: usize = 9 * 128 * NET_H; // 9 pawn buckets × 128 wall inputs × hidden
 const PO_LEN: usize = 81 * NET_H;
 const PX_LEN: usize = 81 * NET_H;
@@ -13,7 +20,7 @@ const PX_LEN: usize = 81 * NET_H;
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
 
 pub struct Net {
-    pub ws: [f64; WSKIP_LEN],
+    pub ws: [f64; 16],
     pub b1: [f64; NET_H],
     pub w2: [f64; NET_H],
     pub w1c: Vec<f64>,
@@ -35,7 +42,8 @@ pub fn net() -> &'static Net {
     static NET: OnceLock<Net> = OnceLock::new();
     NET.get_or_init(|| {
         let total = WSKIP_LEN + NET_H + NET_H + W1C_LEN + PO_LEN + PX_LEN;
-        assert_eq!(NET_BYTES.len(), total * 8, "net_weights.bin size mismatch");
+        assert_eq!(NET_BYTES.len(), total * 8,
+            "net_weights.bin size mismatch — run training/extend_weights.py to create the 16-scalar file");
         let mut offset = 0;
         let ws_v = read_f64s(NET_BYTES, &mut offset, WSKIP_LEN);
         let b1_v = read_f64s(NET_BYTES, &mut offset, NET_H);

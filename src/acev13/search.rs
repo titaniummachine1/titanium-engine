@@ -639,13 +639,18 @@ impl AceSearch {
     /// Dump the raw net inputs + the resulting eval as JSON. Lets the Python NNUE
     /// trainer verify its forward pass against the engine on the *inputs alone*,
     /// without reimplementing Quoridor rules/BFS in Python — and is the record
-    /// format for training-data generation. `d0`/`d1` are shortest-path distances.
+    /// format for training-data generation.
+    ///
+    /// `d0`/`d1` are the pawn shortest-path distances (scalars).
+    /// `d0_field`/`d1_field` are the full 81-cell BFS distance arrays — used by
+    /// the trainer to compute geometry inputs (corridor-width, delta field) without
+    /// running a second BFS in Python.
     pub fn eval_dump_json(&mut self) -> String {
         self.position_changed();
         self.refresh_dist(0);
         let eval = self.evaluate();
-        let d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
-        let d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
+        let d0_scalar = self.d0[self.dist0_idx][self.g.pawn[0]];
+        let d1_scalar = self.d1[self.dist1_idx][self.g.pawn[1]];
         let bits = |arr: &[u8; 64]| {
             let mut s = String::new();
             for (i, b) in arr.iter().enumerate() {
@@ -656,15 +661,32 @@ impl AceSearch {
             }
             s
         };
+        let field = |arr: &[u8; 81]| {
+            let mut s = String::new();
+            for (i, &v) in arr.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&v.to_string());
+            }
+            s
+        };
+        let d0f = self.d0[self.dist0_idx];
+        let d1f = self.d1[self.dist1_idx];
         format!(
-            "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\"d0\":{},\"d1\":{},\"hw\":[{}],\"vw\":[{}],\"eval\":{}}}",
+            "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\
+             \"d0\":{},\"d1\":{},\
+             \"d0_field\":[{}],\"d1_field\":[{}],\
+             \"hw\":[{}],\"vw\":[{}],\"eval\":{}}}",
             self.g.turn,
             self.g.pawn[0],
             self.g.pawn[1],
             self.g.wl[0],
             self.g.wl[1],
-            d0,
-            d1,
+            d0_scalar,
+            d1_scalar,
+            field(&d0f),
+            field(&d1f),
             bits(&self.g.hw),
             bits(&self.g.vw),
             eval
@@ -1039,6 +1061,14 @@ impl AceSearch {
         if d_me <= 4.0 {
             out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
         }
+        // ws[13]: fragile-lead (tempo × opp walls — a lead is fragile when opp can spend walls)
+        out += ws[13] * pd * w_opp / 10.0;
+        // ws[14..15]: corridor-width proxies — cells sharing the pawn's distance-to-goal rank.
+        // Narrow corridor (few cells) → high bottleneck risk; wide → flexible paths.
+        // O(81) scan over the already-computed BFS distance field, no extra BFS needed.
+        let width_me = self.d0[self.dist0_idx].iter().filter(|&&d| d as i32 == d_me_i).count() as f64;
+        let width_opp = self.d1[self.dist1_idx].iter().filter(|&&d| d as i32 == d_opp_i).count() as f64;
+        out += ws[14] * width_me + ws[15] * width_opp;
 
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;

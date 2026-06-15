@@ -681,6 +681,7 @@ fn run_match(args: &[String]) {
     let mut tt_bits: Option<usize> = None;
     let mut early_stop = true;
     let mut book_openings = false;
+    let mut dump_games = false;
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -695,6 +696,7 @@ fn run_match(args: &[String]) {
             "--b" | "--vs" => { if let Some(e) = args.get(i+1).and_then(|s| MatchEngine::parse(s)) { engine_b = e; i += 2; continue; } }
             "--no-early-stop" => { early_stop = false; i += 1; continue; }
             "--openings" => { if let Some(v) = args.get(i+1) { book_openings = v == "book"; i += 2; continue; } }
+            "--dump-games" => { dump_games = true; i += 1; continue; }
             _ => {}
         }
         i += 1;
@@ -754,7 +756,7 @@ fn run_match(args: &[String]) {
             let a_is_one = flip == 0;
 
             let proofs_before = CERT_PROOFS.load(Ordering::Relaxed);
-            let outcome =
+            let (outcome, game_moves) =
                 play_one_game(&opening, a_is_one, time_ms, max_ply, engine_a, engine_b, tt_bits);
             if CERT_PROOFS.load(Ordering::Relaxed) > proofs_before {
                 cert_touched.fetch_add(1, Ordering::Relaxed);
@@ -770,6 +772,18 @@ fn run_match(args: &[String]) {
                     else        { a_w.fetch_add(1, Ordering::Relaxed); }
                 }
                 None => { draws.fetch_add(1, Ordering::Relaxed); }
+            }
+
+            if dump_games {
+                // Dump game record BEFORE the progress eprintln so stdout stays clean.
+                let result_char = match outcome {
+                    Some(titanium::Player::One) => "W",
+                    Some(titanium::Player::Two) => "B",
+                    None => "D",
+                };
+                let _g = print_mu.lock().unwrap();
+                println!("GAME {}", game_moves.join(" "));
+                println!("RESULT {result_char}");
             }
 
             let played = games_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1096,8 +1110,8 @@ impl Seat {
 }
 
 /// Play one full game from `opening`. `a_is_one` decides which engine holds
-/// Player::One. Returns the winner, or `None` for an adjudicated draw at the
-/// ply cap (closer pawn wins; equal distance = draw).
+/// Player::One. Returns `(winner, final_move_list)`. Winner is `None` for an
+/// adjudicated draw at the ply cap (closer pawn wins; equal distance = draw).
 fn play_one_game(
     opening: &[String],
     a_is_one: bool,
@@ -1106,7 +1120,7 @@ fn play_one_game(
     engine_a: MatchEngine,
     engine_b: MatchEngine,
     tt_bits: Option<usize>,
-) -> Option<titanium::Player> {
+) -> (Option<titanium::Player>, Vec<String>) {
     use titanium::{Board, Player};
 
     let mut moves: Vec<String> = opening.to_vec();
@@ -1122,12 +1136,15 @@ fn play_one_game(
 
     for _ in 0..max_ply {
         if let Some(w) = board.is_terminal() {
-            return Some(w);
+            return (Some(w), moves);
         }
         let a_to_move = (board.side() == Player::One) == a_is_one;
         let alg = {
             let seat = if a_to_move { &mut seat_a } else { &mut seat_b };
-            seat.pick(&moves, time_ms)?
+            match seat.pick(&moves, time_ms) {
+                Some(m) => m,
+                None => return (None, moves),
+            }
         };
         board.apply_algebraic(&alg);
         seat_a.observe(&alg);
@@ -1139,11 +1156,12 @@ fn play_one_game(
     let mut bfs = titanium::BfsScratch::new();
     let d_one = bfs.shortest_distance(&board, Player::One).unwrap_or(255);
     let d_two = bfs.shortest_distance(&board, Player::Two).unwrap_or(255);
-    match d_one.cmp(&d_two) {
+    let winner = match d_one.cmp(&d_two) {
         std::cmp::Ordering::Less => Some(Player::One),
         std::cmp::Ordering::Greater => Some(Player::Two),
         std::cmp::Ordering::Equal => None,
-    }
+    };
+    (winner, moves)
 }
 
 fn run_genmove(args: &[String]) {
