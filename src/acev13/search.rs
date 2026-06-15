@@ -206,6 +206,11 @@ pub struct AceSearch {
     tt_rep: Vec<u8>,
     tt_anc_lo: Vec<u32>,
     tt_anc_hi: Vec<u32>,
+    /// Generation counter — wraps; incremented every think(). Stored per TT slot.
+    /// Depth-preferred replacement: within the same generation only deeper entries
+    /// overwrite; entries from a prior generation are always replaced.
+    tt_gen: u8,
+    tt_entry_gen: Vec<u8>,
     /// Index mask for the TT vecs (`size - 1`). Runtime so the TT can be resized
     /// (Titanium-style larger table) without recompiling — `1<<TT_BITS` default.
     tt_mask: u32,
@@ -345,6 +350,8 @@ impl AceSearch {
             tt_rep: vec![0; TT_SIZE],
             tt_anc_lo: vec![0; TT_SIZE],
             tt_anc_hi: vec![0; TT_SIZE],
+            tt_gen: 0,
+            tt_entry_gen: vec![0; TT_SIZE],
             tt_mask: TT_MASK,
             tt_bits: TT_BITS,
             tt_filled: 0,
@@ -527,6 +534,7 @@ impl AceSearch {
         self.tt_rep = vec![0; size];
         self.tt_anc_lo = vec![0; size];
         self.tt_anc_hi = vec![0; size];
+        self.tt_entry_gen = vec![0; size];
         self.tt_mask = (size - 1) as u32;
         self.tt_bits = bits;
         self.tt_filled = 0;
@@ -577,6 +585,7 @@ impl AceSearch {
         let mut rep = vec![0u8; new_size];
         let mut a_lo = vec![0u32; new_size];
         let mut a_hi = vec![0u32; new_size];
+        let mut e_gen = vec![0u8; new_size];
         let mut filled = 0usize;
         for i in 0..self.tt_meta.len() {
             if self.tt_meta[i] == 0 {
@@ -593,6 +602,7 @@ impl AceSearch {
             rep[ni] = self.tt_rep[i];
             a_lo[ni] = self.tt_anc_lo[i];
             a_hi[ni] = self.tt_anc_hi[i];
+            e_gen[ni] = self.tt_entry_gen[i];
         }
         self.tt_key_hi = k_hi;
         self.tt_key_lo = k_lo;
@@ -601,6 +611,7 @@ impl AceSearch {
         self.tt_rep = rep;
         self.tt_anc_lo = a_lo;
         self.tt_anc_hi = a_hi;
+        self.tt_entry_gen = e_gen;
         self.tt_mask = new_mask;
         self.tt_bits = nb;
         self.tt_filled = filled;
@@ -610,7 +621,14 @@ impl AceSearch {
     /// Long-lived session path — the next `think` reuses prior analysis.
     pub fn apply_move(&mut self, m: i16) {
         self.g.make_move(m);
-        self.position_changed();
+        // Only invalidate the wall-stamp cache when a wall was placed; pawn moves
+        // leave the BFS distance arrays valid (all 81 cells are precomputed).
+        if m >= 100 {
+            self.cached_stamp = -1;
+        }
+        // Do NOT reset np_b0/np_b1v: evaluate()'s bucket-aware diff handles any
+        // accumulator transition (wall diff or full rebuild on bucket cross).
+        // Do NOT rebuild bridge: think_search() rebuilds it safely before each search.
     }
 
     /// Replace the position outright (undo, new game) without clearing the
@@ -1728,24 +1746,33 @@ impl AceSearch {
                 self.rb1_stores += 1;
             }
         }
+        // Depth-preferred, generation-aware replacement:
+        //   • empty slot            → always store
+        //   • stale generation slot → always replace (prior search, can evict any depth)
+        //   • same generation slot  → replace only if new entry is >= existing depth
         let was_empty = self.tt_meta[idx] == 0;
-        self.tt_key_hi[idx] = self.g.hash_hi;
-        self.tt_key_lo[idx] = self.g.hash_lo;
-        self.tt_meta[idx] = best_move as i32 | (sf << 10) | (depth << 12);
-        self.tt_score[idx] = ts;
-        self.tt_rep[idx] = rb;
-        if rb != 0 {
-            self.tt_anc_lo[idx] = self.sub_anc_lo[ply];
-            self.tt_anc_hi[idx] = self.sub_anc_hi[ply];
-        }
-        // Overflow-driven cache-tier growth (idx is dead after this — safe to grow).
-        if was_empty {
-            self.tt_filled += 1;
-            if self.tt_adaptive
-                && self.tt_bits < self.tt_max
-                && self.tt_filled.saturating_mul(2) >= (1usize << self.tt_bits)
-            {
-                self.tt_grow();
+        let stale_gen = !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
+        let deeper = !was_empty && !stale_gen && depth >= (self.tt_meta[idx] >> 12);
+        if was_empty || stale_gen || deeper {
+            self.tt_key_hi[idx] = self.g.hash_hi;
+            self.tt_key_lo[idx] = self.g.hash_lo;
+            self.tt_meta[idx] = best_move as i32 | (sf << 10) | (depth << 12);
+            self.tt_score[idx] = ts;
+            self.tt_rep[idx] = rb;
+            self.tt_entry_gen[idx] = self.tt_gen;
+            if rb != 0 {
+                self.tt_anc_lo[idx] = self.sub_anc_lo[ply];
+                self.tt_anc_hi[idx] = self.sub_anc_hi[ply];
+            }
+            // Overflow-driven cache-tier growth (idx is dead after this — safe to grow).
+            if was_empty {
+                self.tt_filled += 1;
+                if self.tt_adaptive
+                    && self.tt_bits < self.tt_max
+                    && self.tt_filled.saturating_mul(2) >= (1usize << self.tt_bits)
+                {
+                    self.tt_grow();
+                }
             }
         }
         Ok(best)
@@ -1877,6 +1904,15 @@ impl AceSearch {
         self.nodes = 0;
         self.root_best = super::ACE_NO_MOVE;
         self.root_score = 0;
+        // Advance TT generation: depth-preferred replacement will now protect entries
+        // from this search over shallower rewrites, while stale (prior-gen) entries
+        // are always evictable regardless of their depth.
+        self.tt_gen = self.tt_gen.wrapping_add(1);
+        // Decay history table before each search: halve all values so stale tactical
+        // patterns from several moves ago don't dominate current move ordering.
+        for h in self.history_tbl.iter_mut() {
+            *h >>= 1;
+        }
         // RaceProof per-think solve budgets + caps
         self.rc_think_solve_ms = 0;
         self.rc_solve_cap = time_ms as f64 * 0.25;
@@ -1909,7 +1945,33 @@ impl AceSearch {
         let mut depth_log: Vec<AceDepthLogEntry> = Vec::new();
         let max_depth = if max_depth > 0 { max_depth } else { 30 };
 
-        for d in 1..=max_depth {
+        // Dynamic iterative-deepening startup: probe the TT for the root position.
+        // If the prior think (or pondering) left a deep exact entry, skip the
+        // shallow iterations we already know the answer to and resume from near
+        // that depth. last_score is seeded from the TT so aspiration windows are
+        // correctly centred on the first iteration we actually run.
+        let start_depth = {
+            let ridx = (self.g.hash_lo & self.tt_mask) as usize;
+            let rmeta = self.tt_meta[ridx];
+            if rmeta != 0
+                && self.tt_key_hi[ridx] == self.g.hash_hi
+                && self.tt_key_lo[ridx] == self.g.hash_lo
+            {
+                let tt_depth = rmeta >> 12;
+                let tt_flag = (rmeta >> 10) & 3;
+                if tt_depth >= 4 && tt_flag == 0 {
+                    // Exact score: safe to use as aspiration seed and skip iterations.
+                    last_score = self.tt_score[ridx]; // seed aspiration; ply=0 so no mate-adj
+                    (tt_depth - 2).max(1)
+                } else {
+                    1
+                }
+            } else {
+                1
+            }
+        };
+
+        for d in start_depth..=max_depth {
             if d > 1 && Self::ace_over_time_budget(t0, time_ms, last_score) {
                 break;
             }
