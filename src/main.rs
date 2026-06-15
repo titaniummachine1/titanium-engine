@@ -352,11 +352,13 @@ fn parse_genmove_config(args: &[String]) -> (GenmoveConfig, Vec<String>) {
         let arg = &args[i];
         if arg == "--engine" {
             if let Some(name) = args.get(i + 1) {
-                config.engine = match name.as_str() {
+                #[allow(deprecated)]
+                let engine = match name.as_str() {
                     "minimax" | "ab" => GenmoveEngine::Minimax,
                     "greedy" => GenmoveEngine::Greedy,
                     _ => GenmoveEngine::Mcts,
                 };
+                config.engine = engine;
                 i += 2;
                 continue;
             }
@@ -531,6 +533,7 @@ fn run_rollout(args: &[String]) {
         log: false,
         book_hint: None,
         max_id_depth: cmp_depth,
+        cert_enabled: None,
     };
     let t1 = Instant::now();
     let report = run_search(&mut session, config);
@@ -639,7 +642,9 @@ fn run_rollout(args: &[String]) {
 /// Usage: `titanium match [--games N] [--time SEC] [--seed S] [--open PLIES]
 ///         [--maxply N]`
 fn run_match(args: &[String]) {
-    use std::sync::atomic::Ordering;
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::Mutex;
     use titanium::search::alphabeta::CERT_PROOFS;
 
     let mut games = 100usize;
@@ -647,108 +652,101 @@ fn run_match(args: &[String]) {
     let mut seed = 1u64;
     let mut open_plies = 4u32;
     let mut max_ply = 200u32;
+    let mut threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
-            "--games" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    games = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--time" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    time_sec = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--seed" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    seed = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--open" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    open_plies = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--maxply" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    max_ply = v;
-                    i += 2;
-                    continue;
-                }
-            }
+            "--games" => { if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { games = v; i += 2; continue; } }
+            "--time"  => { if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { time_sec = v; i += 2; continue; } }
+            "--seed"  => { if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { seed = v; i += 2; continue; } }
+            "--open"  => { if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { open_plies = v; i += 2; continue; } }
+            "--maxply"=> { if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { max_ply = v; i += 2; continue; } }
+            "--threads"=>{ if let Some(v) = args.get(i+1).and_then(|s| s.parse().ok()) { threads = v; i += 2; continue; } }
             _ => {}
         }
         i += 1;
     }
     let time_ms = (time_sec * 1000.0).round() as u64;
 
-    // cert-ON wins / cert-OFF wins / draws (adjudicated).
-    let (mut cert_w, mut plain_w, mut draws) = (0u32, 0u32, 0u32);
-    let mut decisive_by_cert = 0u64;
+    // Halve threads: each "slot" runs TWO sequential games (a color-swapped pair).
+    // So `threads` parallel slots = `threads * 2` games at once.
+    let pair_threads = threads.max(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(pair_threads)
+        .build_global()
+        .ok();
+
+    let cert_w  = AtomicU32::new(0);
+    let plain_w = AtomicU32::new(0);
+    let draws   = AtomicU32::new(0);
+    let cert_touched = AtomicU64::new(0);
+    let games_done   = AtomicU32::new(0);
     let started = Instant::now();
+    let print_mu: Mutex<()> = Mutex::new(());
+
+    // Round pairs up to nearest multiple of thread count so every batch fills
+    // all cores — no thread sits idle waiting for 1 straggler to finish.
+    let raw_pairs = (games + 1) / 2;
+    let pairs = raw_pairs.div_ceil(pair_threads) * pair_threads;
+    let games = pairs * 2;
 
     eprintln!(
-        "match: {games} games @ {time_sec}s/move, open={open_plies} plies, maxply={max_ply}"
+        "match: {games} games @ {time_sec}s/move, open={open_plies} plies, \
+         maxply={max_ply}, threads={pair_threads}"
     );
     eprintln!("  A = Titanium+endgame-cert   B = plain Titanium");
 
-    for g in 0..games {
-        // Color-swapped pairs share one opening (seeded by pair index).
-        let pair = (g / 2) as u64;
-        let opening = match_random_opening(seed.wrapping_add(pair), open_plies);
-        // Even game: A (cert) plays One; odd game: B (plain) plays One.
-        let cert_is_one = g % 2 == 0;
+    (0..pairs).into_par_iter().for_each(|pair| {
+        let opening = match_random_opening(seed.wrapping_add(pair as u64), open_plies);
 
-        let proofs_before = CERT_PROOFS.load(Ordering::Relaxed);
-        let outcome = play_one_game(&opening, cert_is_one, time_ms, max_ply);
-        let proofs_after = CERT_PROOFS.load(Ordering::Relaxed);
-        if proofs_after > proofs_before {
-            decisive_by_cert += 1;
-        }
+        for flip in 0..2u32 {
+            let game_idx = pair * 2 + flip as usize;
+            if game_idx >= games { break; }
+            let cert_is_one = flip == 0;
 
-        // `outcome`: Some(Player::One)=One won, Some(Two)=Two won, None=draw.
-        match outcome {
-            Some(titanium::Player::One) => {
-                if cert_is_one {
-                    cert_w += 1;
-                } else {
-                    plain_w += 1;
-                }
+            let proofs_before = CERT_PROOFS.load(Ordering::Relaxed);
+            let outcome = play_one_game(&opening, cert_is_one, time_ms, max_ply);
+            if CERT_PROOFS.load(Ordering::Relaxed) > proofs_before {
+                cert_touched.fetch_add(1, Ordering::Relaxed);
             }
-            Some(titanium::Player::Two) => {
-                if cert_is_one {
-                    plain_w += 1;
-                } else {
-                    cert_w += 1;
+
+            match outcome {
+                Some(titanium::Player::One) => {
+                    if cert_is_one { cert_w.fetch_add(1, Ordering::Relaxed); }
+                    else           { plain_w.fetch_add(1, Ordering::Relaxed); }
                 }
+                Some(titanium::Player::Two) => {
+                    if cert_is_one { plain_w.fetch_add(1, Ordering::Relaxed); }
+                    else           { cert_w.fetch_add(1, Ordering::Relaxed); }
+                }
+                None => { draws.fetch_add(1, Ordering::Relaxed); }
             }
-            None => draws += 1,
+
+            let played = games_done.fetch_add(1, Ordering::Relaxed) + 1;
+            let cw = cert_w.load(Ordering::Relaxed);
+            let pw = plain_w.load(Ordering::Relaxed);
+            let dr = draws.load(Ordering::Relaxed);
+            let ct = cert_touched.load(Ordering::Relaxed);
+            let score = cw as f64 + 0.5 * dr as f64;
+            let _g = print_mu.lock().unwrap();
+            eprintln!(
+                "  [{played}/{games}] A {cw} - {pw} B  ({dr} draws)  \
+                 A-score {score:.1}/{played}  cert-touched {ct} games  \
+                 {:.0}s elapsed",
+                started.elapsed().as_secs_f64()
+            );
         }
+    });
 
-        let played = g + 1;
-        let score = cert_w as f64 + 0.5 * draws as f64;
-        eprintln!(
-            "  [{played}/{games}] A {cert_w} - {plain_w} B  ({draws} draws)  \
-             A-score {:.1}/{played}  cert-touched {decisive_by_cert} games  \
-             {:.0}s elapsed",
-            score,
-            started.elapsed().as_secs_f64()
-        );
-    }
-
+    let cw = cert_w.load(Ordering::Relaxed);
+    let pw = plain_w.load(Ordering::Relaxed);
+    let dr = draws.load(Ordering::Relaxed);
+    let ct = cert_touched.load(Ordering::Relaxed);
     let n = games as f64;
-    let score = cert_w as f64 + 0.5 * draws as f64;
+    let score = cw as f64 + 0.5 * dr as f64;
     let p = score / n;
-    // Approx 95% CI on the score rate (normal approx) → rough Elo.
     let se = (p * (1.0 - p) / n).sqrt();
     let elo = if p > 0.0 && p < 1.0 {
         -400.0 * ((1.0 - p) / p).log10()
@@ -758,15 +756,12 @@ fn run_match(args: &[String]) {
     println!("=== STRENGTH MATCH RESULT ===");
     println!("A = Titanium+endgame-cert,  B = plain Titanium");
     println!("games {games} @ {time_sec}s/move");
-    println!("A wins {cert_w}  |  B wins {plain_w}  |  draws {draws}");
+    println!("A wins {cw}  |  B wins {pw}  |  draws {dr}");
     println!(
         "A score {score:.1}/{games} = {:.1}% (±{:.1}%)  →  ~{elo:+.0} Elo",
-        p * 100.0,
-        se * 196.0
+        p * 100.0, se * 196.0
     );
-    println!(
-        "endgame certificate fired in {decisive_by_cert}/{games} games "
-    );
+    println!("endgame certificate fired in {ct}/{games} games");
 }
 
 /// Build a seeded random legal opening of `plies` moves from startpos.
@@ -823,9 +818,7 @@ fn play_one_game(
         // Whose config moves now?
         let one_to_move = board.side() == Player::One;
         let cert_on = one_to_move == cert_is_one;
-        std::env::set_var("TITANIUM_ENDGAME_CERT", if cert_on { "1" } else { "0" });
 
-        // Fresh-positioned session each ply (fair: both sides identical handling).
         if session.set_position(&moves).is_err() {
             return None;
         }
@@ -834,6 +827,7 @@ fn play_one_game(
             max_nodes: DEFAULT_MAX_NODES,
             log: false,
             book_hint: None,
+            cert_enabled: Some(cert_on),
             ..SearchConfig::default()
         };
         let report = match run_search(&mut session, config) {

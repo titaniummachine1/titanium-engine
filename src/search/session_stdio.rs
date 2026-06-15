@@ -43,6 +43,7 @@ fn run_go(session: &mut GameSearchSession, parts: &[&str], stdout: &mut io::Stdo
         log: true,
         book_hint: None,
         max_id_depth: crate::search::alphabeta::DEFAULT_MAX_ID_DEPTH,
+        cert_enabled: None,
     };
 
     match run_search(session, config) {

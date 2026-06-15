@@ -57,7 +57,7 @@ fn perft_ace_native(g: &mut AceGame, depth: u32) -> u64 {
     nodes
 }
 
-/// ACE tree with Titanium movegen on a synced board (no `wall_legal` spam).
+#[allow(dead_code)]
 fn perft_ace_ti_gen(
     g: &mut AceGame,
     depth: u32,

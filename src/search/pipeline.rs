@@ -54,6 +54,7 @@ pub fn select_move(board: &mut Board, config: GenmoveConfig) -> Option<String> {
     let book_hint = book::book_hint(board);
 
     match config.engine {
+        #[allow(deprecated)]
         GenmoveEngine::Mcts | GenmoveEngine::Minimax => {
             let mut minimax_cfg = config.minimax;
             minimax_cfg.book_hint = book_hint;
@@ -142,6 +143,7 @@ mod tests {
     #[test]
     fn mcts_engine_routes_to_negamax() {
         let mut board = Board::new();
+        #[allow(deprecated)]
         let mut cfg = config(GenmoveEngine::Mcts);
         cfg.minimax.time_ms = 50;
         cfg.minimax.max_nodes = 50_000;

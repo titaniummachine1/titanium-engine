@@ -139,6 +139,10 @@ pub struct SearchConfig {
     /// Defaults to [`DEFAULT_MAX_ID_DEPTH`] (256). Set lower only for explicit
     /// depth-capped searches (unit tests, perft-style benches).
     pub max_id_depth: u32,
+    /// Override endgame cert enable/disable. `None` = read `TITANIUM_ENDGAME_CERT`
+    /// env var (default ON). Use `Some(false)` for the plain-engine side of a
+    /// parallel match to avoid the global env-var race.
+    pub cert_enabled: Option<bool>,
 }
 
 impl Default for SearchConfig {
@@ -149,6 +153,7 @@ impl Default for SearchConfig {
             log: false,
             book_hint: None,
             max_id_depth: DEFAULT_MAX_ID_DEPTH,
+            cert_enabled: None,
         }
     }
 }
@@ -221,20 +226,19 @@ struct EndgameCert {
     calls: u32,
     /// (board hash, stm as u8) → proven side (`0`/`1`) or `2` = not provable here.
     cache: std::collections::HashMap<(u64, u8), u8>,
-    /// Exact hands-empty (both 0 walls) retrograde DP oracle — sound AND
-    /// complete, ply-exact. Used when both hands are empty; the certificate
-    /// above covers the 1–2 wall band the oracle can't (walls not yet frozen).
-    oracle: crate::acev13::oracle::Oracle,
+    // (oracle removed: replaced by race_minimax — lazy forward search, cheaper
+    //  for the small volatile-position subset than full 13k retrograde build)
 }
 
 impl EndgameCert {
-    fn from_env() -> Self {
-        // ON by default: path-aware classifier (oracle only when paths overlap +
-        // delta≤1) measured +Elo in 43-game self-play (A 28-15, 65%, lower CI
-        // bound ~58%). Set TITANIUM_ENDGAME_CERT=0 to disable.
-        let enabled = std::env::var("TITANIUM_ENDGAME_CERT")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+    fn new(override_: Option<bool>) -> Self {
+        // ON by default: path-aware classifier measured +85 Elo at 2s/move.
+        // Set TITANIUM_ENDGAME_CERT=0 to disable, or pass Some(false) via SearchConfig.
+        let enabled = override_.unwrap_or_else(|| {
+            std::env::var("TITANIUM_ENDGAME_CERT")
+                .map(|v| v != "0")
+                .unwrap_or(true)
+        });
         let budget = std::env::var("TITANIUM_CERT_BUDGET")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -249,7 +253,6 @@ impl EndgameCert {
             cap,
             calls: 0,
             cache: std::collections::HashMap::new(),
-            oracle: crate::acev13::oracle::Oracle::default(),
         }
     }
 }
@@ -266,17 +269,18 @@ fn repetition_score(state: &mut SearchState<'_>, board: &Board) -> i32 {
         .bfs
         .shortest_distance(board, side.opposite())
         .unwrap_or(DIST_PENALTY) as i32;
-    let race_margin = opp - our;
-    if race_margin <= -3 {
-        return stm.saturating_sub(800);
+    // tempo = opp_dist − our_dist; +1 tempo means stm is 1 move closer to goal.
+    let tempo = opp - our;
+    if tempo <= -3 {
+        return stm.saturating_sub(800); // 3+ tempo deficit → penalise hard
     }
-    if race_margin < 0 {
-        return stm.saturating_sub(300);
+    if tempo < 0 {
+        return stm.saturating_sub(300); // 1-2 tempo behind → penalise moderately
     }
-    if race_margin == 0 {
-        return 0;
+    if tempo == 0 {
+        return 0; // dead heat → draw by repetition is fine
     }
-    // Slightly ahead — repetition still wastes tempo.
+    // Slightly ahead — repetition still wastes a tempo.
     stm.saturating_sub(80).min(50)
 }
 
@@ -683,7 +687,7 @@ fn endgame_cert_floor(
     // there (and only there) we pay for the exact retrograde oracle.
     if board.walls_remaining[0] == 0 && board.walls_remaining[1] == 0 {
         use crate::acev13::cert_bridge::{hands_empty_race, RaceVerdict};
-        let g = crate::acev13::cert_bridge::ace_from_board(board);
+        let mut g = crate::acev13::cert_bridge::ace_from_board(board);
         match hands_empty_race(&g) {
             RaceVerdict::Win => {
                 CERT_PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -694,18 +698,11 @@ fn endgame_cert_floor(
                 return Some(loss);
             }
             RaceVerdict::NeedsProof => {
-                let v = state.cert.oracle.query(&g);
-                if v > 0 {
-                    CERT_PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Some(win);
-                }
-                if v < 0 {
-                    CERT_PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Some(loss);
-                }
-                // v == 0 is the reachability game's "repetition" value, NOT a real
-                // outcome — Quoridor has no draws. Not a proof: fall back to eval.
-                return None;
+                // Forward race minimax: only visits ~50-200 reachable states from
+                // this volatile position vs the oracle's full 13k build.
+                let v = crate::acev13::cert_bridge::race_minimax(&mut g);
+                CERT_PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Some(if v > 0 { win } else { loss });
             }
         }
     }
@@ -1001,7 +998,7 @@ fn negamax_inner(
     };
 
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-    let mut n = collect_search_moves(
+    let n = collect_search_moves(
         board,
         &mut buf,
         state.bfs,
@@ -1462,6 +1459,7 @@ fn find_immediate_win(moves: &[Move], stm: Player) -> Option<Move> {
 /// Applies to both winning and losing mates: at depth ≥ d the root has been
 /// searched deeply enough to compare delaying defenses; continuing to d150+ only
 /// re-walks the same forced PV (~8k nodes/depth) without changing the answer.
+#[allow(dead_code)]
 fn should_stop_forced_outcome(
     verified: i32,
     depth: u32,
@@ -1761,7 +1759,7 @@ pub fn run_search(session: &mut GameSearchSession, config: SearchConfig) -> Opti
         black_dist,
         last_iter_asp_fails: 0,
         last_iter_score_delta: i32::MAX,
-        cert: EndgameCert::from_env(),
+        cert: EndgameCert::new(config.cert_enabled),
     };
 
     let static_eval = eval_stm(board, root_side, state.bfs);
@@ -2040,6 +2038,7 @@ mod tests {
             log: false,
             book_hint: None,
             max_id_depth: 4, // far too shallow (4 < 9) to SEE the mate directly
+            cert_enabled: None,
         };
         // Feature is ON by default; no env override needed.
         let report = search_best_move(&mut board, config).expect("report");
@@ -2086,6 +2085,7 @@ mod tests {
             log: false,
             book_hint: None,
             max_id_depth: 4,
+            cert_enabled: None,
         };
         let report = search_best_move(&mut board, config).expect("report");
 

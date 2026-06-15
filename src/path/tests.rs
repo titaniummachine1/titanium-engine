@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod naive_reference {
     use crate::core::board::Board;
-    use crate::path::masks::DirMasks;
     use crate::util::grid::{can_step, is_goal, square_index, unpack_square};
 
     const NEIGHBORS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
@@ -37,7 +36,6 @@ mod naive_reference {
     }
 
     pub fn can_reach_goal_naive(board: &Board, player: crate::core::board::Player) -> bool {
-        use crate::core::board::Player;
         let (sr, sc) = board.pawn(player);
         let start = square_index(sr, sc);
         let mut visited = 1u128 << start;
@@ -76,7 +74,6 @@ mod naive_reference {
         board: &Board,
         player: crate::core::board::Player,
     ) -> Option<u8> {
-        use crate::core::board::Player;
         let (sr, sc) = board.pawn(player);
         let start = square_index(sr, sc);
         let mut visited = 1u128 << start;
@@ -125,7 +122,7 @@ mod tests {
     use crate::path::bfs::{can_reach_goal, shortest_distance, BfsScratch};
     use crate::path::flood::flood_fill;
     use crate::path::masks::DirMasks;
-    use crate::util::grid::{flood_bit_sq, set_wall, square_index};
+    use crate::util::grid::{set_wall, square_index};
 
     fn assert_bitwise_matches_naive(board: &Board) {
         let masks = DirMasks::from_board(board);

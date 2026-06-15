@@ -8,7 +8,7 @@ use crate::core::board::{Board, Player};
 use crate::path::distance::{fill_dist_from_sq, fill_dist_to_goal_row};
 use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
-use crate::util::grid::{flood_bit_sq, square_index, FLOOD_PLAYABLE};
+use crate::util::grid::{flood_bit_sq, square_index};
 
 fn corridor_heat(delta: u16) -> u16 {
     if delta > MAX_RELEVANT_CORRIDOR_DELTA {

@@ -73,7 +73,7 @@ pub fn plan_root_lmr(
     let cat = bfs.build_corridor_attention(board);
 
     let mut buf = [Move::Pawn { row: 1, col: 4 }; MAX_LEGAL_MOVES];
-    let mut n = collect_search_moves(
+    let n = collect_search_moves(
         board,
         &mut buf,
         bfs,

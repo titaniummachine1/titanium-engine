@@ -4,8 +4,6 @@
 //! Player 0 starts at 76 (bottom) and races to row 0; player 1 starts at 4
 //! and races to row 8. Moves: 0..80 pawn target, 100+slot hw, 200+slot vw.
 
-use crate::core::board::WallOrientation;
-
 pub const DELTA: [i16; 4] = [-9, 9, -1, 1];
 pub const DIRBIT: [u8; 4] = [1, 2, 4, 8];
 

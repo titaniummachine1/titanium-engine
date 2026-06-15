@@ -36,7 +36,7 @@ pub type PerftContext = WorkerContext;
 pub fn perft_fast_ctx(
     board: &mut Board,
     depth: u32,
-    mut shared: Option<&mut SharedState>,
+    shared: Option<&mut SharedState>,
     worker: &mut WorkerContext,
 ) -> u64 {
     perft_fast_mode_ctx(board, depth, PawnGenMode::default(), shared, worker)

@@ -61,6 +61,7 @@ struct BookEntry {
     priority: u8,
     /// Eval in cm from reply-side perspective after `reply` is played.
     stm_bias: i16,
+    #[allow(dead_code)]
     name: &'static str,
 }
 

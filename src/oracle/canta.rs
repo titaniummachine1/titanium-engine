@@ -2,9 +2,7 @@
 //! Turn byte: `place_walls:1 | orientation:1 | index:6`
 //! Wall index = `row * 8 + col` (gorisanson / Titanium internal wall grid).
 
-use crate::core::board::{Board, Move, Player, WallOrientation};
-use crate::util::perft::perft_fast;
-use crate::path::BfsScratch;
+use crate::core::board::{Board, Move, WallOrientation};
 
 const TURN_BYTES: [[u8; 15]; 15] = [
     [0x8d, 0x9d, 0xb, 0x5, 0x5f, 0xd5, 0x19, 0x81, 0x33, 0xc3, 0x27, 0x9b, 0x49, 0xcd, 0xbd],
@@ -24,6 +22,7 @@ const TURN_BYTES: [[u8; 15]; 15] = [
     [0x2c, 0x33, 0x83, 0xb1, 0x49, 0x5f, 0x7d, 0x51, 0xd3, 0xa7, 0x25, 0xa1, 0x69, 0xab, 0x93],
 ];
 
+#[cfg(test)]
 const PERFT_VALUES: [[u64; 3]; 15] = [
     [79, 5978, 432338],
     [78, 5745, 409363],
@@ -105,6 +104,8 @@ pub fn board_after_canta_game(game_idx: usize) -> Board {
 mod tests {
     use super::*;
     use crate::movegen::generate_legal_moves;
+    use crate::path::BfsScratch;
+    use crate::util::perft::perft_fast;
 
     #[test]
     fn canta_oracle_all_games_depth1_to_3() {

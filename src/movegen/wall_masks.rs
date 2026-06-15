@@ -2,7 +2,9 @@
 //!
 //! Production wall path — no runtime lookup tables. L3 flood lives in `legal.rs` / `path/parallel.rs`.
 
-use crate::core::board::{Board, WallOrientation};
+use crate::core::board::Board;
+#[cfg(test)]
+use crate::core::board::WallOrientation;
 
 /// L2: passes overlap / cross / neighbor collision rules (`wall_collides` inverse).
 #[inline]

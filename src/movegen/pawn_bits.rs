@@ -160,7 +160,6 @@ pub fn generate_pawn_moves_shift_slice(board: &Board, out: &mut [Move]) -> usize
 mod tests {
     use super::*;
     use crate::movegen::legal::generate_pawn_moves_scalar_for;
-    use crate::core::board::Player;
     use crate::movegen::MAX_LEGAL_MOVES;
     use crate::path::BfsScratch;
 

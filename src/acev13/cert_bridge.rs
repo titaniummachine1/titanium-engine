@@ -119,6 +119,74 @@ pub fn certify_board(
     report.proven.map(player_from_ace)
 }
 
+// ── Forward race minimax (replaces the 13k-state retrograde oracle) ───────────
+//
+// Used ONLY for the NeedsProof edge case: paths overlap AND delta < 2.
+// The oracle builds all 13,122 (p0,p1,turn) states eagerly; here we only need
+// the ~50-200 states reachable from the volatile position, so lazy forward
+// minimax with a small HashMap is strictly cheaper.
+//
+// Soundness: in a wall-free pawn race, optimal play NEVER leaves the shortest-
+// path set — deviating increases your distance while the opponent stays on
+// schedule.  Jumps are included automatically: gen_pawn_moves emits them and
+// they always satisfy `d_goal[to] < d_goal[pawn]` (land ≥1 step closer).
+
+/// Solve a hands-empty pawn race for the side to move.
+/// Returns `+1` (stm wins) or `-1` (stm loses). Never 0 — a race always ends.
+pub fn race_minimax(g: &mut AceGame) -> i8 {
+    let mut memo = std::collections::HashMap::with_capacity(64);
+    race_rec(g, &mut memo)
+}
+
+fn race_rec(g: &mut AceGame, memo: &mut std::collections::HashMap<u32, i8>) -> i8 {
+    let stm = g.turn;
+    let pawn = g.pawn[stm];
+
+    // Defensive guard: stm already at goal (we detect goal moves before recursing,
+    // but be safe against the root being called on an already-won position).
+    if (stm == 0 && pawn < 9) || (stm == 1 && pawn >= 72) {
+        return 1;
+    }
+
+    // Key: 81 cells × 81 cells × 2 turns ≤ 13,122 states, fits in u32.
+    let key = (g.pawn[0] * 162 + g.pawn[1] * 2 + g.turn) as u32;
+    if let Some(&v) = memo.get(&key) {
+        return v;
+    }
+
+    // Distance from every cell to stm's goal through the frozen wall graph.
+    let mut d_goal = [255u8; 81];
+    g.compute_dist(stm, &mut d_goal);
+    let my_dist = d_goal[pawn];
+
+    let mut buf = [0i16; 16];
+    let cnt = g.gen_pawn_moves(&mut buf, 0);
+
+    let mut result = -1i8; // pessimistic default: lose
+
+    for i in 0..cnt {
+        let to = buf[i] as usize;
+        // Strict shortest-path filter: only moves that spend 1 tempo (strictly decrease distance).
+        if d_goal[to] < my_dist {
+            // Goal move → instant win.
+            if (stm == 0 && to < 9) || (stm == 1 && to >= 72) {
+                result = 1;
+                break;
+            }
+            g.make_move(buf[i]);
+            let child = race_rec(g, memo);
+            g.unmake_move();
+            if child < 0 {
+                result = 1; // opponent loses from here → we win
+                break;
+            }
+        }
+    }
+
+    memo.insert(key, result);
+    result
+}
+
 // ── Path-aware hands-empty race classifier (jump-mechanics short-circuit) ─────
 
 /// Walls-only BFS distance from `src` to every cell (255 = unreachable).
@@ -181,19 +249,22 @@ pub enum RaceVerdict {
     Win,
     /// Side to move loses by force (deterministic — no proof needed).
     Loss,
-    /// Volatile (paths overlap and the lead is ≤1 tempo): the jump bonus can flip
-    /// the result, so the caller MUST run the exact recursive oracle.
+    /// Volatile (paths overlap and |tempo| ≤ 1): a jump can swing ±1 tempo and
+    /// flip the result — the caller MUST run `race_minimax` to prove the outcome.
     NeedsProof,
 }
 
 /// Classify a hands-empty (no walls left) race for the side to move using pure
-/// tempo math plus path-overlap, reserving the heavy proof for the volatile case:
+/// tempo math plus path-overlap, reserving the heavy proof for the volatile case.
 ///
-/// * lead ≥ 2 (`|adv| ≥ 2`): a 2-tempo gap absorbs any worst-case jump → the
-///   shorter pawn wins by force, overlap or not.
-/// * lead ≤ 1 and paths DON'T overlap: pure parallel race → stm wins iff its
-///   distance ≤ the opponent's (first-move tempo); else it loses.
-/// * lead ≤ 1 and paths DO overlap: a jump can swing ±1 tempo → `NeedsProof`.
+/// **Tempo** = `opp_dist − our_dist`: +1 tempo means stm is 1 move closer to their
+/// goal. Delta=0 is broken by the stm's first-move advantage (they consume 1 tempo
+/// by moving, so equal distance → stm wins in a pure race).
+///
+/// * `tempo > 1`: 2+ tempo lead absorbs any jump → stm wins, overlap or not.
+/// * `tempo < -1`: 2+ tempo deficit, even a stm jump can't recover → stm loses.
+/// * `-1 ≤ tempo ≤ 1`, no overlap: pure parallel race — stm wins if `tempo ≥ 0`.
+/// * `-1 ≤ tempo ≤ 1`, paths overlap: jump can swing ±1 tempo → `NeedsProof`.
 pub fn hands_empty_race(g: &AceGame) -> RaceVerdict {
     let mut d0 = [0u8; 81];
     let mut d1 = [0u8; 81];
@@ -209,23 +280,27 @@ pub fn hands_empty_race(g: &AceGame) -> RaceVerdict {
     } else {
         (big1 as i32, big0 as i32)
     };
-    let adv = opp - our; // > 0 ⇒ side to move is closer
+    // tempo > 0 ⇒ stm is closer; tempo < 0 ⇒ stm is behind.
+    let tempo = opp - our;
 
-    if adv >= 2 {
-        return RaceVerdict::Win;
+    if tempo > 1 {
+        return RaceVerdict::Win; // ≥2 tempo lead absorbs any jump
     }
-    if adv <= -2 {
-        return RaceVerdict::Loss;
+    if tempo < -1 {
+        return RaceVerdict::Loss; // ≥2 tempo deficit, even a stm jump can't recover
     }
-    // |adv| ≤ 1 — overlap decides whether a jump can flip it.
+    // |tempo| ≤ 1: a jump can swing the result by ±1 tempo — overlap decides.
     if paths_overlap(g, &d0, &d1) {
         return RaceVerdict::NeedsProof;
     }
-    // Parallel race, pure tempo: stm wins iff our_dist ≤ opp_dist (adv ≥ 0).
-    if adv >= 0 {
-        RaceVerdict::Win
-    } else {
+    // Pure parallel race (no jump possible): stm moves first.
+    // tempo > 0: stm strictly closer → wins.
+    // tempo == 0: equal distance but stm spends 1 tempo first → wins.
+    // tempo < 0: opponent strictly closer → stm loses.
+    if tempo < 0 {
         RaceVerdict::Loss
+    } else {
+        RaceVerdict::Win
     }
 }
 

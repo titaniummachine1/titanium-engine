@@ -2,7 +2,9 @@
 
 use crate::core::board::Player;
 use crate::path::masks::DirMasks;
-use crate::util::grid::{flood_bit_sq, goal_row, pack_flood_mask, square_index, FLOOD_PLAYABLE, FLOOD_STRIDE};
+use crate::util::grid::{flood_bit_sq, goal_row, square_index, FLOOD_PLAYABLE, FLOOD_STRIDE};
+#[cfg(test)]
+use crate::util::grid::pack_flood_mask;
 
 #[inline]
 pub fn goal_square_mask(player: Player) -> u128 {

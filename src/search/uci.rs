@@ -105,6 +105,7 @@ fn handle_go(session: &mut GameSearchSession, parts: &[&str], stdout: &mut io::S
         log: true,
         book_hint: None,
         max_id_depth: max_depth,
+        cert_enabled: None,
     };
 
     match run_search(session, config) {

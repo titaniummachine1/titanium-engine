@@ -413,11 +413,11 @@ pub fn wall_should_search(
     reachable: u128,
     gap_zone: u128,
     board: &mut Board,
-    our_dist: u8,
-    opp_dist: u8,
+    _our_dist: u8,
+    _opp_dist: u8,
     opp_path: &[u8],
     opp_path_len: usize,
-    bfs: &mut BfsScratch,
+    _bfs: &mut BfsScratch,
 ) -> bool {
     if wall_in_dead_zone(mv, reachable) {
         return false;
@@ -982,7 +982,7 @@ pub fn order_moves(
 mod tests {
     use super::*;
     use crate::core::board::{Board, Player};
-    use crate::util::grid::{set_wall, wall_touch_squares};
+    use crate::util::grid::set_wall;
 
     #[test]
     fn cat_heat_fraction_and_lmr_scale_proportionally() {
@@ -1301,7 +1301,7 @@ mod tests {
         let board = Board::new();
         let mut bfs = BfsScratch::new();
         let cat = CorridorAttention::default();
-        let reachable = bfs.both_reachable_mask(&board);
+        let _reachable = bfs.both_reachable_mask(&board);
         let mut opp_path = [0u8; 81];
         let opp_path_len = get_shortest_path(&board, Player::Two, &mut bfs, &mut opp_path);
 

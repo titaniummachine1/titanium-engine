@@ -298,28 +298,6 @@ fn collect_wall_orientation(
     n
 }
 
-#[cfg(test)]
-fn is_legal_wall(
-    board: &Board,
-    row: u8,
-    col: u8,
-    orientation: WallOrientation,
-    ctx: &mut WallTrialCtx,
-) -> bool {
-    if !wall_physically_legal_o1(
-        board,
-        row,
-        col,
-        orientation == WallOrientation::Horizontal,
-    ) {
-        return false;
-    }
-    if !can_wall_block_topology(board, row, col, orientation) {
-        return true;
-    }
-    ctx.wall_keeps_paths_open(row, col, orientation)
-}
-
 /// Per-node wall-trial state: directional blocked-step grids + pawn flood bits.
 struct WallTrialCtx {
     grids: WallGrids,

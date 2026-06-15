@@ -78,8 +78,7 @@ fn detect_cache_bytes() -> Option<(usize, usize, usize)> {
         let mut l2 = 0usize;
         let mut l3 = 0usize;
         for sub in 0u32..64 {
-            // SAFETY: CPUID is always safe to call on x86_64.
-            let r = unsafe { std::arch::x86_64::__cpuid_count(4, sub) };
+            let r = std::arch::x86_64::__cpuid_count(4, sub);
             let cache_type = r.eax & 0x1f;
             if cache_type == 0 { break; } // no more caches
             let level = ((r.eax >> 5) & 0x7) as usize;

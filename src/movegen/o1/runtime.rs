@@ -184,22 +184,24 @@ pub fn prewarm() {
     #[cfg(target_arch = "x86_64")]
     {
         // CPUID leaf 7, sub-leaf 0: EBX bit 8 = BMI2 support.
-        // SAFETY: CPUID is always safe to call on x86_64.
-        let has_bmi2 = unsafe {
+        let has_bmi2 = {
             let r = std::arch::x86_64::__cpuid_count(7, 0);
             (r.ebx >> 8) & 1 != 0
         };
 
         // Case 1: CPU has BMI2 but binary was not compiled with it.
-        // The O1 pawn LUT falls back to the scalar packer — correct but slower.
+        // Build script should have caught this; belt-and-suspenders runtime banner.
         #[cfg(not(target_feature = "bmi2"))]
         if has_bmi2 {
-            eprintln!(
-                "WARNING [titanium/movegen]: CPU supports BMI2/PEXT but this binary \
-                 was NOT compiled with it. The O1 pawn lookup is running the scalar \
-                 fallback. Recompile with RUSTFLAGS='-C target-cpu=native' (or \
-                 '-C target-feature=+bmi2') for full PEXT speed."
-            );
+            eprintln!("\n\
+╔══════════════════════════════════════════════════════════════════════╗\n\
+║  TITANIUM RUNTIME WARNING — SUBOPTIMAL BINARY                        ║\n\
+║                                                                      ║\n\
+║  This CPU supports BMI2/PEXT but the binary was NOT compiled with    ║\n\
+║  it. The pawn lookup is running the scalar fallback (~4× slower).    ║\n\
+║                                                                      ║\n\
+║  Recompile:  RUSTFLAGS='-C target-cpu=native' cargo build --release  ║\n\
+╚══════════════════════════════════════════════════════════════════════╝\n");
         }
 
         // Case 2: binary compiled with BMI2 but CPU doesn't have it — will crash
@@ -217,7 +219,7 @@ pub fn prewarm() {
     }
 }
 
-/// Mirrors the embedded `wall_remap_byte` free function (kept for call-site parity).
+#[allow(dead_code)]
 #[inline]
 pub fn wall_remap_byte(sq: u8, enemy_key: u8, phys_combo: usize) -> u8 {
     tables().wall_remap_byte(sq, enemy_key, phys_combo)

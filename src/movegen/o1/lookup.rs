@@ -59,6 +59,7 @@ unsafe fn pack_wall_key_pext(board: &Board, sq: u8, enemy_key: u8) -> u8 {
     t.wall_remap_byte(sq, enemy_key, phys)
 }
 
+#[cfg_attr(all(target_arch = "x86_64", target_feature = "bmi2"), allow(dead_code))]
 fn pack_wall_key_scalar(board: &Board, sq: u8, enemy_key: u8) -> u8 {
     let t = tables();
     let nw = t.wall_slot_count[sq as usize][enemy_key as usize] as usize;
