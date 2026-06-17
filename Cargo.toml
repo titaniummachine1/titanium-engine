@@ -34,12 +34,13 @@ embed-tables = []
 # wasm-bindgen bindings for the website (build with:
 #   wasm-pack build --no-default-features --features wasm
 # or cargo build --lib --target wasm32-unknown-unknown --no-default-features --features wasm)
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
 rand = "0.8"
 rayon = { version = "1.10", optional = true }
 wasm-bindgen = { version = "=0.2.100", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 core_affinity = "0.8"

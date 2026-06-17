@@ -151,7 +151,15 @@ impl WasmEngine {
 
     /// Search; returns best move in algebraic notation, or "(none)".
     /// `max_nodes` is ignored — v15 uses wall-clock only (matches native session).
-    pub fn go(&mut self, movetime_ms: u32, _max_nodes: u32) -> String {
+    /// `on_progress` — optional JS callback receiving `info json` payloads during search.
+    pub fn go(
+        &mut self,
+        movetime_ms: u32,
+        _max_nodes: u32,
+        on_progress: Option<js_sys::Function>,
+    ) -> String {
+        self.search.set_wasm_progress(on_progress.clone());
+        let stream = on_progress.is_some();
         if self.search.g.winner() >= 0 {
             return "(none)".to_string();
         }
@@ -159,9 +167,10 @@ impl WasmEngine {
             (movetime_ms as u64).max(1),
             30,
             false,
-            false,
+            stream,
             &self.engine_label,
         );
+        self.search.set_wasm_progress(None);
         if result.mv == ACE_NO_MOVE {
             "(none)".to_string()
         } else {

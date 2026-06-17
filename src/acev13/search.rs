@@ -200,6 +200,48 @@ mod score_label_tests {
     }
 }
 
+fn ace_progress_json(
+    engine_label: &str,
+    depth_log: &[AceDepthLogEntry],
+    search_depth: i32,
+    nodes: u64,
+    root_score: i32,
+    white_dist: u8,
+    black_dist: u8,
+    elapsed_ms: u64,
+) -> String {
+    let mut depth_json = String::new();
+    for (i, e) in depth_log.iter().enumerate() {
+        if i > 0 {
+            depth_json.push(',');
+        }
+        const ESC_DQ: &str = "\\\"";
+        let pv = e.pv.replace('\\', "\\\\").replace('"', ESC_DQ);
+        let score_text = score_label(e.score);
+        depth_json.push_str(&format!(
+            r#"{{"depth":{},"score":{},"scoreText":"{}","nodes":{},"elapsedMs":{},"marginalNodes":{},"pv":"{}"}}"#,
+            e.depth, e.score, score_text, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
+        ));
+    }
+    let root_score_text = score_label(root_score);
+    format!(
+        r#"{{"engine":"{engine_label}","stoppedBy":"{engine_label}","searchDepth":{search_depth},"nodes":{nodes},"rootScore":{root_score},"rootScoreText":"{root_score_text}","whiteDist":{white_dist},"blackDist":{black_dist},"elapsedMs":{elapsed_ms},"depthLog":[{depth_json}]}}"#
+    )
+}
+
+#[cfg(feature = "wasm")]
+fn emit_ace_progress_wasm(
+    json: &str,
+    wasm_cb: Option<&js_sys::Function>,
+) {
+    if let Some(f) = wasm_cb {
+        let _ = f.call1(
+            &wasm_bindgen::JsValue::NULL,
+            &wasm_bindgen::JsValue::from_str(json),
+        );
+    }
+}
+
 fn emit_ace_progress(
     engine_label: &str,
     depth_log: &[AceDepthLogEntry],
@@ -209,34 +251,25 @@ fn emit_ace_progress(
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
+    #[cfg(feature = "wasm")] wasm_cb: Option<&js_sys::Function>,
 ) {
-    let mut depth_json = String::new();
-    for (i, e) in depth_log.iter().enumerate() {
-        if i > 0 {
-            depth_json.push(',');
-        }
-        let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
-        let score_text = score_label(e.score);
-        depth_json.push_str(&format!(
-            "{{\"depth\":{},\"score\":{},\"scoreText\":\"{}\",\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
-            e.depth, e.score, score_text, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
-        ));
-    }
-    let root_score_text = score_label(root_score);
-    eprintln!(
-        "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"depthLog\":[{}]}}",
+    let json = ace_progress_json(
         engine_label,
-        engine_label,
+        depth_log,
         search_depth,
         nodes,
         root_score,
-        root_score_text,
         white_dist,
         black_dist,
         elapsed_ms,
-        depth_json
     );
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    #[cfg(feature = "wasm")]
+    emit_ace_progress_wasm(&json, wasm_cb);
+    #[cfg(not(feature = "wasm"))]
+    {
+        eprintln!("info json {json}");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
 }
 
 /// RaceProof race-table LRU slots (keyed by wall-config zobrist).
@@ -390,6 +423,9 @@ pub struct AceSearch {
     stream_last_emit_nodes: u64,
     stream_last_emit_ms: u64,
     stream_last_best: i16,
+    /// GitHub Pages: live `info json` payloads forwarded to the browser worker.
+    #[cfg(feature = "wasm")]
+    wasm_progress: Option<js_sys::Function>,
 }
 
 /// Periodic progress cadence: every 64K nodes AND ≥ 100ms apart — stdout/stderr
@@ -500,7 +536,15 @@ impl AceSearch {
             stream_last_emit_nodes: 0,
             stream_last_emit_ms: 0,
             stream_last_best: 0,
+            #[cfg(feature = "wasm")]
+            wasm_progress: None,
         })
+    }
+
+    /// Wire browser progress callback (`go(..., on_progress)` on GitHub Pages).
+    #[cfg(feature = "wasm")]
+    pub fn set_wasm_progress(&mut self, cb: Option<js_sys::Function>) {
+        self.wasm_progress = cb;
     }
 
     /// Enable Early Move Extensions — same gates/tuning as graduated LMR, early indices.
@@ -961,6 +1005,8 @@ impl AceSearch {
             white_dist,
             black_dist,
             elapsed_ms,
+            #[cfg(feature = "wasm")]
+            self.wasm_progress.as_ref(),
         );
     }
 
@@ -2200,6 +2246,8 @@ impl AceSearch {
                         self.d0[self.dist0_idx][self.g.pawn[0]],
                         self.d1[self.dist1_idx][self.g.pawn[1]],
                         rt0.elapsed().as_millis() as u64,
+                        #[cfg(feature = "wasm")]
+                        self.wasm_progress.as_ref(),
                     );
                 }
                 return ThinkResult {
