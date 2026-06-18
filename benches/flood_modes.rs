@@ -1,4 +1,6 @@
-//! Flood-fill regime study: one-step PBFF (`expand_wave`) vs Kogge-Stone PBFF.
+//! Flood-fill regime study: one-step bitboard flood fill (`expand_wave` / `pbff_*`)
+//! vs Kogge–Stone occluded fill (`pbff_ks_*`). Same legality semantics; KS is a
+//! different shift-based implementation accelerator, not a different rule.
 //! Run: `cargo bench --bench flood_modes`
 //! Native (recommended): `$env:RUSTFLAGS='-C target-cpu=native'; cargo bench --bench flood_modes`
 //!

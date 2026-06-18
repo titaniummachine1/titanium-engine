@@ -1,11 +1,16 @@
 //! Movegen V11 wall-legality core — fixed port of the `quoridor_parallel_engine` POC.
 //!
+//! **Naming:** `pbff_*` = **p**arallel **b**itboard **f**lood **f**ill (binary flood fill /
+//! bitboard BFS) used for fast path-to-goal checks after tentative wall placements. It is
+//! standard flood fill on `u128` masks, not a separate search or NN subsystem.
+//!
 //! One u128 register holds the whole 9×9 board (centered 11-wide flood layout,
 //! shared with `path::flood`). Wall topology lives in four directional
 //! "step out of this square is blocked" bitboards, so a speculative wall trial
 //! is two OR/AND-NOT mask flips instead of a `DirMasks::from_board` rebuild.
-//! Legality of a wall is then a linear-time SIMD-style flood: every frontier
-//! cell expands in all four directions per iteration via four shifts.
+//! Legality of a wall is then a linear-time bitboard flood: every frontier
+//! cell expands in all four directions per iteration via four shifts (SIMD-style
+//! bit ops are an implementation accelerator, not a different legality rule).
 //!
 //! Fixes applied to the original POC:
 //! 1. Layout: 9 rows × 16-bit stride needs 144 bits — does not fit u128
@@ -183,7 +188,7 @@ pub fn expand_wave(wave: u128, grids: &WallGrids) -> u128 {
     (east | west | south | north) & FLOOD_PLAYABLE
 }
 
-/// Selfish flood with early goal exit. Returns (goal reached, visited bits) —
+/// Binary / bitboard flood fill to goal. Returns (goal reached, visited bits) —
 /// the visited set doubles as the history cache for the second player's run.
 #[inline]
 pub fn pbff_to_goal(start: u128, grids: &WallGrids, goal: u128) -> (bool, u128) {
@@ -202,9 +207,9 @@ pub fn pbff_to_goal(start: u128, grids: &WallGrids, goal: u128) -> (bool, u128) 
     (false, visited)
 }
 
-/// Second-player flood with bit theft: on first contact with the cached first-
-/// player region the whole region is annexed (and goal-tested — POC fix #4),
-/// so shared corridors are never re-flooded.
+/// Second-player bitboard flood with visited-bit reuse (“bit theft”): on first
+/// contact with the cached first-player region the whole region is annexed (and
+/// goal-tested — POC fix #4), so shared corridors are never re-flooded.
 #[inline]
 pub fn pbff_to_goal_cached(start: u128, cache: u128, grids: &WallGrids, goal: u128) -> bool {
     let mut visited = start & FLOOD_PLAYABLE;
@@ -231,8 +236,9 @@ pub fn pbff_to_goal_cached(start: u128, cache: u128, grids: &WallGrids, goal: u1
     false
 }
 
-/// Step 3 of the POC pipeline: Player 1 floods selfishly (filling the cache),
-/// Player 2 floods with bit theft. Either flood stagnating ⇒ illegal wall.
+/// Wall legality via binary flood fill: both players must reach their goal row
+/// after a tentative placement. Player 1 floods selfishly (filling the cache);
+/// player 2 floods with visited-bit reuse. Either flood stagnating ⇒ illegal wall.
 #[inline]
 pub fn pbff_wall_legal(p1_start: u128, p2_start: u128, grids: &WallGrids) -> bool {
     let (ok1, p1_visited) = pbff_to_goal(p1_start, grids, P1_GOAL_BITS);
@@ -271,9 +277,9 @@ pub fn pbff_wall_legal_board(board: &Board) -> bool {
 // iterations, while KS pays `KsProp::new` (24 shift/AND ops) TWICE per call
 // (P1 + P2, rebuilt per wall trial because each trial's delta changes the
 // propagators). The setup never amortises on a board this small. The remembered
-// "hundredfold" was KS vs the naive QUEUE BFS — but one-step PBFF is already a
-// parallel bitboard flood and captures that win. There is NO board-difficulty
-// crossover to adapt to on 9×9: `pbff_wall_legal` (one-step) wins everywhere.
+// "hundredfold" was KS vs the naive QUEUE BFS — but one-step bitboard flood fill
+// (`expand_wave` / `pbff_wall_legal`) already captures that win on 9×9. There is
+// NO board-difficulty crossover to adapt to on 9×9: `pbff_wall_legal` wins everywhere.
 // KS is kept, correct, and oracle-tested purely as a larger-board reference.
 //
 // Why no anti-wrap file masks are needed (the POC's ray-sweep bug does NOT apply):
@@ -366,7 +372,8 @@ impl KsProp {
     }
 }
 
-/// Occluded-fill twin of [`pbff_to_goal`].
+/// Alternative bitboard flood implementation (Kogge–Stone occluded fill). Same
+/// path-to-goal semantics as [`pbff_to_goal`]; kept for bench comparison only.
 #[inline]
 pub fn pbff_ks_to_goal(start: u128, grids: &WallGrids, goal: u128) -> (bool, u128) {
     let mut visited = start & FLOOD_PLAYABLE;
@@ -386,7 +393,7 @@ pub fn pbff_ks_to_goal(start: u128, grids: &WallGrids, goal: u128) -> (bool, u12
     }
 }
 
-/// Occluded-fill twin of [`pbff_to_goal_cached`] (Player 2, bit theft).
+/// Alternative implementation of [`pbff_to_goal_cached`] (Player 2, visited-bit reuse).
 #[inline]
 pub fn pbff_ks_to_goal_cached(start: u128, cache: u128, grids: &WallGrids, goal: u128) -> bool {
     let mut visited = start & FLOOD_PLAYABLE;
@@ -414,7 +421,7 @@ pub fn pbff_ks_to_goal_cached(start: u128, cache: u128, grids: &WallGrids, goal:
     }
 }
 
-/// Occluded-fill twin of [`pbff_wall_legal`].
+/// Alternative implementation of [`pbff_wall_legal`] (Kogge–Stone bench path only).
 #[inline]
 pub fn pbff_ks_wall_legal(p1_start: u128, p2_start: u128, grids: &WallGrids) -> bool {
     let (ok1, p1_visited) = pbff_ks_to_goal(p1_start, grids, P1_GOAL_BITS);

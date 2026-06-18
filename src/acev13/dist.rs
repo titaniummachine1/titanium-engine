@@ -1,8 +1,8 @@
-//! ACE-native distance fields via parallel bitmask flood (`path::distance`).
+//! ACE-native distance fields via parallel bitmask flood (`path::flood`).
 //!
 //! Floods run directly in ACE cell index (row 0 = top) using `DirMasks::from_ace_game`
 //! — no Titanium `Board` rebuild and no row-flip remap. Each layer is one
-//! `expand_frontier` u128 step (same PBFF family as CAT / movegen).
+//! `expand_frontier` u128 step (same binary / bitboard flood family as CAT / movegen `pbff_*`).
 
 use crate::acev13::game::AceGame;
 use crate::path::flood::expand_frontier;

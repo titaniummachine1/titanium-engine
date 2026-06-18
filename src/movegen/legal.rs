@@ -232,7 +232,7 @@ fn generate_wall_moves_slice(
     out: &mut [Move],
     _scratch: &mut BfsScratch,
 ) -> usize {
-    // Walls: L1 empty ∧ L2 collision → topo flood-skip → L3 parallel flood when needed.
+    // Walls: L1 empty ∧ L2 collision → topo flood-skip → L3 bitboard flood when needed.
     // Flood grids are built only if some candidate actually needs L3.
     let masks = wall_masks(board);
     let mut ctx: Option<WallTrialCtx> = None;
@@ -324,8 +324,8 @@ impl WallTrialCtx {
         }
     }
 
-    /// Speculative trial: place the wall's blocked-edge delta, flood both
-    /// players (P2 reuses P1's visited cache via bit theft), roll back.
+    /// Speculative trial: place the wall's blocked-edge delta, run binary flood fill
+    /// for both players (`pbff_wall_legal`; P2 reuses P1 visited bits), roll back.
     #[inline]
     fn wall_keeps_paths_open(&mut self, row: u8, col: u8, orientation: WallOrientation) -> bool {
         let delta = wall_delta(row, col, orientation);

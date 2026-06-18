@@ -7,7 +7,7 @@
 //! - L1: empty slot (`!horizontal_walls` / `!vertical_walls`)
 //! - L2: collision (overlap / cross / neighbor) — whole-board shifts
 //! - Topo: `can_wall_block_topology` — two-of-three anchor shifts (flood-skip opt)
-//! - L3: parallel flood + bit theft — `legal.rs`, lazy `WallTrialCtx`
+//! - L3: binary bitboard flood fill (`pbff_wall_legal`) — `legal.rs`, lazy `WallTrialCtx`
 
 use crate::core::board::{Board, Move, WallOrientation};
 use crate::util::grid::{has_wall, square_index};

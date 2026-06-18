@@ -1,4 +1,6 @@
-//! Reachability — bitwise flood fill and `BfsScratch` (no CAT logic here; see `cat`).
+//! Reachability — bitwise (bitboard) flood fill and `BfsScratch` (no CAT logic here; see `cat`).
+//!
+//! `parallel::pbff_*` = binary flood fill path-to-goal helpers for wall-legality trials.
 
 pub mod bfs;
 pub mod distance;

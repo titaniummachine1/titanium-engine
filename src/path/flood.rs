@@ -1,4 +1,5 @@
 //! Bitwise flood-fill primitives (centered 11-wide u128 layout).
+//! Shared building blocks for ACE distance fields and `parallel::pbff_*` wall trials.
 
 use crate::core::board::Player;
 use crate::path::masks::DirMasks;
