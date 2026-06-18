@@ -52,7 +52,7 @@ const TT_CLUSTER_BYTES: usize = TT_CLUSTER * 24;
 const DEFAULT_D4_BITS: usize = 18; // 24 MB — d4 measured optimal
 const DEFAULT_D5_BITS: usize = 22; // 384 MB — d5 measured optimal
 const DEFAULT_MAX_BITS: usize = 25; // 3.2 GB ceiling
-// Fallback tier bits used when CPUID detection is unavailable (non-x86 etc.).
+                                    // Fallback tier bits used when CPUID detection is unavailable (non-x86 etc.).
 const FALLBACK_START_BITS: usize = 9;
 const FALLBACK_L2_BITS: usize = 11;
 const FALLBACK_L3_BITS: usize = 16;
@@ -80,10 +80,14 @@ fn detect_cache_bytes() -> Option<(usize, usize, usize)> {
         for sub in 0u32..64 {
             let r = std::arch::x86_64::__cpuid_count(4, sub);
             let cache_type = r.eax & 0x1f;
-            if cache_type == 0 { break; } // no more caches
+            if cache_type == 0 {
+                break;
+            } // no more caches
             let level = ((r.eax >> 5) & 0x7) as usize;
             let is_data = (cache_type & 1) != 0; // 1=data, 3=unified
-            if !is_data { continue; }
+            if !is_data {
+                continue;
+            }
             let line_size = ((r.ebx & 0xfff) + 1) as usize;
             let partitions = (((r.ebx >> 12) & 0x3ff) + 1) as usize;
             let ways = (((r.ebx >> 22) & 0x3ff) + 1) as usize;
@@ -91,12 +95,14 @@ fn detect_cache_bytes() -> Option<(usize, usize, usize)> {
             let size = line_size * partitions * ways * sets;
             match level {
                 1 if l1d == 0 => l1d = size,
-                2 if l2 == 0  => l2  = size,
-                3 if l3 == 0  => l3  = size,
+                2 if l2 == 0 => l2 = size,
+                3 if l3 == 0 => l3 = size,
                 _ => {}
             }
         }
-        if l1d > 0 && l2 > 0 && l3 > 0 { return Some((l1d, l2, l3)); }
+        if l1d > 0 && l2 > 0 && l3 > 0 {
+            return Some((l1d, l2, l3));
+        }
     }
     None
 }
@@ -130,8 +136,8 @@ pub fn cache_tier_bits(entry_bytes: usize) -> (usize, usize, usize) {
 fn tier_bits() -> (usize, usize, usize) {
     if let Some((l1d, l2, l3)) = detect_cache_bytes() {
         let start = cache_to_bits(l1d);
-        let l2b   = cache_to_bits(l2).max(start + 1);
-        let l3b   = cache_to_bits(l3).max(l2b + 1);
+        let l2b = cache_to_bits(l2).max(start + 1);
+        let l3b = cache_to_bits(l3).max(l2b + 1);
         return (start, l2b, l3b);
     }
     (FALLBACK_START_BITS, FALLBACK_L2_BITS, FALLBACK_L3_BITS)
@@ -161,7 +167,9 @@ struct Cluster {
 
 impl Default for Cluster {
     fn default() -> Self {
-        Self { entries: [Entry::default(); TT_CLUSTER] }
+        Self {
+            entries: [Entry::default(); TT_CLUSTER],
+        }
     }
 }
 
@@ -181,7 +189,9 @@ pub struct TranspositionTable {
 }
 
 impl Default for TranspositionTable {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn env_bits(name: &str) -> Option<usize> {
@@ -208,8 +218,10 @@ impl TranspositionTable {
 
     fn make(
         bits: usize,
-        l2_bits: usize, l3_bits: usize,
-        d4_bits: usize, d5_bits: usize,
+        l2_bits: usize,
+        l3_bits: usize,
+        d4_bits: usize,
+        d5_bits: usize,
         max_bits: usize,
         adaptive: bool,
     ) -> Self {
@@ -219,7 +231,10 @@ impl TranspositionTable {
             mask: size - 1,
             bits,
             filled: 0,
-            l2_bits, l3_bits, d4_bits, d5_bits,
+            l2_bits,
+            l3_bits,
+            d4_bits,
+            d5_bits,
             max_bits,
             adaptive,
         }
@@ -279,12 +294,22 @@ impl TranspositionTable {
         for (i, entry) in cluster.entries.iter().enumerate() {
             if entry.key == key && entry.verify == verify {
                 if entry.depth <= depth {
-                    cluster.entries[i] = Entry { key, nodes, verify, depth };
+                    cluster.entries[i] = Entry {
+                        key,
+                        nodes,
+                        verify,
+                        depth,
+                    };
                 }
                 return false;
             }
             if entry.key == 0 {
-                cluster.entries[i] = Entry { key, nodes, verify, depth };
+                cluster.entries[i] = Entry {
+                    key,
+                    nodes,
+                    verify,
+                    depth,
+                };
                 return true;
             }
             if entry.depth < shallowest {
@@ -292,7 +317,12 @@ impl TranspositionTable {
                 replace = i;
             }
         }
-        cluster.entries[replace] = Entry { key, nodes, verify, depth };
+        cluster.entries[replace] = Entry {
+            key,
+            nodes,
+            verify,
+            depth,
+        };
         false
     }
 

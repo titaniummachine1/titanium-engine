@@ -15,7 +15,5 @@ pub mod viz_build;
 
 pub use attention::CorridorAttention;
 pub use constants::{CAT_COLD_CM, CAT_CORRIDOR_CM, CAT_HOT_CM, DIST_PENALTY};
-pub use prune::{
-    collect_search_moves, move_corridor_attention, wall_net_race, wall_should_search,
-};
+pub use prune::{collect_search_moves, move_corridor_attention, wall_net_race, wall_should_search};
 pub use viz::cat_snapshot_json;

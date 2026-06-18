@@ -154,18 +154,18 @@ mod tests {
 
     #[test]
     fn wall_masks_agrees_with_split_masks() {
-        let boards = [
-            Board::new(),
-            {
-                let mut b = Board::new();
-                b.horizontal_walls = 0x00_00_0A_00_14_00;
-                b.vertical_walls = 0x01_02_04_00;
-                b
-            },
-        ];
+        let boards = [Board::new(), {
+            let mut b = Board::new();
+            b.horizontal_walls = 0x00_00_0A_00_14_00;
+            b.vertical_walls = 0x01_02_04_00;
+            b
+        }];
         for b in &boards {
             let m = wall_masks(b);
-            assert_eq!(m.l12_h, !b.horizontal_walls & wall_collision_clear_h_mask(b));
+            assert_eq!(
+                m.l12_h,
+                !b.horizontal_walls & wall_collision_clear_h_mask(b)
+            );
             assert_eq!(m.l12_v, !b.vertical_walls & wall_collision_clear_v_mask(b));
             assert_eq!(m.topo_h, wall_needs_flood_h_mask(b));
             assert_eq!(m.topo_v, wall_needs_flood_v_mask(b));
@@ -174,15 +174,12 @@ mod tests {
 
     #[test]
     fn collision_clear_mask_matches_scalar() {
-        let boards = [
-            Board::new(),
-            {
-                let mut b = Board::new();
-                b.horizontal_walls = 0x00_00_0A_00_14_00;
-                b.vertical_walls = 0x01_02_04_00;
-                b
-            },
-        ];
+        let boards = [Board::new(), {
+            let mut b = Board::new();
+            b.horizontal_walls = 0x00_00_0A_00_14_00;
+            b.vertical_walls = 0x01_02_04_00;
+            b
+        }];
         for b in &boards {
             assert_eq!(
                 wall_collision_clear_h_mask(b),

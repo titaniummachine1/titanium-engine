@@ -43,7 +43,10 @@ fn main() {
     let modes = [
         (PawnGenMode::ShiftCanStep, "shift_can_step (SHIPPED)"),
         (PawnGenMode::O1Lookup, "o1_full_lut"),
-        (PawnGenMode::O1LeanLut, "o1_lean_lut (ek=0→shift, ek≠0→table)"),
+        (
+            PawnGenMode::O1LeanLut,
+            "o1_lean_lut (ek=0→shift, ek≠0→table)",
+        ),
     ];
 
     let oracle = {

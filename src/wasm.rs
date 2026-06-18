@@ -12,11 +12,7 @@ use crate::acev13::{
     ace_genmove, ace_to_algebraic, algebraic_to_ace, AceGame, AceParams, AceSearch, ACE_NO_MOVE,
 };
 
-fn acev13_params_from_mode(
-    engine_mode: &str,
-    movetime_ms: u32,
-    max_depth: i32,
-) -> AceParams {
+fn acev13_params_from_mode(engine_mode: &str, movetime_ms: u32, max_depth: i32) -> AceParams {
     let ti_movegen = engine_mode.contains("-ti") || engine_mode == "ace-v13";
     let eme = engine_mode.contains("pmc");
     AceParams {
@@ -30,7 +26,11 @@ fn acev13_params_from_mode(
     }
 }
 
-fn ace_params_from_mode(engine_mode: &str, movetime_ms: u32, max_depth: i32) -> crate::ace::AceParams {
+fn ace_params_from_mode(
+    engine_mode: &str,
+    movetime_ms: u32,
+    max_depth: i32,
+) -> crate::ace::AceParams {
     let ti_movegen = engine_mode.contains("-ti");
     let eme = engine_mode.contains("pmc");
     crate::ace::AceParams {
@@ -52,7 +52,9 @@ fn replay_moves(moves: &str) -> Result<AceGame, JsError> {
     let mut g = AceGame::new();
     for text in moves.split_whitespace().filter(|s| !s.is_empty()) {
         if g.winner() >= 0 {
-            return Err(JsError::new(&format!("illegal replay past terminal: {text}")));
+            return Err(JsError::new(&format!(
+                "illegal replay past terminal: {text}"
+            )));
         }
         g.make_move(algebraic_to_ace(text));
     }
@@ -116,10 +118,7 @@ impl WasmEngine {
                 "titanium-v15-frozen".to_string(),
             )
         } else {
-            (
-                *AceSearch::grafted(g, None),
-                "titanium-v15".to_string(),
-            )
+            (*AceSearch::grafted(g, None), "titanium-v15".to_string())
         };
         WasmEngine {
             search,
@@ -186,6 +185,10 @@ impl WasmEngine {
     /// -1 = ongoing; 0/1 = winner player index.
     pub fn winner(&self) -> i32 {
         let w = self.search.g.winner();
-        if w < 0 { -1 } else { w }
+        if w < 0 {
+            -1
+        } else {
+            w
+        }
     }
 }

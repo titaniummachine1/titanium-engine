@@ -84,10 +84,18 @@ pub fn generate_pawn_moves_bitboard_with_masks(
     let opp = flood_bit_sq(square_index(or, oc));
     let mut n = 0usize;
 
-    axis_moves(from, opp, masks, step_north, step_west, step_east, out, &mut n);
-    axis_moves(from, opp, masks, step_south, step_west, step_east, out, &mut n);
-    axis_moves(from, opp, masks, step_east, step_north, step_south, out, &mut n);
-    axis_moves(from, opp, masks, step_west, step_north, step_south, out, &mut n);
+    axis_moves(
+        from, opp, masks, step_north, step_west, step_east, out, &mut n,
+    );
+    axis_moves(
+        from, opp, masks, step_south, step_west, step_east, out, &mut n,
+    );
+    axis_moves(
+        from, opp, masks, step_east, step_north, step_south, out, &mut n,
+    );
+    axis_moves(
+        from, opp, masks, step_west, step_north, step_south, out, &mut n,
+    );
 
     n
 }

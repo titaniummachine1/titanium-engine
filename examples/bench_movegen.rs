@@ -16,13 +16,21 @@ fn main() {
         total += perft_fast(&mut b, 3);
     }
     let dt = start.elapsed();
-    println!("perft d3 x15 canta: {} nodes in {:?} ({:.2} Mnodes/s)",
-        total, dt, total as f64 / dt.as_secs_f64() / 1e6);
+    println!(
+        "perft d3 x15 canta: {} nodes in {:?} ({:.2} Mnodes/s)",
+        total,
+        dt,
+        total as f64 / dt.as_secs_f64() / 1e6
+    );
 
     let start = Instant::now();
     let mut b = titanium::core::board::Board::new();
     let n = perft_fast(&mut b, 4);
     let dt = start.elapsed();
-    println!("perft d4 startpos: {} nodes in {:?} ({:.2} Mnodes/s)",
-        n, dt, n as f64 / dt.as_secs_f64() / 1e6);
+    println!(
+        "perft d4 startpos: {} nodes in {:?} ({:.2} Mnodes/s)",
+        n,
+        dt,
+        n as f64 / dt.as_secs_f64() / 1e6
+    );
 }

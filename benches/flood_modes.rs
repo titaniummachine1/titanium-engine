@@ -22,10 +22,12 @@
 use std::time::Instant;
 
 use titanium::core::board::Board;
+use titanium::core::board::WallOrientation;
 use titanium::movegen::o1::{wall_masks, WallMasks};
 use titanium::oracle::canta::board_after_canta_game;
-use titanium::path::parallel::{pbff_ks_wall_legal, pbff_wall_legal, pawn_bit, wall_delta, WallGrids};
-use titanium::core::board::WallOrientation;
+use titanium::path::parallel::{
+    pawn_bit, pbff_ks_wall_legal, pbff_wall_legal, wall_delta, WallGrids,
+};
 
 /// A precomputed flood trial: base grids with one candidate wall's delta applied.
 struct Trial {
@@ -150,7 +152,10 @@ fn main() {
     let mut regimes = Vec::new();
     regimes.push(make_regime("startpos".to_string(), &Board::new()));
     for g in 0..15 {
-        regimes.push(make_regime(format!("canta-g{g:02}"), &board_after_canta_game(g)));
+        regimes.push(make_regime(
+            format!("canta-g{g:02}"),
+            &board_after_canta_game(g),
+        ));
     }
 
     const PASSES: u32 = 20_000;
@@ -180,7 +185,13 @@ fn main() {
         };
         println!(
             "| {} | {} | {} | {:.1} | {:.1} | {:.3}x | {} |",
-            r.name, r.walls_on_board, r.hot.len(), step_ns, ks_ns, speedup, winner
+            r.name,
+            r.walls_on_board,
+            r.hot.len(),
+            step_ns,
+            ks_ns,
+            speedup,
+            winner
         );
     }
 

@@ -1,7 +1,7 @@
 //! Perft — ACE v7 native movegen vs Titanium `movegen` / `perft_fast`.
 
-use std::sync::mpsc;
 use crate::util::clock::{Duration, Instant};
+use std::sync::mpsc;
 
 use crate::ace::game::AceGame;
 use crate::ace::search::board_move_to_ace;
@@ -137,7 +137,11 @@ pub fn perft_ace_ti_timed(depth: u32, timeout: Duration) -> TimedPerftResult {
     perft_titanium_timed_with_label("ace-ti-movegen", depth, timeout)
 }
 
-fn perft_titanium_timed_with_label(label: &'static str, depth: u32, timeout: Duration) -> TimedPerftResult {
+fn perft_titanium_timed_with_label(
+    label: &'static str,
+    depth: u32,
+    timeout: Duration,
+) -> TimedPerftResult {
     run_timed(label, depth, timeout, move || {
         let mut board = Board::new();
         perft_fast(&mut board, depth)

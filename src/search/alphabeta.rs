@@ -1,7 +1,7 @@
 //! Iterative-deepening αβ with aspiration windows, LMR, and TT.
 
-use std::io::Write;
 use crate::util::clock::Instant;
+use std::io::Write;
 
 use crate::cat::constants::DIST_PENALTY;
 use crate::cat::prune::OrderExtras;
@@ -708,7 +708,10 @@ fn endgame_cert_floor(
     }
 
     // ── 1–2 walls: v13 certificate (sound, incomplete), tempo-gated ──────────
-    let our_dist = state.bfs.shortest_distance(board, stm).unwrap_or(DIST_PENALTY);
+    let our_dist = state
+        .bfs
+        .shortest_distance(board, stm)
+        .unwrap_or(DIST_PENALTY);
     let opp_dist = state
         .bfs
         .shortest_distance(board, stm.opposite())
@@ -2030,7 +2033,10 @@ mod tests {
         // Sanity: static eval really is near-even (the gate requires |eval|<3000).
         let mut bfs = BfsScratch::new();
         let se = eval_stm(&board, Player::One, &mut bfs);
-        assert!(se.abs() < 3000, "precondition: near-even static eval, got {se}");
+        assert!(
+            se.abs() < 3000,
+            "precondition: near-even static eval, got {se}"
+        );
 
         let config = SearchConfig {
             time_ms: 5_000,

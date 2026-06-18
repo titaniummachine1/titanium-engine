@@ -8,14 +8,13 @@ use crate::search::deprecated::mcts::MctsConfig;
 
 pub use crate::search::deprecated::mcts::DEFAULT_MAX_SIMULATIONS as MCTS_DEFAULT_MAX_SIMULATIONS;
 pub use crate::search::deprecated::mcts::DEFAULT_UCT as MCTS_DEFAULT_UCT;
-pub use crate::search::pipeline::{lmr_stage_inputs, search_phase, walls_placed, LmrStageInputs, SearchPhase};
+pub use crate::search::pipeline::{
+    lmr_stage_inputs, search_phase, walls_placed, LmrStageInputs, SearchPhase,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenmoveEngine {
-    #[deprecated(
-        since = "0.2.0",
-        note = "MCTS is inactive; routes silently to negamax"
-    )]
+    #[deprecated(since = "0.2.0", note = "MCTS is inactive; routes silently to negamax")]
     Mcts,
     Minimax,
     Greedy,

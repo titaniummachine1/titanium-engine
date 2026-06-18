@@ -123,9 +123,7 @@ fn wall_bits_hash(bits: u64, table: &[u64; 64]) -> u64 {
 #[inline]
 pub fn pawn_move_delta(player: usize, from: (u8, u8), to: (u8, u8)) -> u64 {
     let k = keys();
-    k.pawn[player][pawn_sq(from.0, from.1)]
-        ^ k.pawn[player][pawn_sq(to.0, to.1)]
-        ^ k.side_to_move
+    k.pawn[player][pawn_sq(from.0, from.1)] ^ k.pawn[player][pawn_sq(to.0, to.1)] ^ k.side_to_move
 }
 
 /// Full hash delta for a wall move: slot in, walls_left `n → n-1`, side flip.

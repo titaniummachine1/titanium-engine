@@ -31,7 +31,13 @@ struct Stats {
     no_flood_ns: u128,
 }
 
-fn count_flood_outcomes(board: &mut Board, candidates: u64, topo: u64, orientation: WallOrientation, s: &mut Stats) {
+fn count_flood_outcomes(
+    board: &mut Board,
+    candidates: u64,
+    topo: u64,
+    orientation: WallOrientation,
+    s: &mut Stats,
+) {
     let mut heavy = candidates & topo;
     while heavy != 0 {
         let bit = heavy.trailing_zeros();
@@ -53,7 +59,8 @@ fn walk(board: &mut Board, depth: u32, bfs: &mut BfsScratch, s: &mut Stats) {
         s.wall_nodes += 1;
         let m = wall_masks(board);
         s.candidates += (m.l12_h.count_ones() + m.l12_v.count_ones()) as u64;
-        s.flood_needed += ((m.l12_h & m.topo_h).count_ones() + (m.l12_v & m.topo_v).count_ones()) as u64;
+        s.flood_needed +=
+            ((m.l12_h & m.topo_h).count_ones() + (m.l12_v & m.topo_v).count_ones()) as u64;
         count_flood_outcomes(board, m.l12_h, m.topo_h, WallOrientation::Horizontal, s);
         count_flood_outcomes(board, m.l12_v, m.topo_v, WallOrientation::Vertical, s);
 
@@ -104,7 +111,8 @@ fn report(label: &str, board: &Board, depth: u32) {
     let cand_per_node = s.candidates as f64 / s.wall_nodes.max(1) as f64;
     let flood_pct = 100.0 * s.flood_needed as f64 / s.candidates.max(1) as f64;
     let reject_pct = 100.0 * s.flood_rejected as f64 / s.flood_needed.max(1) as f64;
-    let l3_share = 100.0 * (s.full_ns.saturating_sub(s.no_flood_ns)) as f64 / s.full_ns.max(1) as f64;
+    let l3_share =
+        100.0 * (s.full_ns.saturating_sub(s.no_flood_ns)) as f64 / s.full_ns.max(1) as f64;
     println!(
         "| {label} | {walls_on} | {} | {cand_per_node:.1} | {flood_pct:.1}% | {reject_pct:.1}% | {l3_share:.0}% |",
         s.nodes
@@ -123,6 +131,10 @@ fn main() {
 
     report("startpos", &Board::new(), depth);
     for game in 0..15 {
-        report(&format!("canta{game:02}"), &board_after_canta_game(game), depth);
+        report(
+            &format!("canta{game:02}"),
+            &board_after_canta_game(game),
+            depth,
+        );
     }
 }

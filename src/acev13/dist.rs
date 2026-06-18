@@ -84,6 +84,89 @@ pub fn fill_corridor_delta(from: &[u8; 81], to: &[u8; 81], shortest: u8, out: &m
     }
 }
 
+/// Build sparse shortest-route and one-tempo-alternative masks.
+pub fn fill_route_masks(
+    from: &[u8; 81],
+    to: &[u8; 81],
+    shortest: u8,
+    route: &mut [u8; 81],
+    near: &mut [u8; 81],
+) {
+    route.fill(0);
+    near.fill(0);
+    if shortest == 255 {
+        return;
+    }
+    for i in 0..81 {
+        if from[i] == 255 || to[i] == 255 {
+            continue;
+        }
+        let total = u16::from(from[i]) + u16::from(to[i]);
+        if total == u16::from(shortest) {
+            route[i] = 1;
+        } else if total == u16::from(shortest) + 1 {
+            near[i] = 1;
+        }
+    }
+}
+
+pub fn fill_distance_layers(to_goal: &[u8; 81], layers: &mut [u128; 81]) {
+    layers.fill(0);
+    for sq in 0..81u8 {
+        let d = to_goal[sq as usize];
+        if d != 255 {
+            layers[d as usize] |= flood_bit_sq(sq);
+        }
+    }
+}
+
+pub fn shortest_route_bits(
+    pawn: usize,
+    shortest: u8,
+    layers: &[u128; 81],
+    masks: DirMasks,
+) -> u128 {
+    if shortest == 255 {
+        return 0;
+    }
+    let mut frontier = flood_bit_sq(pawn as u8);
+    let mut route = frontier;
+    for d in (1..=shortest as usize).rev() {
+        frontier = expand_frontier(frontier, masks) & layers[d - 1];
+        route |= frontier;
+    }
+    route
+}
+
+/// Shortest-route support via bit-parallel frontier expansion over decreasing
+/// goal-distance layers. `flank` is the one-step neighborhood outside that
+/// support (the grid's +2-tempo alternatives). No forward distance scatter is
+/// needed, which keeps this suitable for every leaf evaluation.
+pub fn fill_sparse_route_masks(
+    g: &AceGame,
+    pawn: usize,
+    to_goal: &[u8; 81],
+    route: &mut [u8; 81],
+    flank: &mut [u8; 81],
+) {
+    route.fill(0);
+    flank.fill(0);
+    let shortest = to_goal[pawn];
+    if shortest == 255 {
+        return;
+    }
+    let masks = DirMasks::from_ace_game(g);
+    let mut layers = [0u128; 81];
+    fill_distance_layers(to_goal, &mut layers);
+    let route_bits = shortest_route_bits(pawn, shortest, &layers, masks);
+    let flank_bits = expand_frontier(route_bits, masks) & !route_bits & FLOOD_PLAYABLE;
+    for sq in 0..81u8 {
+        let bit = flood_bit_sq(sq);
+        route[sq as usize] = u8::from(route_bits & bit != 0);
+        flank[sq as usize] = u8::from(flank_bits & bit != 0);
+    }
+}
+
 fn neighbor_squares(sq: u8, masks: DirMasks, out: &mut [u8; 4]) -> usize {
     let bit = flood_bit_sq(sq);
     let mut n = 0usize;
@@ -219,7 +302,7 @@ pub fn fill_path_crossing(
             let mut sum = 0u16;
             for &next in &neighbors[..n] {
                 let q = next as usize;
-                if dist_to[q] + 1 == d && dist_from[q] + 1 == dist_from[sq] && on_route(q) {
+                if dist_to[q] + 1 == d && dist_from[sq] + 1 == dist_from[q] && on_route(q) {
                     sum = sum.saturating_add(bwd[q]);
                 }
             }
@@ -330,7 +413,8 @@ mod tests {
         let s = goal[g.pawn[0]];
         let mut cross = [0u8; 81];
         fill_path_crossing(&g, &from, &goal, s, &mut cross);
-        assert!(cross.iter().any(|&v| v > 0));
+        assert!(cross.iter().filter(|&&v| v > 0).count() >= 9);
+        assert!(cross[g.pawn[0]] > 0);
         let g2 = pos(&["e2", "e8", "e3", "e7", "d4h"]);
         let mut goal2 = [0u8; 81];
         let mut from2 = [0u8; 81];
@@ -342,6 +426,50 @@ mod tests {
             cross2.iter().any(|&v| v > 1),
             "wall should create multi-path hot spots"
         );
+    }
+
+    #[test]
+    fn sparse_route_masks_partition_short_and_plus_one_cells() {
+        let g = AceGame::new();
+        let mut goal = [0u8; 81];
+        let mut from = [0u8; 81];
+        fill_ace_dist_to_goal(&g, 0, &mut goal);
+        fill_ace_dist_from_pawn(&g, g.pawn[0], &mut from);
+        let mut route = [0u8; 81];
+        let mut near = [0u8; 81];
+        fill_route_masks(&from, &goal, goal[g.pawn[0]], &mut route, &mut near);
+        for i in 0..81 {
+            assert_eq!(route[i] & near[i], 0);
+        }
+        assert_eq!(route[g.pawn[0]], 1);
+        assert!(route.iter().sum::<u8>() >= 9);
+    }
+
+    #[test]
+    fn bit_sparse_route_matches_exact_shortest_support() {
+        let g = pos(&["e2", "e8", "e3", "e7", "d4h"]);
+        for player in [0usize, 1] {
+            let mut goal = [0u8; 81];
+            let mut from = [0u8; 81];
+            fill_ace_dist_to_goal(&g, player, &mut goal);
+            fill_ace_dist_from_pawn(&g, g.pawn[player], &mut from);
+            let mut expected = [0u8; 81];
+            let mut plus_one = [0u8; 81];
+            fill_route_masks(
+                &from,
+                &goal,
+                goal[g.pawn[player]],
+                &mut expected,
+                &mut plus_one,
+            );
+            let mut route = [0u8; 81];
+            let mut flank = [0u8; 81];
+            fill_sparse_route_masks(&g, g.pawn[player], &goal, &mut route, &mut flank);
+            assert_eq!(route, expected);
+            for i in 0..81 {
+                assert_eq!(route[i] & flank[i], 0);
+            }
+        }
     }
 
     #[test]
@@ -377,6 +505,9 @@ mod tests {
         fill_corridor_delta(&from1, &goal1, goal1[g.pawn[1]], &mut delta1);
         let mut contested = [0u8; 81];
         fill_contested(&delta0, &delta1, &mut contested);
-        assert!(contested.iter().any(|&v| v == 16), "startpos has fully contested corridor cells");
+        assert!(
+            contested.iter().any(|&v| v == 16),
+            "startpos has fully contested corridor cells"
+        );
     }
 }

@@ -7,7 +7,9 @@
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use titanium::{perft_fast_mode, perft_no_tt_mode, Board, PawnGenMode, PERFT3_STARTPOS, PERFT4_STARTPOS};
+use titanium::{
+    perft_fast_mode, perft_no_tt_mode, Board, PawnGenMode, PERFT3_STARTPOS, PERFT4_STARTPOS,
+};
 
 const PERFT5_STARTPOS: u64 = 28_837_934_502;
 const TIMEOUT: Duration = Duration::from_secs(20);

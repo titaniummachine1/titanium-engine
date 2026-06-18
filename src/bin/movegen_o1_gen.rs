@@ -9,8 +9,8 @@ mod movegen_o1;
 use std::path::PathBuf;
 
 fn main() {
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/movegen/o1/generated_tables_data.rs");
+    let out =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/movegen/o1/generated_tables_data.rs");
     eprintln!("movegen-o1-gen → {}", out.display());
     movegen_o1::generate(&out);
     eprintln!("done.");

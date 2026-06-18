@@ -54,10 +54,10 @@ pub use search::{
     WorkerContext, DEFAULT_MAX_NODES, DEFAULT_TIME_MS, MCTS_DEFAULT_MAX_SIMULATIONS,
     MCTS_DEFAULT_UCT,
 };
-pub use util::perft::{
-    format_move, perft, perft_divide, perft_fast, perft_fast_ctx, perft_fast_mode,
-    perft_fast_mode_ctx, perft_iterative, perft_naive,
-    perft_no_tt_mode, perft_pawn_only_mode, PerftContext, PERFT3_STARTPOS, PERFT4_STARTPOS,
-};
 #[cfg(feature = "parallel")]
 pub use util::perft::perft_parallel_root;
+pub use util::perft::{
+    format_move, perft, perft_divide, perft_fast, perft_fast_ctx, perft_fast_mode,
+    perft_fast_mode_ctx, perft_iterative, perft_naive, perft_no_tt_mode, perft_pawn_only_mode,
+    PerftContext, PERFT3_STARTPOS, PERFT4_STARTPOS,
+};

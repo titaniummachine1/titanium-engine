@@ -17,8 +17,8 @@ pub const WSKIP_LEN: usize = 16;
 const W1C_LEN: usize = 9 * 128 * NET_H;
 const PO_LEN: usize = 81 * NET_H;
 const PX_LEN: usize = 81 * NET_H;
-const FIELD_PLANE_LEN: usize = 81 * NET_H;
-const FIELD_PLANE_SETS: usize = 11;
+const FIELD_PLANE_LEN: usize = 81;
+const FIELD_PLANE_SETS: usize = 5;
 pub const NET_WEIGHT_F64S: usize =
     WSKIP_LEN + NET_H + NET_H + W1C_LEN + PO_LEN + PX_LEN + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
@@ -30,28 +30,13 @@ pub struct Net {
     pub w1c: Vec<f64>,
     pub po: Vec<f64>,
     pub px: Vec<f64>,
-    /// Inverse goal distance field, player 0 (ACE cells).
-    pub goal_inv_p0: Vec<f64>,
-    /// Inverse goal distance field, player 1.
-    pub goal_inv_p1: Vec<f64>,
-    /// Steps-from-pawn field, player 0.
-    pub pawn_fwd_p0: Vec<f64>,
-    /// Steps-from-pawn field, player 1.
-    pub pawn_fwd_p1: Vec<f64>,
-    /// Corridor delta (multi-path band), player 0.
-    pub corridor_delta_p0: Vec<f64>,
-    /// Corridor delta, player 1.
-    pub corridor_delta_p1: Vec<f64>,
-    /// Path-crossing count (route overlap), player 0.
-    pub path_cross_p0: Vec<f64>,
-    /// Path-crossing count, player 1.
-    pub path_cross_p1: Vec<f64>,
-    /// Route forcedness (1/(1+forward_continuations)), player 0.
-    pub choke_p0: Vec<f64>,
-    /// Route forcedness, player 1.
-    pub choke_p1: Vec<f64>,
-    /// Square on both players' shortest-route families.
-    pub contested: Vec<f64>,
+    /// Sparse route embeddings, canonicalized to side-to-move coordinates.
+    pub route_me: Vec<f64>,
+    pub route_opp: Vec<f64>,
+    pub route_near_me: Vec<f64>,
+    pub route_near_opp: Vec<f64>,
+    pub route_contested: Vec<f64>,
+    pub route_active: bool,
 }
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(count);
@@ -75,17 +60,18 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
     let w1c = read_f64s(bytes, &mut offset, W1C_LEN);
     let po = read_f64s(bytes, &mut offset, PO_LEN);
     let px = read_f64s(bytes, &mut offset, PX_LEN);
-    let goal_inv_p0 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let goal_inv_p1 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let pawn_fwd_p0 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let pawn_fwd_p1 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let corridor_delta_p0 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let corridor_delta_p1 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let path_cross_p0 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let path_cross_p1 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let choke_p0 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let choke_p1 = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_near_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_active = route_me
+        .iter()
+        .chain(&route_opp)
+        .chain(&route_near_me)
+        .chain(&route_near_opp)
+        .chain(&route_contested)
+        .any(|&w| w != 0.0);
     Net {
         ws: ws_v.try_into().unwrap(),
         b1: b1_v.try_into().unwrap(),
@@ -93,17 +79,12 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         w1c,
         po,
         px,
-        goal_inv_p0,
-        goal_inv_p1,
-        pawn_fwd_p0,
-        pawn_fwd_p1,
-        corridor_delta_p0,
-        corridor_delta_p1,
-        path_cross_p0,
-        path_cross_p1,
-        choke_p0,
-        choke_p1,
-        contested,
+        route_me,
+        route_opp,
+        route_near_me,
+        route_near_opp,
+        route_contested,
+        route_active,
     }
 }
 /// Training / deployed weights (`net_weights.bin`).

@@ -518,6 +518,7 @@ dependencies = [
  "core_affinity",
  "criterion",
  "getrandom",
+ "js-sys",
  "rand",
  "rayon",
  "wasm-bindgen",

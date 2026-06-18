@@ -112,10 +112,16 @@ pub fn generate(out_path: &Path) {
     // bit row*8+col in h_mask / v_mask matches board.horizontal_walls / vertical_walls layout.
     writeln!(w, "pub const PAWN_H_PEXT_MASK: [[u64; 5]; 81] = [").unwrap();
     for p in &pawn {
-        let row: Vec<u64> = p.layers.iter().map(|l| {
-            l.wall_bits.iter().filter(|&&(_, _, h)| h)
-                .fold(0u64, |m, &(r, c, _)| m | 1u64 << (r as u64 * 8 + c as u64))
-        }).collect();
+        let row: Vec<u64> = p
+            .layers
+            .iter()
+            .map(|l| {
+                l.wall_bits
+                    .iter()
+                    .filter(|&&(_, _, h)| h)
+                    .fold(0u64, |m, &(r, c, _)| m | 1u64 << (r as u64 * 8 + c as u64))
+            })
+            .collect();
         writeln!(w, "    {row:?},").unwrap();
     }
     writeln!(w, "];").unwrap();
@@ -123,10 +129,16 @@ pub fn generate(out_path: &Path) {
 
     writeln!(w, "pub const PAWN_V_PEXT_MASK: [[u64; 5]; 81] = [").unwrap();
     for p in &pawn {
-        let row: Vec<u64> = p.layers.iter().map(|l| {
-            l.wall_bits.iter().filter(|&&(_, _, h)| !h)
-                .fold(0u64, |m, &(r, c, _)| m | 1u64 << (r as u64 * 8 + c as u64))
-        }).collect();
+        let row: Vec<u64> = p
+            .layers
+            .iter()
+            .map(|l| {
+                l.wall_bits
+                    .iter()
+                    .filter(|&&(_, _, h)| !h)
+                    .fold(0u64, |m, &(r, c, _)| m | 1u64 << (r as u64 * 8 + c as u64))
+            })
+            .collect();
         writeln!(w, "    {row:?},").unwrap();
     }
     writeln!(w, "];").unwrap();
@@ -134,9 +146,11 @@ pub fn generate(out_path: &Path) {
 
     writeln!(w, "pub const PAWN_H_SLOT_COUNT: [[u8; 5]; 81] = [").unwrap();
     for p in &pawn {
-        let row: Vec<u8> = p.layers.iter().map(|l| {
-            l.wall_bits.iter().filter(|&&(_, _, h)| h).count() as u8
-        }).collect();
+        let row: Vec<u8> = p
+            .layers
+            .iter()
+            .map(|l| l.wall_bits.iter().filter(|&&(_, _, h)| h).count() as u8)
+            .collect();
         writeln!(w, "    {row:?},").unwrap();
     }
     writeln!(w, "];").unwrap();

@@ -44,12 +44,10 @@ pub fn can_step(b: &MiniBoard, row: u8, col: u8, dr: i8, dc: i8) -> bool {
 
     match (dr, dc) {
         (1, 0) => {
-            !has_horizontal(b, js_from, col)
-                && (col == 0 || !has_horizontal(b, js_from, col - 1))
+            !has_horizontal(b, js_from, col) && (col == 0 || !has_horizontal(b, js_from, col - 1))
         }
         (-1, 0) => {
-            !has_horizontal(b, js_to, col)
-                && (col == 0 || !has_horizontal(b, js_to, col - 1))
+            !has_horizontal(b, js_to, col) && (col == 0 || !has_horizontal(b, js_to, col - 1))
         }
         (0, 1) => !has_vertical(b, js_from, col) && !has_vertical(b, row, col),
         (0, -1) => !has_vertical(b, js_to, nc) && !has_vertical(b, nr, nc),
@@ -115,4 +113,3 @@ pub fn set_wall(b: &mut MiniBoard, row: u8, col: u8, horizontal: bool) {
         b.vertical_walls |= 1 << bit;
     }
 }
-

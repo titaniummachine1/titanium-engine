@@ -8,9 +8,7 @@ use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
 use crate::path::masks::DirMasks;
-use crate::path::parallel::{
-    pbff_wall_legal, pawn_bit, wall_delta, WallGrids,
-};
+use crate::path::parallel::{pawn_bit, pbff_wall_legal, wall_delta, WallGrids};
 use crate::path::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
 

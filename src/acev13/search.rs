@@ -22,7 +22,8 @@
 use crate::acev13::ace_move_to_board;
 use crate::acev13::dist::{
     fill_ace_dist_from_pawn, fill_ace_dist_to_goal, fill_choke_points, fill_contested,
-    fill_corridor_delta, fill_path_crossing,
+    fill_corridor_delta, fill_distance_layers, fill_path_crossing, fill_sparse_route_masks,
+    shortest_route_bits,
 };
 use crate::util::clock::{Duration, Instant};
 
@@ -36,7 +37,10 @@ use crate::cat::prune::{
 use crate::cat::CorridorAttention;
 use crate::core::board::{Board, Move as BoardMove, Player, Undo, WallOrientation};
 use crate::movegen::{count_geometric_legal_walls, generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::path::flood::expand_frontier;
+use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
+use crate::util::grid::{flood_sq_from_bit, FLOOD_PLAYABLE};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
@@ -318,6 +322,8 @@ pub struct AceSearch {
     path_hi: [u32; MAX_PLY],
     d0: [[u8; 81]; MAX_PLY],
     d1: [[u8; 81]; MAX_PLY],
+    d0_layers: [[u128; 81]; MAX_PLY],
+    d1_layers: [[u128; 81]; MAX_PLY],
     dist0_idx: usize, // active ply slot in d0 (JS: this.dist0 array ref)
     dist1_idx: usize,
     cached_stamp: i32,
@@ -466,6 +472,8 @@ impl AceSearch {
             path_hi: [0; MAX_PLY],
             d0: [[0; 81]; MAX_PLY],
             d1: [[0; 81]; MAX_PLY],
+            d0_layers: [[0; 81]; MAX_PLY],
+            d1_layers: [[0; 81]; MAX_PLY],
             dist0_idx: 0,
             dist1_idx: 0,
             cached_stamp: -1,
@@ -892,6 +900,12 @@ impl AceSearch {
         fill_choke_points(&self.g, &p1_steps, &d1f, d1_scalar, &mut choke1);
         let mut contested = [0u8; 81];
         fill_contested(&delta0, &delta1, &mut contested);
+        let mut route0 = [0u8; 81];
+        let mut route1 = [0u8; 81];
+        let mut flank0 = [0u8; 81];
+        let mut flank1 = [0u8; 81];
+        fill_sparse_route_masks(&self.g, self.g.pawn[0], &d0f, &mut route0, &mut flank0);
+        fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1f, &mut route1, &mut flank1);
         let legal_walls = self.geometric_legal_wall_count();
         let width_me = self.d0[self.dist0_idx]
             .iter()
@@ -910,6 +924,8 @@ impl AceSearch {
              \"path_cross_p0_field\":[{}],\"path_cross_p1_field\":[{}],\
              \"choke_p0_field\":[{}],\"choke_p1_field\":[{}],\
              \"contested_field\":[{}],\
+             \"route_p0_field\":[{}],\"route_p1_field\":[{}],\
+             \"route_flank_p0_field\":[{}],\"route_flank_p1_field\":[{}],\
              \"d0_field\":[{}],\"d1_field\":[{}],\
              \"player0_field\":[{}],\"player1_field\":[{}],\
              \"delta0_field\":[{}],\"delta1_field\":[{}],\
@@ -936,6 +952,10 @@ impl AceSearch {
             field(&choke0),
             field(&choke1),
             field(&contested),
+            field(&route0),
+            field(&route1),
+            field(&flank0),
+            field(&flank1),
             field(&d0f),
             field(&d1f),
             field(&p0_steps),
@@ -1035,87 +1055,51 @@ impl AceSearch {
         t0.elapsed().as_millis() as f64 > budget
     }
 
-    fn field_plane_contrib(
-        &self,
-        hid: &mut [f64; NET_H],
-        nw: &Net,
-        p0_steps: &[u8; 81],
-        p1_steps: &[u8; 81],
-    ) {
+    fn route_feature_score(&self, nw: &Net) -> f64 {
+        if !nw.route_active {
+            return 0.0;
+        }
         let d0f = &self.d0[self.dist0_idx];
         let d1f = &self.d1[self.dist1_idx];
-        let d0 = d0f[self.g.pawn[0]];
-        let d1 = d1f[self.g.pawn[1]];
-        let mut delta0 = [255u8; 81];
-        let mut delta1 = [255u8; 81];
-        fill_corridor_delta(p0_steps, d0f, d0, &mut delta0);
-        fill_corridor_delta(p1_steps, d1f, d1, &mut delta1);
-        let mut cross0 = [0u8; 81];
-        let mut cross1 = [0u8; 81];
-        fill_path_crossing(&self.g, p0_steps, d0f, d0, &mut cross0);
-        fill_path_crossing(&self.g, p1_steps, d1f, d1, &mut cross1);
-        let mut choke0 = [0u8; 81];
-        let mut choke1 = [0u8; 81];
-        fill_choke_points(&self.g, p0_steps, d0f, d0, &mut choke0);
-        fill_choke_points(&self.g, p1_steps, d1f, d1, &mut choke1);
-        let mut contested = [0u8; 81];
-        fill_contested(&delta0, &delta1, &mut contested);
-
-        for i in 0..81 {
-            let base = i * NET_H;
-            let dg0 = d0f[i];
-            if dg0 != 255 {
-                let gf0 = dg0 as f64 / 16.0;
-                let pf0 = if p0_steps[i] == 255 {
-                    0.0
-                } else {
-                    p0_steps[i] as f64 / 16.0
-                };
-                let df0 = if delta0[i] == 255 {
-                    0.0
-                } else {
-                    delta0[i] as f64 / 16.0
-                };
-                let cf0 = cross0[i] as f64 / 16.0;
-                let ch0 = choke0[i] as f64 / 16.0;
-                for j in 0..NET_H {
-                    hid[j] += nw.goal_inv_p0[base + j] * gf0
-                        + nw.pawn_fwd_p0[base + j] * pf0
-                        + nw.corridor_delta_p0[base + j] * df0
-                        + nw.path_cross_p0[base + j] * cf0
-                        + nw.choke_p0[base + j] * ch0;
+        let masks = DirMasks::from_ace_game(&self.g);
+        let route0 = shortest_route_bits(
+            self.g.pawn[0],
+            d0f[self.g.pawn[0]],
+            &self.d0_layers[self.dist0_idx],
+            masks,
+        );
+        let route1 = shortest_route_bits(
+            self.g.pawn[1],
+            d1f[self.g.pawn[1]],
+            &self.d1_layers[self.dist1_idx],
+            masks,
+        );
+        let near0 = expand_frontier(route0, masks) & !route0 & FLOOD_PLAYABLE;
+        let near1 = expand_frontier(route1, masks) & !route1 & FLOOD_PLAYABLE;
+        let (me_route, opp_route, me_near, opp_near) = if self.g.turn == 0 {
+            (route0, route1, near0, near1)
+        } else {
+            (route1, route0, near1, near0)
+        };
+        let contested = (me_route | me_near) & (opp_route | opp_near);
+        let canonical = |sq: usize| if self.g.turn == 0 { sq } else { NET_MIRC[sq] };
+        let sum_bits = |mut bits: u128, weights: &[f64]| {
+            let mut sum = 0.0;
+            while bits != 0 {
+                let bit = bits.trailing_zeros();
+                bits &= bits - 1;
+                if let Some(sq) = flood_sq_from_bit(bit) {
+                    sum += weights[canonical(sq as usize)];
                 }
             }
-            let dg1 = d1f[i];
-            if dg1 != 255 {
-                let gf1 = dg1 as f64 / 16.0;
-                let pf1 = if p1_steps[i] == 255 {
-                    0.0
-                } else {
-                    p1_steps[i] as f64 / 16.0
-                };
-                let df1 = if delta1[i] == 255 {
-                    0.0
-                } else {
-                    delta1[i] as f64 / 16.0
-                };
-                let cf1 = cross1[i] as f64 / 16.0;
-                let ch1 = choke1[i] as f64 / 16.0;
-                for j in 0..NET_H {
-                    hid[j] += nw.goal_inv_p1[base + j] * gf1
-                        + nw.pawn_fwd_p1[base + j] * pf1
-                        + nw.corridor_delta_p1[base + j] * df1
-                        + nw.path_cross_p1[base + j] * cf1
-                        + nw.choke_p1[base + j] * ch1;
-                }
-            }
-            let ct = contested[i] as f64 / 16.0;
-            if ct != 0.0 {
-                for j in 0..NET_H {
-                    hid[j] += nw.contested[base + j] * ct;
-                }
-            }
-        }
+            sum
+        };
+        let score = sum_bits(me_route, &nw.route_me)
+            + sum_bits(opp_route, &nw.route_opp)
+            + sum_bits(me_near, &nw.route_near_me)
+            + sum_bits(opp_near, &nw.route_near_opp)
+            + sum_bits(contested, &nw.route_contested);
+        score
     }
 
     fn refresh_dist(&mut self, ply: usize) {
@@ -1140,11 +1124,17 @@ impl AceSearch {
                 if d0[a] != d0[b2] || d0[c2] != d0[e2] {
                     self.dist0_idx = ply; // redirect first: never write an ancestor's array
                     fill_ace_dist_to_goal(&self.g, 0, &mut self.d0[ply]);
+                    if self.net.route_active {
+                        fill_distance_layers(&self.d0[ply], &mut self.d0_layers[ply]);
+                    }
                 }
                 let d1 = &self.d1[self.dist1_idx];
                 if d1[a] != d1[b2] || d1[c2] != d1[e2] {
                     self.dist1_idx = ply;
                     fill_ace_dist_to_goal(&self.g, 1, &mut self.d1[ply]);
+                    if self.net.route_active {
+                        fill_distance_layers(&self.d1[ply], &mut self.d1_layers[ply]);
+                    }
                 }
                 self.cached_stamp = stamp;
                 return;
@@ -1154,6 +1144,10 @@ impl AceSearch {
         self.dist1_idx = ply;
         fill_ace_dist_to_goal(&self.g, 0, &mut self.d0[ply]);
         fill_ace_dist_to_goal(&self.g, 1, &mut self.d1[ply]);
+        if self.net.route_active {
+            fill_distance_layers(&self.d0[ply], &mut self.d0_layers[ply]);
+            fill_distance_layers(&self.d1[ply], &mut self.d1_layers[ply]);
+        }
         self.cached_stamp = stamp;
     }
 
@@ -1408,6 +1402,7 @@ impl AceSearch {
             + ws[4] * d_opp
             + ws[9] * pd * (w_me + w_opp) / 20.0
             + ws[10] * wd * (d_me + d_opp) / 16.0;
+        out += self.route_feature_score(nw);
         if w_opp_i == 0 {
             out += ws[6];
             if d_me <= d_opp {
@@ -1530,11 +1525,6 @@ impl AceSearch {
                 hid[j] += nw.px[o1 + j];
             }
         }
-        let mut p0_steps = [255u8; 81];
-        let mut p1_steps = [255u8; 81];
-        fill_ace_dist_from_pawn(&self.g, self.g.pawn[0], &mut p0_steps);
-        fill_ace_dist_from_pawn(&self.g, self.g.pawn[1], &mut p1_steps);
-        self.field_plane_contrib(&mut hid, nw, &p0_steps, &p1_steps);
         for j in 0..NET_H {
             let a2 = hid[j].clamp(0.0, 1.0);
             out += nw.w2[j] * a2 * 200.0;

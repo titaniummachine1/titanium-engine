@@ -197,7 +197,9 @@ pub fn oracle_certify(blocked: &[u8; 81], v: &[i16]) -> Result<(), String> {
                         return Err(format!("state {id}: {val} but has goal move"));
                     }
                     if !all_opp_win || cnt == 0 {
-                        return Err(format!("state {id}: {val} but a successor is not an opp-win"));
+                        return Err(format!(
+                            "state {id}: {val} but a successor is not an opp-win"
+                        ));
                     }
                     if max_opp != -val - 1 {
                         return Err(format!("state {id}: {val} but max succ is {max_opp}"));
@@ -211,7 +213,9 @@ pub fn oracle_certify(blocked: &[u8; 81], v: &[i16]) -> Result<(), String> {
                         return Err(format!("state {id}: 0 but has winning move"));
                     }
                     if cnt > 0 && !has_draw_succ {
-                        return Err(format!("state {id}: 0 with all succ opp-wins (should be loss)"));
+                        return Err(format!(
+                            "state {id}: 0 with all succ opp-wins (should be loss)"
+                        ));
                     }
                 }
             }

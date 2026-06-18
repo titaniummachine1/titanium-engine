@@ -29,7 +29,10 @@ fn flush(stdout: &mut io::Stdout) {
 fn handle_uci(stdout: &mut io::Stdout) {
     let _ = writeln!(stdout, "id name {ENGINE_NAME}");
     let _ = writeln!(stdout, "id author {ENGINE_AUTHOR}");
-    let _ = writeln!(stdout, "option name MoveTime type spin default {DEFAULT_TIME_MS} min 1 max 600000");
+    let _ = writeln!(
+        stdout,
+        "option name MoveTime type spin default {DEFAULT_TIME_MS} min 1 max 600000"
+    );
     let _ = writeln!(stdout, "uciok");
     flush(stdout);
 }

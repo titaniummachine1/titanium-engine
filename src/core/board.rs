@@ -163,7 +163,8 @@ impl Board {
 
         match mv {
             Move::Pawn { row, col } => {
-                self.hash ^= crate::core::zobrist::pawn_move_delta(side, undo.pawn_from, (row, col));
+                self.hash ^=
+                    crate::core::zobrist::pawn_move_delta(side, undo.pawn_from, (row, col));
                 self.pawns[side] = (row, col);
             }
             Move::Wall {

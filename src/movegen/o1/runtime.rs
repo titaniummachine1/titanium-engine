@@ -48,9 +48,7 @@ fn boxed<const N: usize, T>(v: Vec<T>) -> Box<[T; N]>
 where
     T: std::fmt::Debug,
 {
-    v.into_boxed_slice()
-        .try_into()
-        .expect("boxed array length")
+    v.into_boxed_slice().try_into().expect("boxed array length")
 }
 
 /// Assemble `PawnTables` from discovered metadata. Mirrors `build/movegen_o1/emit.rs`
@@ -193,7 +191,8 @@ pub fn prewarm() {
         // Build script should have caught this; belt-and-suspenders runtime banner.
         #[cfg(not(target_feature = "bmi2"))]
         if has_bmi2 {
-            eprintln!("\n\
+            eprintln!(
+                "\n\
 ╔══════════════════════════════════════════════════════════════════════╗\n\
 ║  TITANIUM RUNTIME WARNING — SUBOPTIMAL BINARY                        ║\n\
 ║                                                                      ║\n\
@@ -201,7 +200,8 @@ pub fn prewarm() {
 ║  it. The pawn lookup is running the scalar fallback (~4× slower).    ║\n\
 ║                                                                      ║\n\
 ║  Recompile:  RUSTFLAGS='-C target-cpu=native' cargo build --release  ║\n\
-╚══════════════════════════════════════════════════════════════════════╝\n");
+╚══════════════════════════════════════════════════════════════════════╝\n"
+            );
         }
 
         // Case 2: binary compiled with BMI2 but CPU doesn't have it — will crash

@@ -115,9 +115,7 @@ mod naive_reference {
 
 #[cfg(test)]
 mod tests {
-    use super::naive_reference::{
-        can_reach_goal_naive, flood_fill_naive, shortest_distance_naive,
-    };
+    use super::naive_reference::{can_reach_goal_naive, flood_fill_naive, shortest_distance_naive};
     use crate::core::board::{Board, Player, WallOrientation};
     use crate::path::bfs::{can_reach_goal, shortest_distance, BfsScratch};
     use crate::path::flood::flood_fill;

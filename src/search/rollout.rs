@@ -164,12 +164,7 @@ pub struct RolloutRank {
 
 /// Rank every legal root move by eval-guided rollouts. The root side is the
 /// hero. Returns moves sorted by `q` (then `prior`) descending.
-pub fn rollout_rank(
-    board: &mut Board,
-    sims: u32,
-    max_plies: u32,
-    seed: u64,
-) -> Vec<RolloutRank> {
+pub fn rollout_rank(board: &mut Board, sims: u32, max_plies: u32, seed: u64) -> Vec<RolloutRank> {
     let mut bfs = BfsScratch::default();
     let hero = board.side();
     let mut buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
@@ -198,7 +193,11 @@ pub fn rollout_rank(
     out.sort_by(|a, b| {
         b.q.partial_cmp(&a.q)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then(b.prior.partial_cmp(&a.prior).unwrap_or(std::cmp::Ordering::Equal))
+            .then(
+                b.prior
+                    .partial_cmp(&a.prior)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     });
     out
 }

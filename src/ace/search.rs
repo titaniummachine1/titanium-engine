@@ -544,10 +544,8 @@ impl AceSearch {
     /// Key = position hash with pawns and turn XORed out (wall config only).
     fn race_tbl(&mut self, force: bool) -> Option<usize> {
         let z = &ZOBRIST;
-        let mut k_lo =
-            self.g.hash_lo ^ z.pawn_lo[0][self.g.pawn[0]] ^ z.pawn_lo[1][self.g.pawn[1]];
-        let mut k_hi =
-            self.g.hash_hi ^ z.pawn_hi[0][self.g.pawn[0]] ^ z.pawn_hi[1][self.g.pawn[1]];
+        let mut k_lo = self.g.hash_lo ^ z.pawn_lo[0][self.g.pawn[0]] ^ z.pawn_lo[1][self.g.pawn[1]];
+        let mut k_hi = self.g.hash_hi ^ z.pawn_hi[0][self.g.pawn[0]] ^ z.pawn_hi[1][self.g.pawn[1]];
         if self.g.turn == 1 {
             k_lo ^= z.turn_lo;
             k_hi ^= z.turn_hi;

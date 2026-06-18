@@ -788,7 +788,11 @@ mod tests {
         // White must play e5, NOT c3h (which leads to 34.6% win rate)
         let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "h6h"]);
         let reply = lookup_text(&mut board);
-        assert_eq!(reply.as_deref(), Some("e5"), "must avoid c3h trap; got {reply:?}");
+        assert_eq!(
+            reply.as_deref(),
+            Some("e5"),
+            "must avoid c3h trap; got {reply:?}"
+        );
     }
 
     #[test]

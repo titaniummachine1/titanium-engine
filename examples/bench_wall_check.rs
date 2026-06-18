@@ -176,9 +176,7 @@ fn main() {
             for &(r, c, o) in cs {
                 let d = wall_delta(r, c, o);
                 grids.place(d);
-                std::hint::black_box(titanium::path::pbff_wall_legal(
-                    p1, p2, &grids,
-                ));
+                std::hint::black_box(titanium::path::pbff_wall_legal(p1, p2, &grids));
                 grids.remove(d);
             }
         }
@@ -186,22 +184,41 @@ fn main() {
     let v11_pure_dt = t0.elapsed();
 
     let n = (total_trials as u32 * reps) as f64;
-    println!("15 canta midgames, {} flood-gated wall trials/pass, {} reps", total_trials, reps);
-    println!("V10 trial (set_wall + DirMasks rebuild + 2 floods): {:>8.1} ns/trial  (legal={})",
-        v10_dt.as_nanos() as f64 / n, v10_legal);
-    println!("V10 floods alone (masks prebuilt, lower bound):     {:>8.1} ns/trial",
-        v10_floodonly_dt.as_nanos() as f64 / n);
-    println!("V11 trial (mask flip + parallel flood + theft):     {:>8.1} ns/trial  (legal={})",
-        v11_pure_dt.as_nanos() as f64 / n, v11_legal);
-    println!("V11 with counters:                                  {:>8.1} ns/trial",
-        v11_dt.as_nanos() as f64 / n);
+    println!(
+        "15 canta midgames, {} flood-gated wall trials/pass, {} reps",
+        total_trials, reps
+    );
+    println!(
+        "V10 trial (set_wall + DirMasks rebuild + 2 floods): {:>8.1} ns/trial  (legal={})",
+        v10_dt.as_nanos() as f64 / n,
+        v10_legal
+    );
+    println!(
+        "V10 floods alone (masks prebuilt, lower bound):     {:>8.1} ns/trial",
+        v10_floodonly_dt.as_nanos() as f64 / n
+    );
+    println!(
+        "V11 trial (mask flip + parallel flood + theft):     {:>8.1} ns/trial  (legal={})",
+        v11_pure_dt.as_nanos() as f64 / n,
+        v11_legal
+    );
+    println!(
+        "V11 with counters:                                  {:>8.1} ns/trial",
+        v11_dt.as_nanos() as f64 / n
+    );
     println!();
-    println!("work reduction, full trial: {:.1}x   vs floods-alone lower bound: {:.1}x",
+    println!(
+        "work reduction, full trial: {:.1}x   vs floods-alone lower bound: {:.1}x",
         v10_dt.as_nanos() as f64 / v11_pure_dt.as_nanos() as f64,
-        v10_floodonly_dt.as_nanos() as f64 / v11_pure_dt.as_nanos() as f64);
+        v10_floodonly_dt.as_nanos() as f64 / v11_pure_dt.as_nanos() as f64
+    );
     println!("V10 can_step calls per trial (DirMasks rebuild): 324");
-    println!("V11 dilation iterations per trial: {:.2}",
-        iters as f64 / total_trials as f64);
-    println!("V11 bit-theft hit rate: {:.1}% of trials reuse P1's flood for P2",
-        100.0 * thefts as f64 / total_trials as f64);
+    println!(
+        "V11 dilation iterations per trial: {:.2}",
+        iters as f64 / total_trials as f64
+    );
+    println!(
+        "V11 bit-theft hit rate: {:.1}% of trials reuse P1's flood for P2",
+        100.0 * thefts as f64 / total_trials as f64
+    );
 }

@@ -12,8 +12,8 @@ pub use bfs::{
 };
 pub use masks::DirMasks;
 pub use parallel::{
-    pbff_ks_to_goal, pbff_ks_to_goal_cached, pbff_ks_wall_legal, pbff_to_goal,
-    pbff_to_goal_cached, pbff_wall_legal, pbff_wall_legal_board, wall_delta, WallGrids,
+    pbff_ks_to_goal, pbff_ks_to_goal_cached, pbff_ks_wall_legal, pbff_to_goal, pbff_to_goal_cached,
+    pbff_wall_legal, pbff_wall_legal_board, wall_delta, WallGrids,
 };
 
 #[cfg(test)]

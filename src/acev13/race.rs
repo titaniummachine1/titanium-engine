@@ -23,10 +23,10 @@ pub const RACE_MATE: i32 = 32_000;
 
 /// Reusable solver scratch — successor graph + live worklist (~200 KB).
 pub struct RaceScratch {
-    succ: Box<[i16]>,  // 5 successor state ids per state; -1 = own goal row
-    nsucc: Box<[u8]>,  // successor count per state
-    live: Box<[i32]>,  // unresolved-state work list (compacted per round)
-    buf: [i16; 16],    // gen_pawn_moves output (max 5 pawn moves)
+    succ: Box<[i16]>, // 5 successor state ids per state; -1 = own goal row
+    nsucc: Box<[u8]>, // successor count per state
+    live: Box<[i32]>, // unresolved-state work list (compacted per round)
+    buf: [i16; 16],   // gen_pawn_moves output (max 5 pawn moves)
 }
 
 impl RaceScratch {

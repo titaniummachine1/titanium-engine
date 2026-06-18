@@ -21,7 +21,10 @@ fn corridor_heat(delta: u16) -> u16 {
     //   delta 1 → 200/(1+log2 3) = 77
     //   delta 2 → 200/(1+2·log2 4) = 40
     const HEAT_LUT: [u16; (MAX_RELEVANT_CORRIDOR_DELTA + 1) as usize] = [200, 77, 40];
-    debug_assert_eq!(CAT_CORRIDOR_CM, 200, "HEAT_LUT computed for CAT_CORRIDOR_CM=200");
+    debug_assert_eq!(
+        CAT_CORRIDOR_CM, 200,
+        "HEAT_LUT computed for CAT_CORRIDOR_CM=200"
+    );
     HEAT_LUT[delta as usize]
 }
 

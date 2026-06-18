@@ -324,7 +324,20 @@ impl KsProp {
         let n1 = (!grids.north >> S) & FLOOD_PLAYABLE;
         let n2 = n1 & (n1 >> S);
         let n4 = n2 & (n2 >> (2 * S));
-        Self { e1, e2, e4, w1, w2, w4, s1, s2, s4, n1, n2, n4 }
+        Self {
+            e1,
+            e2,
+            e4,
+            w1,
+            w2,
+            w4,
+            s1,
+            s2,
+            s4,
+            n1,
+            n2,
+            n4,
+        }
     }
 
     /// One occluded super-step: horizontal fill then vertical fill on the result,
@@ -375,12 +388,7 @@ pub fn pbff_ks_to_goal(start: u128, grids: &WallGrids, goal: u128) -> (bool, u12
 
 /// Occluded-fill twin of [`pbff_to_goal_cached`] (Player 2, bit theft).
 #[inline]
-pub fn pbff_ks_to_goal_cached(
-    start: u128,
-    cache: u128,
-    grids: &WallGrids,
-    goal: u128,
-) -> bool {
+pub fn pbff_ks_to_goal_cached(start: u128, cache: u128, grids: &WallGrids, goal: u128) -> bool {
     let mut visited = start & FLOOD_PLAYABLE;
     if visited & goal != 0 {
         return true;
@@ -533,7 +541,9 @@ mod tests {
         // Deterministic LCG — no rand dependency.
         let mut state = 0x9E3779B97F4A7C15u64;
         let mut next = move || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u32
         };
 
@@ -569,16 +579,20 @@ mod tests {
             let grids = WallGrids::from_board(&board);
             let expected = reach_goal_naive(&board, p1, Player::One)
                 && reach_goal_naive(&board, p2, Player::Two);
-            let got =
-                pbff_wall_legal(pawn_bit(p1.0, p1.1), pawn_bit(p2.0, p2.1), &grids);
-            assert_eq!(got, expected, "walls h={:#x} v={:#x} p1={:?} p2={:?}",
-                board.horizontal_walls, board.vertical_walls, p1, p2);
+            let got = pbff_wall_legal(pawn_bit(p1.0, p1.1), pawn_bit(p2.0, p2.1), &grids);
+            assert_eq!(
+                got, expected,
+                "walls h={:#x} v={:#x} p1={:?} p2={:?}",
+                board.horizontal_walls, board.vertical_walls, p1, p2
+            );
 
             // Kogge-Stone occluded fill must agree with the step-by-step flood.
-            let got_ks =
-                pbff_ks_wall_legal(pawn_bit(p1.0, p1.1), pawn_bit(p2.0, p2.1), &grids);
-            assert_eq!(got_ks, expected, "KS walls h={:#x} v={:#x} p1={:?} p2={:?}",
-                board.horizontal_walls, board.vertical_walls, p1, p2);
+            let got_ks = pbff_ks_wall_legal(pawn_bit(p1.0, p1.1), pawn_bit(p2.0, p2.1), &grids);
+            assert_eq!(
+                got_ks, expected,
+                "KS walls h={:#x} v={:#x} p1={:?} p2={:?}",
+                board.horizontal_walls, board.vertical_walls, p1, p2
+            );
 
             // Single-player floods must match the reference too.
             let (got1, vis1) = pbff_to_goal(pawn_bit(p1.0, p1.1), &grids, P1_GOAL_BITS);

@@ -23,7 +23,10 @@ pub struct DistLayers {
 
 impl Default for DistLayers {
     fn default() -> Self {
-        Self { masks: [0u128; MAX_DIST_LAYERS], depth: 0 }
+        Self {
+            masks: [0u128; MAX_DIST_LAYERS],
+            depth: 0,
+        }
     }
 }
 
@@ -157,13 +160,19 @@ mod tests {
             fill_dist_layers_from_sq(start, masks, &mut layers);
             layers.to_scalar_field(&mut from_layers);
             fill_dist_from_sq(start, masks, &mut from_scalar);
-            assert_eq!(from_layers, from_scalar, "forward field mismatch for {player:?}");
+            assert_eq!(
+                from_layers, from_scalar,
+                "forward field mismatch for {player:?}"
+            );
 
             // Inverse floods to each goal row.
             fill_dist_layers_to_goal_row(player, masks, &mut layers);
             layers.to_scalar_field(&mut from_layers);
             fill_dist_to_goal_row(player, masks, &mut from_scalar);
-            assert_eq!(from_layers, from_scalar, "inverse field mismatch for {player:?}");
+            assert_eq!(
+                from_layers, from_scalar,
+                "inverse field mismatch for {player:?}"
+            );
         }
     }
 
@@ -212,7 +221,11 @@ mod tests {
                 let cells: Vec<String> = (0..9u8)
                     .map(|col| {
                         let v = f[square_index(row, col) as usize];
-                        if v == u8::MAX { "X".into() } else { v.to_string() }
+                        if v == u8::MAX {
+                            "X".into()
+                        } else {
+                            v.to_string()
+                        }
                     })
                     .collect();
                 println!("{}", cells.join(","));
