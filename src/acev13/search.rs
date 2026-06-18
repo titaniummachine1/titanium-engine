@@ -36,7 +36,10 @@ use crate::cat::prune::{
 };
 use crate::cat::CorridorAttention;
 use crate::core::board::{Board, Move as BoardMove, Player, Undo, WallOrientation};
-use crate::movegen::{count_geometric_legal_walls, generate_legal_moves_slice, MAX_LEGAL_MOVES};
+use crate::movegen::{
+    generate_legal_moves_slice_cached, geometric_wall_len_cached, GeometricWallCache,
+    GeometricWallCacheRole, GeometricWallCacheStats, MAX_LEGAL_MOVES,
+};
 use crate::path::flood::expand_frontier;
 use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
@@ -89,6 +92,8 @@ pub struct TiBridge {
     pub board: Board,
     pub bfs: BfsScratch,
     undo_stack: Vec<Undo>,
+    geometric_walls: Option<GeometricWallCache>,
+    pub wall_cache_stats: GeometricWallCacheStats,
 }
 
 impl TiBridge {
@@ -101,6 +106,8 @@ impl TiBridge {
             board,
             bfs: BfsScratch::new(),
             undo_stack: Vec::with_capacity(256),
+            geometric_walls: None,
+            wall_cache_stats: GeometricWallCacheStats::default(),
         })
     }
 
@@ -118,7 +125,13 @@ impl TiBridge {
     /// Full legal moves via Titanium `movegen` → ACE encoding.
     fn gen_legal_ace(&mut self, out: &mut [i16; 160]) -> usize {
         let mut ti_buf = [BoardMove::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
-        let n = generate_legal_moves_slice(&mut self.board, &mut ti_buf, &mut self.bfs);
+        let n = generate_legal_moves_slice_cached(
+            &mut self.geometric_walls,
+            &mut self.board,
+            &mut ti_buf,
+            &mut self.bfs,
+            Some(&mut self.wall_cache_stats),
+        );
         for i in 0..n {
             out[i] = board_move_to_ace(ti_buf[i]);
         }
@@ -849,14 +862,34 @@ impl AceSearch {
     /// Path-valid = tentative placement keeps both players connected to goal (`pbff_wall_legal`).
     pub fn geometric_legal_wall_count(&mut self) -> u32 {
         if let Some(bridge) = self.bridge.as_mut() {
-            return count_geometric_legal_walls(&mut bridge.board, &mut bridge.bfs) as u32;
+            return geometric_wall_len_cached(
+                &mut bridge.geometric_walls,
+                &mut bridge.board,
+                &mut bridge.bfs,
+                GeometricWallCacheRole::Eval,
+                Some(&mut bridge.wall_cache_stats),
+            ) as u32;
         }
         let mut board = Board::new();
         for i in 0..self.g.hist_len {
             let _ = board.make_move(ace_move_to_board(self.g.hist_m[i]));
         }
         let mut scratch = BfsScratch::new();
-        count_geometric_legal_walls(&mut board, &mut scratch) as u32
+        let mut cache = None;
+        geometric_wall_len_cached(
+            &mut cache,
+            &mut board,
+            &mut scratch,
+            GeometricWallCacheRole::Eval,
+            None,
+        ) as u32
+    }
+
+    /// Wall-cache profiling counters (TiBridge path only).
+    pub fn wall_cache_stats(&self) -> Option<GeometricWallCacheStats> {
+        self.bridge
+            .as_ref()
+            .map(|b| b.wall_cache_stats)
     }
 
     /// Dump the raw net inputs + the resulting eval as JSON. Lets the Python NNUE
@@ -2640,6 +2673,19 @@ impl AceSearch {
         if log {
             self.sync_stream_meta(&depth_log, last_depth, last_score);
             self.emit_stream_progress(true);
+        }
+
+        if std::env::var_os("TITANIUM_WALL_CACHE_STATS").is_some() {
+            if let Some(s) = self.wall_cache_stats() {
+                eprintln!(
+                    "info string wall_cache hits_eval={} misses_eval={} hits_movegen={} misses_movegen={} wall_gen_calls={}",
+                    s.hits_eval,
+                    s.misses_eval,
+                    s.hits_movegen,
+                    s.misses_movegen,
+                    s.wall_generation_calls
+                );
+            }
         }
 
         ThinkResult {

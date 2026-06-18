@@ -227,6 +227,122 @@ pub fn count_geometric_legal_walls(board: &mut Board, scratch: &mut BfsScratch) 
     generate_wall_moves_slice(board, &mut buf, scratch)
 }
 
+/// Board geometry that determines path-valid wall slots (ignores side / wall budget).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GeometricWallKey {
+    horizontal_walls: u64,
+    vertical_walls: u64,
+    p0: (u8, u8),
+    p1: (u8, u8),
+}
+
+impl GeometricWallKey {
+    #[inline]
+    pub fn from_board(board: &Board) -> Self {
+        Self {
+            horizontal_walls: board.horizontal_walls,
+            vertical_walls: board.vertical_walls,
+            p0: board.pawns[0],
+            p1: board.pawns[1],
+        }
+    }
+}
+
+pub struct GeometricWallCache {
+    key: GeometricWallKey,
+    moves: [Move; MAX_LEGAL_MOVES],
+    len: usize,
+}
+
+/// Who requested the cached geometric wall set (for profiling).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeometricWallCacheRole {
+    Eval,
+    Movegen,
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct GeometricWallCacheStats {
+    pub hits_eval: u64,
+    pub misses_eval: u64,
+    pub hits_movegen: u64,
+    pub misses_movegen: u64,
+    pub wall_generation_calls: u64,
+}
+
+/// Path-valid wall slots, generating once per [`GeometricWallKey`].
+pub fn geometric_wall_len_cached(
+    cache: &mut Option<GeometricWallCache>,
+    board: &mut Board,
+    scratch: &mut BfsScratch,
+    role: GeometricWallCacheRole,
+    stats: Option<&mut GeometricWallCacheStats>,
+) -> usize {
+    let key = GeometricWallKey::from_board(board);
+    if cache.as_ref().is_some_and(|c| c.key == key) {
+        if let Some(s) = stats {
+            match role {
+                GeometricWallCacheRole::Eval => s.hits_eval += 1,
+                GeometricWallCacheRole::Movegen => s.hits_movegen += 1,
+            }
+        }
+        return cache.as_ref().unwrap().len;
+    }
+    if let Some(s) = stats {
+        match role {
+            GeometricWallCacheRole::Eval => s.misses_eval += 1,
+            GeometricWallCacheRole::Movegen => s.misses_movegen += 1,
+        }
+        s.wall_generation_calls += 1;
+    }
+    let mut moves = [Move::Wall {
+        row: 0,
+        col: 0,
+        orientation: WallOrientation::Horizontal,
+    }; MAX_LEGAL_MOVES];
+    let len = generate_wall_moves_slice(board, &mut moves, scratch);
+    *cache = Some(GeometricWallCache { key, moves, len });
+    len
+}
+
+#[inline]
+fn copy_geometric_walls_cached(
+    cache: &GeometricWallCache,
+    out: &mut [Move],
+) -> usize {
+    debug_assert!(out.len() >= cache.len);
+    out[..cache.len].copy_from_slice(&cache.moves[..cache.len]);
+    cache.len
+}
+
+/// Legal movegen with a shared geometric-wall cache (pawn moves + budget-gated walls).
+pub fn generate_legal_moves_slice_cached(
+    cache: &mut Option<GeometricWallCache>,
+    board: &mut Board,
+    out: &mut [Move],
+    scratch: &mut BfsScratch,
+    stats: Option<&mut GeometricWallCacheStats>,
+) -> usize {
+    if board.is_terminal().is_some() {
+        return 0;
+    }
+
+    let mut n = generate_pawn_moves_with_mode(board, scratch, out, PawnGenMode::default());
+    if board.walls_remaining[board.side_to_move as usize] > 0 {
+        geometric_wall_len_cached(
+            cache,
+            board,
+            scratch,
+            GeometricWallCacheRole::Movegen,
+            stats,
+        );
+        let cached = cache.as_ref().expect("filled by geometric_wall_len_cached");
+        n += copy_geometric_walls_cached(cached, &mut out[n..]);
+    }
+    debug_assert!(n <= MAX_LEGAL_MOVES);
+    n
+}
+
 fn generate_wall_moves_slice(
     board: &mut Board,
     out: &mut [Move],
@@ -593,5 +709,92 @@ mod tests {
         let mut moves = Vec::new();
         generate_wall_moves_into(&mut board, &mut moves, &mut scratch);
         assert_eq!(board, before);
+    }
+
+    #[test]
+    fn zero_wall_budget_never_emits_cached_walls() {
+        let mut board = Board::new();
+        board.apply_algebraic("e2");
+        board.apply_algebraic("e8");
+        board.apply_algebraic("e3");
+        board.apply_algebraic("e7");
+        board.apply_algebraic("e4");
+        board.apply_algebraic("e6");
+        board.apply_algebraic("c3h");
+        // Side to move has no walls left; geometry still has path-valid slots.
+        board.walls_remaining[board.side_to_move as usize] = 0;
+        let mut scratch = BfsScratch::new();
+        let mut cache = None;
+        let mut stats = GeometricWallCacheStats::default();
+        let geom = geometric_wall_len_cached(
+            &mut cache,
+            &mut board,
+            &mut scratch,
+            GeometricWallCacheRole::Eval,
+            Some(&mut stats),
+        );
+        assert!(geom > 0, "fixture should have geometric wall slots");
+
+        let mut out = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+        let n = generate_legal_moves_slice_cached(
+            &mut cache,
+            &mut board,
+            &mut out,
+            &mut scratch,
+            Some(&mut stats),
+        );
+        assert!(n > 0);
+        assert!(out[..n].iter().all(|m| matches!(m, Move::Pawn { .. })));
+        // Budget gate skips wall path entirely — cache is not consulted for movegen.
+        assert_eq!(stats.hits_movegen, 0);
+        assert_eq!(stats.misses_movegen, 0);
+    }
+
+    #[test]
+    fn geometric_wall_cache_matches_uncached() {
+        let mut board = Board::new();
+        board.apply_algebraic("e2");
+        board.apply_algebraic("e8");
+        board.apply_algebraic("e3");
+        board.apply_algebraic("e7");
+        board.apply_algebraic("e4");
+        board.apply_algebraic("e6");
+        board.apply_algebraic("c3h");
+        let mut scratch = BfsScratch::new();
+        let mut uncached = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+        let n_uncached = generate_legal_moves_slice(&mut board, &mut uncached, &mut scratch);
+
+        let mut cache = None;
+        let mut stats = GeometricWallCacheStats::default();
+        let mut cached = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+        let n_cached = generate_legal_moves_slice_cached(
+            &mut cache,
+            &mut board,
+            &mut cached,
+            &mut scratch,
+            Some(&mut stats),
+        );
+        assert_eq!(n_uncached, n_cached);
+        assert_eq!(&uncached[..n_uncached], &cached[..n_cached]);
+        assert_eq!(stats.wall_generation_calls, 1);
+        assert_eq!(stats.misses_movegen, 1);
+        assert_eq!(stats.hits_movegen, 0);
+
+        let count = geometric_wall_len_cached(
+            &mut cache,
+            &mut board,
+            &mut scratch,
+            GeometricWallCacheRole::Eval,
+            Some(&mut stats),
+        );
+        let mut wall_only = [Move::Wall {
+            row: 0,
+            col: 0,
+            orientation: WallOrientation::Horizontal,
+        }; MAX_LEGAL_MOVES];
+        let n_walls = generate_wall_moves_slice(&mut board, &mut wall_only, &mut scratch);
+        assert_eq!(count, n_walls);
+        assert_eq!(stats.wall_generation_calls, 1);
+        assert_eq!(stats.hits_eval, 1);
     }
 }

@@ -7,8 +7,10 @@ pub mod wall_masks;
 
 pub use legal::{
     count_geometric_legal_walls, generate_legal_moves, generate_legal_moves_into,
-    generate_legal_moves_slice, generate_legal_moves_slice_mode, generate_pawn_moves_slice_mode,
-    PawnGenMode, MAX_LEGAL_MOVES,
+    generate_legal_moves_slice, generate_legal_moves_slice_cached,
+    generate_legal_moves_slice_mode, generate_pawn_moves_slice_mode, GeometricWallCache,
+    GeometricWallCacheRole, GeometricWallCacheStats, GeometricWallKey,
+    geometric_wall_len_cached, PawnGenMode, MAX_LEGAL_MOVES,
 };
 /// Force the cold-start pawn lookup tables to build now (so search/perft timing
 /// excludes the build). No-op once built. See `o1::runtime`.
