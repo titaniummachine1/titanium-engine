@@ -57,6 +57,13 @@ fn flood_scatter(seed: u128, masks: DirMasks, out: &mut [u8; 81]) {
 /// Inverse flood: distance from each cell to `player`'s goal row (ACE index).
 pub fn fill_ace_dist_to_goal(g: &AceGame, player: usize, ace_dist: &mut [u8; 81]) {
     let masks = DirMasks::from_ace_game(g);
+    fill_ace_dist_to_goal_with_masks(player, masks, ace_dist);
+}
+
+/// Inverse flood with caller-provided topology masks. Search refreshes both
+/// players on the same wall geometry, so constructing the masks once avoids a
+/// duplicate 81-cell topology scan.
+pub fn fill_ace_dist_to_goal_with_masks(player: usize, masks: DirMasks, ace_dist: &mut [u8; 81]) {
     let grow = ace_goal_row(player);
     let mut seed = 0u128;
     for c in 0..9u8 {
@@ -399,6 +406,20 @@ mod tests {
                 fill_ace_dist_from_pawn(&g, g.pawn[player], &mut flood);
                 g.compute_steps_from(g.pawn[player], &mut queue);
                 assert_eq!(flood, queue, "pawn field player {player}");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_masks_match_independent_goal_floods() {
+        for g in [AceGame::new(), pos(&["e2", "e8", "e3", "e7", "d3h", "f5v"])] {
+            let masks = DirMasks::from_ace_game(&g);
+            for player in [0usize, 1] {
+                let mut independent = [0u8; 81];
+                let mut shared = [0u8; 81];
+                fill_ace_dist_to_goal(&g, player, &mut independent);
+                fill_ace_dist_to_goal_with_masks(player, masks, &mut shared);
+                assert_eq!(shared, independent, "goal field player {player}");
             }
         }
     }

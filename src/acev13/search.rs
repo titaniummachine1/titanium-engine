@@ -21,7 +21,7 @@
 
 use crate::acev13::ace_move_to_board;
 use crate::acev13::dist::{
-    fill_ace_dist_from_pawn, fill_ace_dist_to_goal, fill_choke_points, fill_contested,
+    fill_ace_dist_from_pawn, fill_ace_dist_to_goal_with_masks, fill_choke_points, fill_contested,
     fill_corridor_delta, fill_distance_layers, fill_path_crossing, fill_sparse_route_masks,
     shortest_route_bits,
 };
@@ -1167,18 +1167,37 @@ impl AceSearch {
                 } else {
                     (a + 1, a + 9, a + 10) // vw: two horizontal edges
                 };
-                let d0 = &self.d0[self.dist0_idx];
-                if d0[a] != d0[b2] || d0[c2] != d0[e2] {
+                let refresh0 = {
+                    let d0 = &self.d0[self.dist0_idx];
+                    d0[a] != d0[b2] || d0[c2] != d0[e2]
+                };
+                let refresh1 = {
+                    let d1 = &self.d1[self.dist1_idx];
+                    d1[a] != d1[b2] || d1[c2] != d1[e2]
+                };
+                let masks = if refresh0 || refresh1 {
+                    Some(DirMasks::from_ace_game(&self.g))
+                } else {
+                    None
+                };
+                if refresh0 {
                     self.dist0_idx = ply; // redirect first: never write an ancestor's array
-                    fill_ace_dist_to_goal(&self.g, 0, &mut self.d0[ply]);
+                    fill_ace_dist_to_goal_with_masks(
+                        0,
+                        masks.expect("refresh masks"),
+                        &mut self.d0[ply],
+                    );
                     if self.net.route_active {
                         fill_distance_layers(&self.d0[ply], &mut self.d0_layers[ply]);
                     }
                 }
-                let d1 = &self.d1[self.dist1_idx];
-                if d1[a] != d1[b2] || d1[c2] != d1[e2] {
+                if refresh1 {
                     self.dist1_idx = ply;
-                    fill_ace_dist_to_goal(&self.g, 1, &mut self.d1[ply]);
+                    fill_ace_dist_to_goal_with_masks(
+                        1,
+                        masks.expect("refresh masks"),
+                        &mut self.d1[ply],
+                    );
                     if self.net.route_active {
                         fill_distance_layers(&self.d1[ply], &mut self.d1_layers[ply]);
                     }
@@ -1189,8 +1208,9 @@ impl AceSearch {
         }
         self.dist0_idx = ply; // own arrays: ancestors stay intact
         self.dist1_idx = ply;
-        fill_ace_dist_to_goal(&self.g, 0, &mut self.d0[ply]);
-        fill_ace_dist_to_goal(&self.g, 1, &mut self.d1[ply]);
+        let masks = DirMasks::from_ace_game(&self.g);
+        fill_ace_dist_to_goal_with_masks(0, masks, &mut self.d0[ply]);
+        fill_ace_dist_to_goal_with_masks(1, masks, &mut self.d1[ply]);
         if self.net.route_active {
             fill_distance_layers(&self.d0[ply], &mut self.d0_layers[ply]);
             fill_distance_layers(&self.d1[ply], &mut self.d1_layers[ply]);

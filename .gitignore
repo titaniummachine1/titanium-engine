@@ -1,6 +1,7 @@
 /target
 /worktrees/
 /target-bench
+/target-profile
 /target-alt
 /target-alt2
 /target_alt
