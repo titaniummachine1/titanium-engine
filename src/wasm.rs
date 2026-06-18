@@ -9,7 +9,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::acev13::{
-    ace_genmove, ace_to_algebraic, algebraic_to_ace, AceGame, AceParams, AceSearch, ACE_NO_MOVE,
+    ace_to_algebraic, algebraic_to_ace, AceGame, AceParams, AceSearch, ThinkResult, ACE_NO_MOVE,
 };
 
 fn acev13_params_from_mode(engine_mode: &str, movetime_ms: u32, max_depth: i32) -> AceParams {
@@ -48,6 +48,54 @@ fn is_acev13_mode(engine_mode: &str) -> bool {
     engine_mode.starts_with("ace-v13") || engine_mode == "ace-v13"
 }
 
+fn build_acev13_search(g: AceGame, params: AceParams, engine_label: &str) -> AceSearch {
+    let mut search = match engine_label {
+        "titanium-v15" | "titanium-v14" | "ace-v13-grafted" => *AceSearch::grafted(g, None),
+        "titanium-v15-frozen" => *AceSearch::grafted_frozen(g, None),
+        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
+            *AceSearch::grafted_no_raceproof(g, None)
+        }
+        "ace-v13-ti-pure" => *AceSearch::with_ti_movegen_pure(g),
+        _ if params.ti_movegen && params.cat => *AceSearch::with_ti_movegen_and_cat(g),
+        _ if params.ti_movegen => *AceSearch::with_ti_movegen(g),
+        _ if params.cat => *AceSearch::with_cat(g),
+        _ => *AceSearch::new(g),
+    };
+    if params.eme {
+        search.enable_eme();
+    }
+    search
+}
+
+fn acev13_genmove_with_progress(
+    moves: &str,
+    params: AceParams,
+    engine_label: &str,
+    on_progress: Option<js_sys::Function>,
+) -> Option<(String, ThinkResult)> {
+    let g = replay_moves(moves).ok()?;
+    if g.winner() >= 0 {
+        return None;
+    }
+    let mut search = build_acev13_search(g, params, engine_label);
+    search.set_wasm_progress(on_progress.clone());
+    let stream = on_progress.is_some();
+    let result = search.think(
+        params.time_ms,
+        params.max_depth,
+        params.full,
+        stream,
+        engine_label,
+    );
+    if result.mv == ACE_NO_MOVE {
+        return None;
+    }
+    if result.mv == 0 && search.g.winner() >= 0 {
+        return None;
+    }
+    Some((ace_to_algebraic(result.mv), result))
+}
+
 fn replay_moves(moves: &str) -> Result<AceGame, JsError> {
     let mut g = AceGame::new();
     for text in moves.split_whitespace().filter(|s| !s.is_empty()) {
@@ -73,27 +121,30 @@ impl WasmAceEngine {
     }
 
     /// Space-separated algebraic moves from startpos; returns best move or "(none)".
+    /// `on_progress` — optional JS callback receiving `info json` during iterative deepening.
     pub fn genmove(
         &self,
         moves: &str,
         movetime_ms: u32,
         max_depth: i32,
         engine_mode: &str,
+        on_progress: Option<js_sys::Function>,
     ) -> String {
         let list: Vec<String> = moves
             .split_whitespace()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect();
-        let result = if is_acev13_mode(engine_mode) {
+        if is_acev13_mode(engine_mode) {
             let params = acev13_params_from_mode(engine_mode, movetime_ms, max_depth);
-            ace_genmove(&list, params, engine_mode).map(|(alg, _)| alg)
-        } else {
-            let params = ace_params_from_mode(engine_mode, movetime_ms, max_depth);
-            crate::ace::ace_genmove(&list, params, engine_mode).map(|(alg, _)| alg)
-        };
-        match result {
-            Some(alg) => alg,
+            return match acev13_genmove_with_progress(moves, params, engine_mode, on_progress) {
+                Some((alg, _)) => alg,
+                None => "(none)".to_string(),
+            };
+        }
+        let params = ace_params_from_mode(engine_mode, movetime_ms, max_depth);
+        match crate::ace::ace_genmove(&list, params, engine_mode) {
+            Some((alg, _)) => alg,
             None => "(none)".to_string(),
         }
     }
