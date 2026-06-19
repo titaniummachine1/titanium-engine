@@ -363,8 +363,8 @@ mod tests {
             .split_whitespace()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (a, ae) = reduction_counterfactual_probe(&moves, 4, None, 8).unwrap();
-        let (b, be) = reduction_counterfactual_probe(&moves, 4, None, 8).unwrap();
+        let (a, ae) = reduction_counterfactual_probe(&moves, 4, None, 8, 0).unwrap();
+        let (b, be) = reduction_counterfactual_probe(&moves, 4, None, 8, 0).unwrap();
         assert_eq!((a.mv, a.score, a.nodes), (b.mv, b.score, b.nodes));
         assert_eq!(ae.len(), be.len());
         for (left, right) in ae.iter().zip(&be) {
@@ -383,9 +383,9 @@ mod tests {
             .split_whitespace()
             .map(String::from)
             .collect::<Vec<_>>();
-        let (_, baseline) = reduction_counterfactual_probe(&moves, 4, None, 4).unwrap();
+        let (_, baseline) = reduction_counterfactual_probe(&moves, 4, None, 4, 0).unwrap();
         let target = baseline[3].ordinal;
-        let (_, changed) = reduction_counterfactual_probe(&moves, 4, Some(target), 1).unwrap();
+        let (_, changed) = reduction_counterfactual_probe(&moves, 4, Some(target), 1, 0).unwrap();
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].ordinal, target);
         assert!(changed[0].applied_extra_reduction);
