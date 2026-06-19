@@ -200,6 +200,10 @@ pub struct ReductionProbeEvent {
     pub score: i32,
     pub nodes: u64,
     pub hidden: [f64; NET_H],
+    /// Total legal moves generated at this node (enables rank_percentile computation).
+    pub total_legal_moves: usize,
+    /// Raw history-table score for this wall move (proxy for ordering confidence).
+    pub history_score: i32,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2270,6 +2274,8 @@ impl AceSearch {
                             score: *score,
                             nodes: self.nodes.saturating_sub(nodes_before),
                             hidden,
+                            total_legal_moves: n,
+                            history_score: self.history_tbl[m as usize],
                         });
                     }
                 }

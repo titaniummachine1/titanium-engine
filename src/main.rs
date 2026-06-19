@@ -170,13 +170,13 @@ fn run_reduction_probe(args: &[String]) {
             .collect::<Vec<_>>()
             .join(",");
         println!(
-            "{{\"schema\":\"reduction-probe-event-v1\",\"ordinal\":{},\"parent_hash\":\"{:08x}{:08x}\",\"child_hash\":\"{:08x}{:08x}\",\"move\":\"{}\",\"depth\":{},\"ply\":{},\"alpha\":{},\"beta\":{},\"move_index\":{},\"base_reduction\":{},\"extra_reduction\":{},\"verification_triggered\":{},\"score\":{},\"nodes\":{},\"hidden\":[{}]}}",
+            "{{\"schema\":\"reduction-probe-event-v1\",\"ordinal\":{},\"parent_hash\":\"{:08x}{:08x}\",\"child_hash\":\"{:08x}{:08x}\",\"move\":\"{}\",\"depth\":{},\"ply\":{},\"alpha\":{},\"beta\":{},\"move_index\":{},\"base_reduction\":{},\"extra_reduction\":{},\"verification_triggered\":{},\"score\":{},\"nodes\":{},\"total_legal_moves\":{},\"history_score\":{},\"hidden\":[{}]}}",
             event.ordinal, event.parent_hash_hi, event.parent_hash_lo,
             event.child_hash_hi, event.child_hash_lo,
             titanium::acev13::ace_to_algebraic(event.mv), event.depth, event.ply,
             event.alpha, event.beta, event.move_index, event.base_reduction,
             event.applied_extra_reduction, event.verification_triggered,
-            event.score, event.nodes, hidden,
+            event.score, event.nodes, event.total_legal_moves, event.history_score, hidden,
         );
     }
     println!(
