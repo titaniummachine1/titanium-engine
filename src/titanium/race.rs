@@ -241,6 +241,98 @@ mod tests {
         assert_eq!(tbl[(p0 * 81 + p1) * 2 + 1], -16, "P1 to move loses head-on");
     }
 
+    /// Regression: ka-ai game ply 67 — white must delay loss, not walk into a1.
+    #[test]
+    fn ka_game_ply67_stubborn_loser_root_moves() {
+        use crate::titanium::algebraic_to_move_id;
+        use crate::titanium::move_id_to_algebraic;
+        let moves = [
+            "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "f6h", "c3h", "d4v", "e5v", "h6h", "a3h",
+            "d6h", "f4v", "c5v", "h1h", "b4h", "g5h", "a7h", "f1h", "c7h", "d1h", "e5", "e6", "e4",
+            "d6", "f4", "d5", "f5", "d4", "f6", "c4", "g6", "b4", "h6", "a4", "i6", "a5", "i5", "b5",
+            "i4", "b6", "h4", "c6", "b6h", "b6", "h3", "a6", "g3", "a7", "f3", "b7", "e3", "c7", "d3",
+            "d7", "d2", "e7", "c2", "b1h", "e7h", "d7", "b2", "c7", "a2",
+        ];
+        let mut g = GameState::new();
+        for m in moves {
+            g.make_move(algebraic_to_move_id(m));
+        }
+        let mut s = RaceScratch::new();
+        let mut tbl = vec![0i16; RACE_STATES];
+        solve_race_config(&mut g, &mut s, &mut tbl);
+        let id = (g.pawn[0] * 81 + g.pawn[1]) * 2 + g.turn;
+        let rv = tbl[id] as i32;
+        eprintln!(
+            "root turn={} p0={} p1={} rv={} dist0={} dist1={}",
+            g.turn,
+            g.pawn[0],
+            g.pawn[1],
+            rv,
+            {
+                let mut d = [0u8; 81];
+                g.compute_dist(0, &mut d);
+                d[g.pawn[0]]
+            },
+            {
+                let mut d = [0u8; 81];
+                g.compute_dist(1, &mut d);
+                d[g.pawn[1]]
+            }
+        );
+        let me = g.turn;
+        let mut buf = [0i16; 16];
+        let nm = g.gen_pawn_moves(&mut buf, 0);
+        let mut best_key = i32::MIN;
+        let mut best_alg = String::new();
+        for i in 0..nm {
+            let c = buf[i] as usize;
+            let my_v = if (me == 0 && c < 9) || (me == 1 && c >= 72) {
+                1
+            } else {
+                let v = tbl[if me == 0 {
+                    (c * 81 + g.pawn[1]) * 2 + 1
+                } else {
+                    (g.pawn[0] * 81 + c) * 2
+                }] as i32;
+                if v == 0 {
+                    continue;
+                }
+                if v > 0 {
+                    -(v + 1)
+                } else {
+                    1 - v
+                }
+            };
+            let key = if my_v > 0 {
+                1_000_000 - my_v
+            } else {
+                -1_000_000 - my_v
+            };
+            eprintln!(
+                "  {} my_v={} key={} succ_v={}",
+                move_id_to_algebraic(buf[i]),
+                my_v,
+                key,
+                if (me == 0 && c < 9) || (me == 1 && c >= 72) {
+                    0
+                } else {
+                    tbl[if me == 0 {
+                        (c * 81 + g.pawn[1]) * 2 + 1
+                    } else {
+                        (g.pawn[0] * 81 + c) * 2
+                    }] as i32
+                }
+            );
+            if key > best_key {
+                best_key = key;
+                best_alg = move_id_to_algebraic(buf[i]);
+            }
+        }
+        eprintln!("best by race table: {best_alg} (rv={rv})");
+        assert!(rv < 0, "white must be in a proven loss");
+        assert_eq!(best_alg, "b7", "b7 and d7 tie on race plies; b7 wins move-order tie-break");
+    }
+
     #[test]
     fn one_step_from_goal_wins_immediately() {
         let tbl = solved_empty_board();
