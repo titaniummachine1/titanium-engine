@@ -2379,4 +2379,35 @@ mod tests {
             );
         }
     }
+
+    /// Mate class beats everything; within wins/losses, shorter win / longer loss wins.
+    #[test]
+    fn mate_score_hierarchy_prefers_faster_wins_and_slower_losses() {
+        let win_in_2 = MATE - 2;
+        let win_in_5 = MATE - 5;
+        let lose_in_3 = -MATE + 3;
+        let lose_in_9 = -MATE + 9;
+        let ordinary = 420;
+
+        assert!(win_in_2 > win_in_5, "Win in 2 must beat Win in 5");
+        assert!(win_in_5 > ordinary, "Any proven win beats ordinary eval");
+        assert!(ordinary > lose_in_9, "Ordinary eval beats any forced loss");
+        assert!(lose_in_9 > lose_in_3, "Lose in 9 must beat Lose in 3 (stubborn loser)");
+        assert_eq!(mate_distance(win_in_2), Some(2));
+        assert_eq!(mate_distance(lose_in_9), Some(9));
+    }
+
+    #[test]
+    fn tt_mate_scores_preserve_distance_after_ply_normalization() {
+        for ply in [0u32, 3, 11] {
+            for dist in [2u32, 5, 9] {
+                let win = MATE - dist as i32;
+                let loss = -MATE + dist as i32;
+                assert_eq!(score_from_tt(score_to_tt(win, ply), ply), win);
+                assert_eq!(score_from_tt(score_to_tt(loss, ply), ply), loss);
+                assert_eq!(mate_distance(score_from_tt(score_to_tt(win, ply), ply)), Some(dist));
+                assert_eq!(mate_distance(score_from_tt(score_to_tt(loss, ply), ply)), Some(dist));
+            }
+        }
+    }
 }
