@@ -49,6 +49,9 @@ use crate::util::grid::{flood_sq_from_bit, FLOOD_PLAYABLE};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
+/// Proven-outcome band for stubborn-loser tie breaks (matches `search::alphabeta`).
+const CERT_WIN_SCORE: i32 = 15_000;
+const CERT_BAND: i32 = 4_000;
 
 /// Graduated LMR starts after this move index (JS acev10: `i >= 4`).
 const ACE_LMR_AFTER_MOVE: usize = 4;
@@ -424,6 +427,8 @@ pub struct TitaniumSearch {
     /// leaves with both hands empty. Inner nodes use the HalfPW net (search
     /// + EME resolve tempo ambiguity). Set in [`Self::grafted_with_weights`].
     cert_eval_leaves_only: bool,
+    /// Override for experimental wall-ignorance certificate (`None` = env only).
+    wall_ignore_cert_override: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     eme: bool,
     pub nodes: u64,
@@ -567,6 +572,7 @@ impl TitaniumSearch {
             dead_zone_prune: false,
             cheap_cert: false,
             cert_eval_leaves_only: false,
+            wall_ignore_cert_override: None,
             eme: false,
             nodes: 0,
             deadline: Instant::now(),
@@ -729,6 +735,13 @@ impl TitaniumSearch {
     pub fn grafted_no_raceproof(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
         let mut search = Self::grafted(g, tt_bits);
         search.race_proof = false;
+        search
+    }
+
+    /// Titanium v15 experimental — wall-ignorance loss certificate (frozen net).
+    pub fn grafted_wall_ignore_experimental(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
+        let mut search = Self::grafted_frozen(g, tt_bits);
+        search.wall_ignore_cert_override = Some(true);
         search
     }
 
@@ -1572,21 +1585,11 @@ impl TitaniumSearch {
         let w_opp_i = self.g.wl[opp];
         let d_me_i = d_me_u as i32;
         let d_opp_i = d_opp_u as i32;
+        let mut hands_empty_loss_floor = false;
         if w_me_i == 0 && w_opp_i == 0 && (!self.cert_eval_leaves_only || depth <= 0) {
-            if self.cheap_cert {
-                // No walls left: Quoridor is a forced pawn race, never a draw.
-                // Most races are settled by tempo/path math; only close
-                // overlapping paths pay the tiny forward minimax proof.
-                use crate::titanium::cert_bridge::hands_empty_race_stm_wins;
-                if let Some(stm_wins) = hands_empty_race_stm_wins(&mut self.g) {
-                    if stm_wins {
-                        return RACE_MATE - d_me_i.max(1);
-                    }
-                    return -(RACE_MATE - d_opp_i.max(1));
-                }
-            }
+            // Exact retrograde table first — never substitute BFS distance for loss depth
+            // (d_opp heuristics mis-count jump races and collapse stubborn-loser plies).
             if self.race_proof {
-                // pathfix/RaceProof(a): exact k=0 verdict; cached tables always usable
                 if let Some(slot) = self.race_tbl(false) {
                     let rv = self.race_value(slot) as i32;
                     if rv > 0 {
@@ -1596,15 +1599,25 @@ impl TitaniumSearch {
                         return -(RACE_MATE + rv); // proven loss in -rv plies (slower = higher)
                     }
                     // rv==0 is unresolved by this table pass. Quoridor has no
-                    // draws in our ruleset, so never score it as 0; fall through
-                    // to the distance race heuristic.
+                    // draws in our ruleset, so never score it as 0; fall through.
                 }
             }
-            // no table available (solve budget-gated/skipped): naive heuristic race
-            if d_me_i <= d_opp_i {
-                return 3000 + (d_opp_i - d_me_i) * 50 - d_me_i;
+            if self.cheap_cert {
+                // Classifier-only fallback when the table is budget-gated or unresolved.
+                use crate::titanium::cert_bridge::{hands_empty_race, RaceVerdict};
+                match hands_empty_race(&self.g) {
+                    RaceVerdict::Win => return RACE_MATE - d_me_i.max(1),
+                    RaceVerdict::Loss => hands_empty_loss_floor = true,
+                    RaceVerdict::NeedsProof => {}
+                }
             }
-            return -3000 - (d_me_i - d_opp_i) * 50 + d_opp_i;
+            if !hands_empty_loss_floor {
+                // no table / unresolved: naive heuristic race
+                if d_me_i <= d_opp_i {
+                    return 3000 + (d_opp_i - d_me_i) * 50 - d_me_i;
+                }
+                return -3000 - (d_me_i - d_opp_i) * 50 + d_opp_i;
+            }
         }
 
         let d_me = d_me_i as f64;
@@ -1757,6 +1770,24 @@ impl TitaniumSearch {
         // prove race-lead survival). gen13: RP_CERT always exists (certify_win.js
         // inlined), so unlike the v11 browser-parity port this floor is LIVE.
         // Grafted: leaf + both hands empty only (skip 1–2 wall cert in eval).
+        if self.race_proof && w_me_i + w_opp_i > 0 {
+            use crate::titanium::wall_ignore_cert::{
+                cert_score_from_stm, try_wall_ignorance_loss_cert, wall_ignore_loss_cert_enabled,
+                CertScratch,
+            };
+            let force = self
+                .wall_ignore_cert_override
+                .unwrap_or(false)
+                || wall_ignore_loss_cert_enabled();
+            if force {
+                let mut wi_scratch = CertScratch::new();
+                if let Some(verdict) =
+                    try_wall_ignorance_loss_cert(&mut self.g, &mut wi_scratch, true)
+                {
+                    return cert_score_from_stm(&verdict, me);
+                }
+            }
+        }
         let cert_ok = if self.cert_eval_leaves_only {
             depth <= 0 && w_me_i == 0 && w_opp_i == 0
         } else {
@@ -1782,7 +1813,78 @@ impl TitaniumSearch {
                 ret = 2500;
             }
         }
+        if hands_empty_loss_floor {
+            let band = ret.clamp(-CERT_BAND, CERT_BAND);
+            return -CERT_WIN_SCORE + band;
+        }
         ret
+    }
+
+    /// Race-root ordering: fastest win / slowest loss first; tie-break by net eval
+    /// so we play the materially strongest move when plies-to-mate are equal.
+    fn race_root_pick(&mut self, slot: usize, rv: i32) -> Option<(i16, i32, i32)> {
+        let tbl = self.rc_tbl[slot]
+            .as_ref()
+            .expect("race slot")
+            .clone();
+        let me = self.g.turn;
+        let mut buf = [0i16; 16];
+        let nm = self.g.gen_pawn_moves(&mut buf, 0);
+        let mut best_m: i16 = -1;
+        let mut best_v: i32 = 0;
+        let mut best_key = i32::MIN;
+        let mut best_eval = i32::MIN;
+        for &c in &buf[..nm] {
+            let cu = c as usize;
+            let my_v = if (me == 0 && cu < 9) || (me == 1 && cu >= 72) {
+                1
+            } else {
+                let v = tbl[if me == 0 {
+                    (cu * 81 + self.g.pawn[1]) * 2 + 1
+                } else {
+                    (self.g.pawn[0] * 81 + cu) * 2
+                }] as i32;
+                if v == 0 {
+                    continue;
+                }
+                if v > 0 {
+                    -(v + 1)
+                } else {
+                    1 - v
+                }
+            };
+            let key = if my_v > 0 {
+                1_000_000 - my_v
+            } else {
+                -1_000_000 - my_v
+            };
+            self.g.make_move(c);
+            self.refresh_dist(0);
+            let d_me = if me == 0 {
+                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            } else {
+                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            };
+            let d_opp = if me == 0 {
+                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            } else {
+                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            };
+            let tie_eval = d_opp - d_me;
+            self.g.unmake_move();
+            self.cached_stamp = -1;
+            if key > best_key || (key == best_key && tie_eval > best_eval) {
+                best_key = key;
+                best_eval = tie_eval;
+                best_m = c;
+                best_v = my_v;
+            }
+        }
+        if best_m >= 0 && best_v == rv {
+            Some((best_m, best_v, best_eval))
+        } else {
+            None
+        }
     }
 
     fn gen_moves(&mut self, ply: usize, depth: i32, tt_move: i16, out: &mut [i16; 160]) -> usize {
@@ -2453,6 +2555,7 @@ impl TitaniumSearch {
         engine_label: &str,
     ) -> ThinkResult {
         if self.cheap_cert
+            && !self.race_proof
             && self.g.wl[0] == 0
             && self.g.wl[1] == 0
             && self.g.pawn[0] >= 9
@@ -2550,47 +2653,8 @@ impl TitaniumSearch {
             let rv = self.race_tbl(true).map_or(0, |s| self.race_value(s)) as i32;
             if rv != 0 {
                 let slot = self.rc_last as usize;
-                let me = self.g.turn;
-                let mut buf = [0i16; 16];
-                let nm = self.g.gen_pawn_moves(&mut buf, 0);
-                let tbl = self.rc_tbl[slot].as_ref().expect("race slot");
-                let mut best_m: i16 = -1;
-                let mut best_v: i32 = 0;
-                let mut best_key = i32::MIN;
-                for &c in &buf[..nm] {
-                    let cu = c as usize;
-                    let my_v = if (me == 0 && cu < 9) || (me == 1 && cu >= 72) {
-                        1 // reaches own goal row: win in 1 ply
-                    } else {
-                        let v = tbl[if me == 0 {
-                            (cu * 81 + self.g.pawn[1]) * 2 + 1
-                        } else {
-                            (self.g.pawn[0] * 81 + cu) * 2
-                        }] as i32;
-                        if v == 0 {
-                            continue; // unresolved successor: never on a resolved-optimal line
-                        }
-                        // opp wins in v => I lose in v+1; opp loses in -v => I win in -v+1
-                        if v > 0 {
-                            -(v + 1)
-                        } else {
-                            1 - v
-                        }
-                    };
-                    // wins first (faster better), then slower losses
-                    let key = if my_v > 0 {
-                        1_000_000 - my_v
-                    } else {
-                        -1_000_000 - my_v
-                    };
-                    if key > best_key {
-                        best_key = key;
-                        best_m = c;
-                        best_v = my_v;
-                    }
-                }
-                if best_m >= 0 && best_v == rv {
-                    // consistency: chosen move must realize the state value
+                let nm = self.g.gen_pawn_moves(&mut [0i16; 16], 0);
+                if let Some((best_m, _best_v, _)) = self.race_root_pick(slot, rv) {
                     self.rp_root_solves += 1;
                     let rk = rv.abs();
                     self.refresh_dist(0);

@@ -129,6 +129,15 @@ pub fn certify_board(
             None
         };
     }
+    if let Some(verdict) = crate::titanium::wall_ignore_cert::try_wall_ignore_cert_board(board, false)
+    {
+        let winner = player_from_ace(verdict.winner);
+        return if side.is_none_or(|s| s == winner) {
+            Some(winner)
+        } else {
+            None
+        };
+    }
     let deadline = if deadline_ms > 0 {
         Some(Instant::now() + Duration::from_millis(deadline_ms))
     } else {
@@ -360,7 +369,7 @@ fn bfs_from_cell(g: &GameState, src: usize) -> [u8; 81] {
 /// sets are disjoint the pawns never contend for a square → no jump can occur →
 /// the race is a pure parallel tempo race. `d_goal{0,1}` are `compute_dist`
 /// fields (cell→goal); `D{0,1}` are the players' shortest distances.
-fn paths_overlap(g: &GameState, d_goal0: &[u8; 81], d_goal1: &[u8; 81]) -> bool {
+pub fn paths_overlap(g: &GameState, d_goal0: &[u8; 81], d_goal1: &[u8; 81]) -> bool {
     let s0 = bfs_from_cell(g, g.pawn[0]);
     let s1 = bfs_from_cell(g, g.pawn[1]);
     let big0 = d_goal0[g.pawn[0]] as u16;

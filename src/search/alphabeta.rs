@@ -711,6 +711,19 @@ fn endgame_cert_floor(
         }
     }
 
+    // Experimental wall-ignorance corridor certificate (feature-gated, default off).
+    if board.walls_remaining[0] + board.walls_remaining[1] > 0 {
+        if let Some(verdict) =
+            crate::titanium::wall_ignore_cert::try_wall_ignore_cert_board(board, false)
+        {
+            CERT_PROOFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(crate::titanium::wall_ignore_cert::cert_score_from_player(
+                &verdict,
+                stm,
+            ));
+        }
+    }
+
     // ── 1–2 walls: v13 certificate (sound, incomplete), tempo-gated ──────────
     let our_dist = state
         .bfs
@@ -735,7 +748,8 @@ fn endgame_cert_floor(
             return None; // attempt budget spent; only cached verdicts remain free
         }
         state.cert.calls += 1;
-        let verdict = crate::titanium::cert_bridge::certify_board(board, state.cert.budget, 0, None);
+        let verdict =
+            crate::titanium::cert_bridge::certify_board(board, state.cert.budget, 0, None);
         let code = match verdict {
             Some(Player::One) => 0u8,
             Some(Player::Two) => 1u8,
@@ -2392,7 +2406,10 @@ mod tests {
         assert!(win_in_2 > win_in_5, "Win in 2 must beat Win in 5");
         assert!(win_in_5 > ordinary, "Any proven win beats ordinary eval");
         assert!(ordinary > lose_in_9, "Ordinary eval beats any forced loss");
-        assert!(lose_in_9 > lose_in_3, "Lose in 9 must beat Lose in 3 (stubborn loser)");
+        assert!(
+            lose_in_9 > lose_in_3,
+            "Lose in 9 must beat Lose in 3 (stubborn loser)"
+        );
         assert_eq!(mate_distance(win_in_2), Some(2));
         assert_eq!(mate_distance(lose_in_9), Some(9));
     }
@@ -2405,8 +2422,14 @@ mod tests {
                 let loss = -MATE + dist as i32;
                 assert_eq!(score_from_tt(score_to_tt(win, ply), ply), win);
                 assert_eq!(score_from_tt(score_to_tt(loss, ply), ply), loss);
-                assert_eq!(mate_distance(score_from_tt(score_to_tt(win, ply), ply)), Some(dist));
-                assert_eq!(mate_distance(score_from_tt(score_to_tt(loss, ply), ply)), Some(dist));
+                assert_eq!(
+                    mate_distance(score_from_tt(score_to_tt(win, ply), ply)),
+                    Some(dist)
+                );
+                assert_eq!(
+                    mate_distance(score_from_tt(score_to_tt(loss, ply), ply)),
+                    Some(dist)
+                );
             }
         }
     }

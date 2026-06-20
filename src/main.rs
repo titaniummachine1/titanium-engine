@@ -1305,6 +1305,8 @@ enum MatchEngine {
     AceV13GraftedFrozen,
     /// Production graft with RaceProof/cert gates disabled. Experimental A/B only.
     AceV13GraftedNoRaceProof,
+    /// Titanium v15 experimental — wall-ignorance loss certificate (frozen net).
+    AceV13GraftedWallIgnore,
 }
 
 impl MatchEngine {
@@ -1320,6 +1322,9 @@ impl MatchEngine {
             "titanium-v15-frozen" => Some(MatchEngine::AceV13GraftedFrozen),
             "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
                 Some(MatchEngine::AceV13GraftedNoRaceProof)
+            }
+            "titanium-v15-wall-ignore-experimental" | "grafted-wall-ignore" => {
+                Some(MatchEngine::AceV13GraftedWallIgnore)
             }
             "ace-v13" => Some(MatchEngine::AceV13),
             "ace-v13-cert" => Some(MatchEngine::AceV13Cert),
@@ -1347,6 +1352,9 @@ impl MatchEngine {
                 "Titanium v15 frozen (gen13 + O1 movegen + cert + adaptive-TT, v13 HalfPW)"
             }
             MatchEngine::AceV13GraftedNoRaceProof => "Titanium v15 without RaceProof/cert gates",
+            MatchEngine::AceV13GraftedWallIgnore => {
+                "Titanium v15 experimental — wall-ignorance loss certificate (frozen net)"
+            }
         }
     }
 }
@@ -1381,7 +1389,8 @@ impl Seat {
             | MatchEngine::AceV13Grafted
             | MatchEngine::AceV13GraftedPartial
             | MatchEngine::AceV13GraftedFrozen
-            | MatchEngine::AceV13GraftedNoRaceProof => {
+            | MatchEngine::AceV13GraftedNoRaceProof
+            | MatchEngine::AceV13GraftedWallIgnore => {
                 let mut g = GameState::new();
                 for m in opening {
                     g.make_move(algebraic_to_move_id(m));
@@ -1391,6 +1400,9 @@ impl Seat {
                     MatchEngine::AceV13GraftedFrozen => TitaniumSearch::grafted_frozen(g, tt_bits),
                     MatchEngine::AceV13GraftedNoRaceProof => {
                         TitaniumSearch::grafted_no_raceproof(g, tt_bits)
+                    }
+                    MatchEngine::AceV13GraftedWallIgnore => {
+                        TitaniumSearch::grafted_wall_ignore_experimental(g, tt_bits)
                     }
                     MatchEngine::AceV13GraftedPartial => {
                         let mut s = TitaniumSearch::grafted(g, tt_bits);
