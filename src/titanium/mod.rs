@@ -40,6 +40,9 @@ pub mod reduction_sidecar;
 pub mod search;
 pub mod session;
 pub mod session_v15;
+pub mod wall_ignore_cert;
+pub mod wall_ignore_cert_tests;
+pub mod wall_ignore_corridor;
 
 pub use game::GameState;
 pub use packed_state::{
