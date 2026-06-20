@@ -277,53 +277,108 @@ pub enum RaceVerdict {
     NeedsProof,
 }
 
-/// Classify a hands-empty (no walls left) race for the side to move using pure
-/// tempo math plus path-overlap, reserving the heavy proof for the volatile case.
+/// Classify a hands-empty (no walls left) race for the side to move using
+/// turn-adjusted tempo plus path-overlap, reserving the heavy proof for the
+/// volatile band only.
 ///
-/// **Tempo** = `opp_dist − our_dist`: +1 tempo means stm is 1 move closer to their
-/// goal. Delta=0 is broken by the stm's first-move advantage (they consume 1 tempo
-/// by moving, so equal distance → stm wins in a pure race).
+/// Uses [`turn_adjusted_tempo_advantage`] (White perspective: `raw + 1` / `raw − 1`
+/// for side to move). Wall-graph BFS distances ignore opposing pawn placement.
 ///
-/// * `tempo > 1`: 2+ tempo lead absorbs any jump → stm wins, overlap or not.
-/// * `tempo < -1`: 2+ tempo deficit, even a stm jump can't recover → stm loses.
-/// * `-1 ≤ tempo ≤ 1`, no overlap: pure parallel race — stm wins if `tempo ≥ 0`.
-/// * `-1 ≤ tempo ≤ 1`, paths overlap: jump can swing ±1 tempo → `NeedsProof`.
+/// * `adj ≥ 2`: forced White win (stm wins iff White to move).
+/// * `adj ≤ −2`: forced Black win (stm wins iff Black to move).
+/// * `−1 ≤ adj ≤ 1` with overlapping shortest-path sets: jump may decide →
+///   [`RaceVerdict::NeedsProof`] (caller runs [`race_minimax`]).
+/// * `−1 ≤ adj ≤ 1` with separated paths: [`separated_pure_race_verdict`].
 pub fn hands_empty_race(g: &AceGame) -> RaceVerdict {
+    let adj = turn_adjusted_tempo_advantage(g);
+    if adj >= 2 {
+        return if g.turn == 0 {
+            RaceVerdict::Win
+        } else {
+            RaceVerdict::Loss
+        };
+    }
+    if adj <= -2 {
+        return if g.turn == 0 {
+            RaceVerdict::Loss
+        } else {
+            RaceVerdict::Win
+        };
+    }
     let mut d0 = [0u8; 81];
     let mut d1 = [0u8; 81];
     g.compute_dist(0, &mut d0);
     g.compute_dist(1, &mut d1);
-    let big0 = d0[g.pawn[0]];
-    let big1 = d1[g.pawn[1]];
-    if big0 == 255 || big1 == 255 {
-        return RaceVerdict::NeedsProof; // unreachable (shouldn't happen) → be safe
+    if d0[g.pawn[0]] == 255 || d1[g.pawn[1]] == 255 {
+        return RaceVerdict::NeedsProof;
     }
-    let (our, opp) = if g.turn == 0 {
-        (big0 as i32, big1 as i32)
-    } else {
-        (big1 as i32, big0 as i32)
-    };
-    // tempo > 0 ⇒ stm is closer; tempo < 0 ⇒ stm is behind.
-    let tempo = opp - our;
-
-    if tempo > 1 {
-        return RaceVerdict::Win; // ≥2 tempo lead absorbs any jump
-    }
-    if tempo < -1 {
-        return RaceVerdict::Loss; // ≥2 tempo deficit, even a stm jump can't recover
-    }
-    // |tempo| ≤ 1: a jump can swing the result by ±1 tempo — overlap decides.
     if paths_overlap(g, &d0, &d1) {
         return RaceVerdict::NeedsProof;
     }
-    // Pure parallel race (no jump possible): stm moves first.
-    // tempo > 0: stm strictly closer → wins.
-    // tempo == 0: equal distance but stm spends 1 tempo first → wins.
-    // tempo < 0: opponent strictly closer → stm loses.
-    if tempo < 0 {
-        RaceVerdict::Loss
+    separated_pure_race_verdict(g)
+}
+
+// ── Turn-adjusted tempo (audit / proposed rule) ───────────────────────────────
+
+/// Wall-graph distances for both players (255 = unreachable).
+pub fn wall_graph_distances(g: &AceGame) -> (u8, u8) {
+    let mut d0 = [0u8; 81];
+    let mut d1 = [0u8; 81];
+    g.compute_dist(0, &mut d0);
+    g.compute_dist(1, &mut d1);
+    (d0[g.pawn[0]], d1[g.pawn[1]])
+}
+
+/// White-perspective turn-adjusted tempo advantage for the proposed shortcut rule.
+///
+/// `raw = black_distance − white_distance` using wall-graph BFS (ignores pawns).
+/// Adds one tempo when White is to move, subtracts one when Black is to move.
+pub fn turn_adjusted_tempo_advantage(g: &AceGame) -> i32 {
+    let (white_dist, black_dist) = wall_graph_distances(g);
+    if white_dist == 255 || black_dist == 255 {
+        return 0;
+    }
+    let raw = black_dist as i32 - white_dist as i32;
+    if g.turn == 0 {
+        raw + 1
     } else {
+        raw - 1
+    }
+}
+
+/// Pure parallel race once pawn interaction is impossible (paths separated).
+/// Equal remaining distances are won by the side to move.
+pub fn separated_pure_race_verdict(g: &AceGame) -> RaceVerdict {
+    let (white_dist, black_dist) = wall_graph_distances(g);
+    if white_dist == 255 || black_dist == 255 {
+        return RaceVerdict::NeedsProof;
+    }
+    let stm_wins = if g.turn == 0 {
+        white_dist <= black_dist
+    } else {
+        black_dist <= white_dist
+    };
+    if stm_wins {
         RaceVerdict::Win
+    } else {
+        RaceVerdict::Loss
+    }
+}
+
+/// Proposed turn-adjusted classifier — mirrors [`hands_empty_race`] for audit diffs.
+pub fn proposed_hands_empty_race(g: &AceGame) -> RaceVerdict {
+    hands_empty_race(g)
+}
+
+/// Exact stm win/loss from retrograde oracle value (`+k`/`-k`/`0`).
+pub fn exact_race_verdict(g: &AceGame, oracle_table: &[i16]) -> RaceVerdict {
+    use crate::acev13::oracle::ORACLE_STATES;
+    let id = (g.pawn[0] * 81 + g.pawn[1]) * 2 + g.turn;
+    assert!(id < ORACLE_STATES);
+    match oracle_table[id].cmp(&0) {
+        std::cmp::Ordering::Greater => RaceVerdict::Win,
+        std::cmp::Ordering::Less => RaceVerdict::Loss,
+        std::cmp::Ordering::Equal => RaceVerdict::NeedsProof, // draw — treat as volatile
     }
 }
 
@@ -525,5 +580,256 @@ mod tests {
         let mut board = Board::new();
         board.pawns[0] = (8, 4);
         assert_eq!(certify_board(&board, 1000, 0, None), Some(Player::One));
+    }
+
+    // ── Turn-adjusted tempo audit (exhaustive zero-wall verifier) ─────────────
+
+    #[derive(Default, Debug)]
+    struct RaceAuditStats {
+        states_checked: usize,
+        exact_white_wins: usize,
+        exact_black_wins: usize,
+        exact_draws: usize,
+        current_false_wins: usize,
+        current_false_losses: usize,
+        proposed_false_wins: usize,
+        proposed_false_losses: usize,
+        current_unnecessary_extensions: usize,
+        proposed_avoids_extension: usize,
+        current_extends_proposed_shortcuts: usize,
+    }
+
+    fn audit_zero_wall_state(
+        p0: usize,
+        p1: usize,
+        stm: Player,
+        oracle_table: &[i16],
+        stats: &mut RaceAuditStats,
+    ) -> Option<(RaceVerdict, RaceVerdict, RaceVerdict, i32)> {
+        if p0 == p1 || p0 < 9 || p1 >= 72 {
+            return None;
+        }
+        let board = race_board(board_pos_from_ace(p0), board_pos_from_ace(p1), stm);
+        let g = ace_from_board(&board);
+        let id = (p0 * 81 + p1) * 2 + (stm as usize);
+        let exact_val = oracle_table[id];
+        let exact = match exact_val.cmp(&0) {
+            std::cmp::Ordering::Greater => RaceVerdict::Win,
+            std::cmp::Ordering::Less => RaceVerdict::Loss,
+            std::cmp::Ordering::Equal => RaceVerdict::NeedsProof,
+        };
+        let current = hands_empty_race(&g);
+        let proposed = proposed_hands_empty_race(&g);
+        let adj = turn_adjusted_tempo_advantage(&g);
+
+        stats.states_checked += 1;
+        if exact_val > 0 {
+            if stm == Player::One {
+                stats.exact_white_wins += 1;
+            } else {
+                stats.exact_black_wins += 1;
+            }
+        } else if exact_val < 0 {
+            if stm == Player::One {
+                stats.exact_black_wins += 1;
+            } else {
+                stats.exact_white_wins += 1;
+            }
+        } else {
+            stats.exact_draws += 1;
+        }
+
+        if current == RaceVerdict::Win && exact != RaceVerdict::Win {
+            stats.current_false_wins += 1;
+        }
+        if current == RaceVerdict::Loss && exact != RaceVerdict::Loss {
+            stats.current_false_losses += 1;
+        }
+        if proposed == RaceVerdict::Win && exact != RaceVerdict::Win {
+            stats.proposed_false_wins += 1;
+        }
+        if proposed == RaceVerdict::Loss && exact != RaceVerdict::Loss {
+            stats.proposed_false_losses += 1;
+        }
+        if current == RaceVerdict::NeedsProof && proposed != RaceVerdict::NeedsProof {
+            stats.proposed_avoids_extension += 1;
+            if proposed == exact {
+                stats.current_unnecessary_extensions += 1;
+            }
+        }
+        if current == RaceVerdict::NeedsProof
+            && (proposed == RaceVerdict::Win || proposed == RaceVerdict::Loss)
+        {
+            stats.current_extends_proposed_shortcuts += 1;
+        }
+
+        Some((exact, current, proposed, adj))
+    }
+
+    #[test]
+    fn exhaustive_zero_wall_turn_adjusted_audit() {
+        use crate::acev13::oracle::oracle_solve_board;
+
+        let oracle_table = oracle_solve_board(&[0u8; 81]);
+        let mut stats = RaceAuditStats::default();
+        let mut counterexamples: Vec<String> = Vec::new();
+
+        for p0 in 0..81 {
+            for p1 in 0..81 {
+                for stm in [Player::One, Player::Two] {
+                    let Some((exact, current, proposed, adj)) =
+                        audit_zero_wall_state(p0, p1, stm, &oracle_table, &mut stats)
+                    else {
+                        continue;
+                    };
+                    if proposed == RaceVerdict::Win && exact != RaceVerdict::Win {
+                        counterexamples.push(format!(
+                            "proposed false win p0={p0} p1={p1} stm={stm:?} adj={adj} exact={exact:?} current={current:?}"
+                        ));
+                    }
+                    if proposed == RaceVerdict::Loss && exact != RaceVerdict::Loss {
+                        counterexamples.push(format!(
+                            "proposed false loss p0={p0} p1={p1} stm={stm:?} adj={adj} exact={exact:?} current={current:?}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        eprintln!("zero-wall audit stats: {stats:#?}");
+        if !counterexamples.is_empty() {
+            for cx in counterexamples.iter().take(20) {
+                eprintln!("COUNTEREXAMPLE: {cx}");
+            }
+            panic!(
+                "proposed rule has {} false wins and {} false losses (showing up to 20)",
+                stats.proposed_false_wins,
+                stats.proposed_false_losses
+            );
+        }
+        assert_eq!(stats.proposed_false_wins, 0);
+        assert_eq!(stats.proposed_false_losses, 0);
+        assert!(stats.states_checked > 10_000);
+    }
+
+    #[test]
+    fn turn_adjusted_examples_from_spec() {
+        // Discover concrete boards matching the spec's distance/adj examples.
+        let mut plus_one_white_stm: Option<(usize, usize)> = None;
+        let mut plus_one_black_stm: Option<(usize, usize)> = None;
+        for p0 in 9..81 {
+            for p1 in 0..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                let g_w = ace_from_board(&race_board(
+                    board_pos_from_ace(p0),
+                    board_pos_from_ace(p1),
+                    Player::One,
+                ));
+                let (wd, bd) = wall_graph_distances(&g_w);
+                if bd as i32 - wd as i32 == 1 && turn_adjusted_tempo_advantage(&g_w) == 2 {
+                    plus_one_white_stm = Some((p0, p1));
+                }
+                let g_b = ace_from_board(&race_board(
+                    board_pos_from_ace(p0),
+                    board_pos_from_ace(p1),
+                    Player::Two,
+                ));
+                if bd as i32 - wd as i32 == 1 && turn_adjusted_tempo_advantage(&g_b) == 0 {
+                    plus_one_black_stm = Some((p0, p1));
+                }
+            }
+        }
+        let (p0, p1) = plus_one_white_stm.expect("white +1 lead example");
+        let g = ace_from_board(&race_board(
+            board_pos_from_ace(p0),
+            board_pos_from_ace(p1),
+            Player::One,
+        ));
+        assert_eq!(turn_adjusted_tempo_advantage(&g), 2);
+        assert_eq!(hands_empty_race(&g), RaceVerdict::Win);
+
+        let (p0, p1) = plus_one_black_stm.expect("white +1 lead black-to-move example");
+        let g = ace_from_board(&race_board(
+            board_pos_from_ace(p0),
+            board_pos_from_ace(p1),
+            Player::Two,
+        ));
+        assert_eq!(turn_adjusted_tempo_advantage(&g), 0);
+        assert_eq!(hands_empty_race(&g), RaceVerdict::NeedsProof);
+
+        // Equal distance, White to move → adj=1 → resolve (same column overlaps).
+        let g = ace_from_board(&race_board((3, 4), (5, 4), Player::One));
+        assert_eq!(turn_adjusted_tempo_advantage(&g), 1);
+        assert_eq!(hands_empty_race(&g), RaceVerdict::NeedsProof);
+
+        // Equal distance, Black to move → adj=-1 → resolve.
+        let g = ace_from_board(&race_board((3, 4), (5, 4), Player::Two));
+        assert_eq!(turn_adjusted_tempo_advantage(&g), -1);
+        assert_eq!(hands_empty_race(&g), RaceVerdict::NeedsProof);
+
+        // Equal distance, separated paths, White to move → pure race win.
+        let g = ace_from_board(&race_board((3, 1), (5, 7), Player::One));
+        assert_eq!(turn_adjusted_tempo_advantage(&g), 1);
+        assert_eq!(hands_empty_race(&g), RaceVerdict::Win);
+    }
+
+    #[test]
+    fn separated_pure_race_matches_oracle_when_no_overlap() {
+        use crate::acev13::oracle::oracle_solve_board;
+        let oracle_table = oracle_solve_board(&[0u8; 81]);
+        for p0 in 9..81 {
+            for p1 in 0..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                for stm in [Player::One, Player::Two] {
+                    let board = race_board(board_pos_from_ace(p0), board_pos_from_ace(p1), stm);
+                    let g = ace_from_board(&board);
+                    let mut d0 = [0u8; 81];
+                    let mut d1 = [0u8; 81];
+                    g.compute_dist(0, &mut d0);
+                    g.compute_dist(1, &mut d1);
+                    if paths_overlap(&g, &d0, &d1) {
+                        continue;
+                    }
+                    let id = (p0 * 81 + p1) * 2 + (stm as usize);
+                    if oracle_table[id] == 0 {
+                        continue;
+                    }
+                    let pure = separated_pure_race_verdict(&g);
+                    let exact = if oracle_table[id] > 0 {
+                        RaceVerdict::Win
+                    } else {
+                        RaceVerdict::Loss
+                    };
+                    assert_eq!(
+                        pure, exact,
+                        "separated pure race p0={p0} p1={p1} stm={stm:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn benchmark_extension_avoidance_vs_current() {
+        use crate::acev13::oracle::oracle_solve_board;
+        let oracle_table = oracle_solve_board(&[0u8; 81]);
+        let mut stats = RaceAuditStats::default();
+        for p0 in 9..81 {
+            for p1 in 0..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                for stm in [Player::One, Player::Two] {
+                    let _ = audit_zero_wall_state(p0, p1, stm, &oracle_table, &mut stats);
+                }
+            }
+        }
+        eprintln!("zero-wall extension benchmark: {stats:#?}");
+        // Document how many volatile positions each classifier visits.
+        assert!(stats.states_checked > 10_000);
     }
 }
