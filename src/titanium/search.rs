@@ -19,20 +19,14 @@
 //!   build runs with `RP_CERT === null`, which this port mirrors (the
 //!   commitment gate keeps the wall when no certifier exists).
 
-use crate::titanium::move_id_to_board;
 use crate::titanium::dist::{
     fill_ace_dist_from_pawn, fill_ace_dist_to_goal_with_masks, fill_choke_points, fill_contested,
     fill_corridor_delta, fill_distance_layers, fill_path_crossing, fill_sparse_route_masks,
     shortest_route_bits,
 };
+use crate::titanium::move_id_to_board;
 use crate::util::clock::{Duration, Instant};
 
-use crate::titanium::certify::{certify, CertifyOpts};
-use crate::titanium::game::{GameState, ZOBRIST};
-use crate::titanium::net::{net, net_frozen, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
-use crate::titanium::packed_state::FEATURE_SCHEMA;
-use crate::titanium::race::{solve_race_config, RaceScratch, RACE_MATE, RACE_STATES};
-use crate::titanium::reduction_sidecar::ReductionSidecar;
 use crate::cat::prune::{
     gap_play_zone_mask, get_shortest_path, wall_in_dead_zone, wall_should_search,
 };
@@ -45,6 +39,14 @@ use crate::movegen::{
 use crate::path::flood::expand_frontier;
 use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
+use crate::titanium::certify::{certify, CertifyOpts};
+use crate::titanium::game::{GameState, ZOBRIST};
+use crate::titanium::net::{net, net_frozen, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
+use crate::titanium::packed_state::FEATURE_SCHEMA;
+use crate::titanium::race::{
+    race_outcome, solve_race_config, RaceBound, RaceScratch, RACE_MATE, RACE_STATES,
+};
+use crate::titanium::reduction_sidecar::ReductionSidecar;
 use crate::util::grid::{flood_sq_from_bit, FLOOD_PLAYABLE};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
@@ -1587,9 +1589,35 @@ impl TitaniumSearch {
         let d_opp_i = d_opp_u as i32;
         let mut hands_empty_loss_floor = false;
         if w_me_i == 0 && w_opp_i == 0 && (!self.cert_eval_leaves_only || depth <= 0) {
-            // Exact retrograde table first — never substitute BFS distance for loss depth
-            // (d_opp heuristics mis-count jump races and collapse stubborn-loser plies).
-            if self.race_proof {
+            // Service A (cheap_cert): SOUND fast race bound first. When the pawns'
+            // shortest-path sets are separated the race is a pure tempo race and
+            // the outcome is decided WITHOUT building the exact graph — the common
+            // case. (The old `hands_empty_race` classifier here was unsound on
+            // walled boards: it could false-certify an overlapping race; see
+            // race.rs notes.) Only the overlapping minority (`Unknown`) falls
+            // through to the exact retrograde table below.
+            if self.cheap_cert {
+                if self.race_scratch.is_none() {
+                    self.race_scratch = Some(Box::new(RaceScratch::new()));
+                }
+                let bound = {
+                    let scratch = self.race_scratch.as_mut().expect("race scratch");
+                    race_outcome(&mut self.g, scratch)
+                };
+                match bound {
+                    // Proven win: graded by own distance (faster = higher). The
+                    // GUARANTEE is the bound; the magnitude is an ordering hint.
+                    RaceBound::Lower(_) => return RACE_MATE - d_me_i.max(1),
+                    // Proven loss: sign-correct loss floor (net eval grades it).
+                    RaceBound::Upper(_) => hands_empty_loss_floor = true,
+                    RaceBound::Exact(_) | RaceBound::Unknown => {}
+                }
+            }
+            // Exact retrograde table (Service B) — for the overlapping minority and
+            // for faithful (non-cheap_cert) race_proof engines. Never substitutes
+            // BFS distance for loss depth (that mis-counts jump races and collapses
+            // stubborn-loser plies). Budget-gated; built at most a few times/think.
+            if !hands_empty_loss_floor && self.race_proof {
                 if let Some(slot) = self.race_tbl(false) {
                     let rv = self.race_value(slot) as i32;
                     if rv > 0 {
@@ -1600,15 +1628,6 @@ impl TitaniumSearch {
                     }
                     // rv==0 is unresolved by this table pass. Quoridor has no
                     // draws in our ruleset, so never score it as 0; fall through.
-                }
-            }
-            if self.cheap_cert {
-                // Classifier-only fallback when the table is budget-gated or unresolved.
-                use crate::titanium::cert_bridge::{hands_empty_race, RaceVerdict};
-                match hands_empty_race(&self.g) {
-                    RaceVerdict::Win => return RACE_MATE - d_me_i.max(1),
-                    RaceVerdict::Loss => hands_empty_loss_floor = true,
-                    RaceVerdict::NeedsProof => {}
                 }
             }
             if !hands_empty_loss_floor {
@@ -1775,10 +1794,8 @@ impl TitaniumSearch {
                 cert_score_from_stm, try_wall_ignorance_loss_cert, wall_ignore_loss_cert_enabled,
                 CertScratch,
             };
-            let force = self
-                .wall_ignore_cert_override
-                .unwrap_or(false)
-                || wall_ignore_loss_cert_enabled();
+            let force =
+                self.wall_ignore_cert_override.unwrap_or(false) || wall_ignore_loss_cert_enabled();
             if force {
                 let mut wi_scratch = CertScratch::new();
                 if let Some(verdict) =
@@ -1823,10 +1840,7 @@ impl TitaniumSearch {
     /// Race-root ordering: fastest win / slowest loss first; tie-break by net eval
     /// so we play the materially strongest move when plies-to-mate are equal.
     fn race_root_pick(&mut self, slot: usize, rv: i32) -> Option<(i16, i32, i32)> {
-        let tbl = self.rc_tbl[slot]
-            .as_ref()
-            .expect("race slot")
-            .clone();
+        let tbl = self.rc_tbl[slot].as_ref().expect("race slot").clone();
         let me = self.g.turn;
         let mut buf = [0i16; 16];
         let nm = self.g.gen_pawn_moves(&mut buf, 0);
