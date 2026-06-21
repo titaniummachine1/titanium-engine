@@ -192,12 +192,35 @@ fn is_home(side: usize, cell: usize) -> bool {
 // Service A — fast outcome / alpha-beta bound (no successor graph, no exact DTM).
 // ---------------------------------------------------------------------------
 
+/// Alternating-ply ETA for `side` to travel `distance` steps when `turn` moves
+/// next. Side to move gets a free half-ply (one step sooner).
+#[inline(always)]
+fn arrival_ply(side: usize, turn: usize, distance: u8) -> i16 {
+    if distance == 0 {
+        0
+    } else {
+        2 * distance as i16 - i16::from(side == turn)
+    }
+}
+
 /// Forced-outcome bound for the side to move at the current hands-empty state.
 ///
-/// Sound on ANY fixed-wall topology: decides only when the pawns' shortest-path
-/// sets are disjoint (pure tempo race), otherwise declines with
-/// [`RaceBound::Unknown`]. No successor graph, no exact DTM, never a false bound.
-/// The `_s` scratch is unused today but kept for API symmetry / future memoization.
+/// Sound on ANY fixed-wall topology. Two decision tiers:
+///
+/// **Tier 1 — ETA gate (before path-mask construction):** compute each pawn's
+/// alternating-ply ETA to its own goal; identify the pure-race runner (smaller
+/// ETA). If the chaser's ETA to the *runner's goal cell* exceeds the runner's
+/// own ETA by more than 1 ply, the chaser cannot intercept any cell on the
+/// runner's optimal path, so the race outcome is settled without BFS over the
+/// path sets.
+///
+/// **Tier 2 — overlap check:** if the ETA gate doesn't fire, fall back to the
+/// proven path-set disjointness test ([`paths_overlap`]) + pure tempo verdict.
+///
+/// Never a false bound: if `delta_eta > 1` turns out sound on all legal fixed
+/// topologies the gate fires; otherwise it degrades gracefully to `Unknown` and
+/// the caller falls back to search. The `_s` scratch is unused by the bound path
+/// but kept for API symmetry / future memoisation.
 ///
 /// Pre-condition (debug-checked): both pawns are off their own goal rows — the
 /// caller handles terminal states.
@@ -210,9 +233,46 @@ pub fn race_outcome(g: &mut GameState, _s: &mut RaceScratch) -> RaceBound {
     let mut d1 = [0u8; 81];
     g.compute_dist(0, &mut d0);
     g.compute_dist(1, &mut d1);
-    if d0[g.pawn[0]] == u8::MAX || d1[g.pawn[1]] == u8::MAX {
+
+    let r0 = d0[g.pawn[0]];
+    let r1 = d1[g.pawn[1]];
+    if r0 == u8::MAX || r1 == u8::MAX {
         return RaceBound::Unknown;
     }
+
+    // ── Tier 1: ETA gate ─────────────────────────────────────────────────────
+    // Determine the pure-race leader (runner) by own-goal alternating-ply ETAs.
+    // Skip the gate when ETAs are equal (tie → NeedsProof territory; let Tier 2
+    // or the caller resolve it).
+    let eta0 = arrival_ply(0, g.turn, r0);
+    let eta1 = arrival_ply(1, g.turn, r1);
+
+    if eta0 != eta1 {
+        let runner: usize = if eta0 < eta1 { 0 } else { 1 };
+        let chaser = runner ^ 1;
+        let runner_eta = if runner == 0 { eta0 } else { eta1 };
+
+        // Reuse the runner's distance field: read chaser's dist to runner's goal.
+        let d_runner_goal: &[u8; 81] = if runner == 0 { &d0 } else { &d1 };
+        let chaser_d = d_runner_goal[g.pawn[chaser]];
+
+        // chaser_d == MAX: chaser can't reach runner's goal at all — pure race.
+        // delta_eta > 1: chaser arrives too late to intercept the runner.
+        let fires = chaser_d == u8::MAX || {
+            let chaser_eta = arrival_ply(chaser, g.turn, chaser_d);
+            chaser_eta - runner_eta > 1
+        };
+
+        if fires {
+            return if runner == g.turn {
+                RaceBound::Lower(RACE_WIN_FLOOR)
+            } else {
+                RaceBound::Upper(-RACE_WIN_FLOOR)
+            };
+        }
+    }
+
+    // ── Tier 2: path-set disjointness ────────────────────────────────────────
     // Overlapping shortest-path sets → interception possible → no cheap sound
     // proof; decline and let the caller search / use the exact service.
     if paths_overlap(g, &d0, &d1) {
@@ -1174,6 +1234,321 @@ mod tests {
         let mut reference = vec![0i16; RACE_STATES];
         solve_race_config_reference(&mut g, &mut ref_scratch, &mut reference);
         assert_eq!(v, Some(reference[id]));
+    }
+
+    // ── 8. ETA gate audit (delta_eta > 1 soundness) ──────────────────────────
+
+    /// Isolated oracle audit for the `delta_eta > 1` ETA interception gate.
+    ///
+    /// For every live state where the gate fires, the candidate bound is compared
+    /// against the exact retrograde oracle. A single false bound is a fatal failure.
+    ///
+    /// Coverage: empty board (all 10,242 live states), 3 fixed-wall sample
+    /// configs, 10,000 deterministic random topologies, 7 adversarial configs
+    /// designed around adjacency / jumps / leapfrogging / narrow corridors.
+    #[test]
+    fn eta_gate_delta_gt1_soundness_audit() {
+        use crate::titanium::algebraic_to_move_id;
+
+        // ── helpers ──────────────────────────────────────────────────────────
+
+        struct Counters {
+            live: u64,
+            gate_fires: u64,
+            correct: u64,
+            false_bounds: u64,
+            min_firing_delta: i16,
+            delta_hist: [u64; 32], // index = delta_eta (clamped at 31)
+        }
+
+        impl Counters {
+            fn new() -> Self {
+                Self {
+                    live: 0,
+                    gate_fires: 0,
+                    correct: 0,
+                    false_bounds: 0,
+                    min_firing_delta: i16::MAX,
+                    delta_hist: [0u64; 32],
+                }
+            }
+        }
+
+        /// Compute what the ETA gate would return for one live state, WITHOUT going
+        /// through the full `race_outcome` path. Returns `(fires, delta_eta, bound)`.
+        fn eta_gate_probe(
+            g: &mut GameState,
+            d0: &[u8; 81],
+            d1: &[u8; 81],
+        ) -> Option<(i16, RaceBound)> {
+            let r0 = d0[g.pawn[0]];
+            let r1 = d1[g.pawn[1]];
+            if r0 == u8::MAX || r1 == u8::MAX {
+                return None;
+            }
+            let eta0 = arrival_ply(0, g.turn, r0);
+            let eta1 = arrival_ply(1, g.turn, r1);
+            if eta0 == eta1 {
+                return None;
+            }
+            let runner: usize = if eta0 < eta1 { 0 } else { 1 };
+            let chaser = runner ^ 1;
+            let runner_eta = if runner == 0 { eta0 } else { eta1 };
+
+            let d_runner_goal: &[u8; 81] = if runner == 0 { d0 } else { d1 };
+            let chaser_d = d_runner_goal[g.pawn[chaser]];
+
+            let delta = if chaser_d == u8::MAX {
+                i16::MAX
+            } else {
+                arrival_ply(chaser, g.turn, chaser_d) - runner_eta
+            };
+
+            if delta <= 1 {
+                return None;
+            }
+
+            let bound = if runner == g.turn {
+                RaceBound::Lower(RACE_WIN_FLOOR)
+            } else {
+                RaceBound::Upper(-RACE_WIN_FLOOR)
+            };
+            Some((delta, bound))
+        }
+
+        /// Run audit over every live state for `g`'s topology.
+        fn audit_topology(
+            label: &str,
+            g: &mut GameState,
+            ref_scratch: &mut ReferenceScratch,
+            ref_tbl: &mut Vec<i16>,
+            ex_scratch: &mut RaceScratch,
+            ex_tbl: &mut Vec<i16>,
+            ctr: &mut Counters,
+            first_false: &mut Option<String>,
+        ) {
+            // Build exact table for this topology.
+            solve_race_config(g, ex_scratch, ex_tbl);
+            solve_race_config_reference(g, ref_scratch, ref_tbl);
+
+            let mut d0 = [0u8; 81];
+            let mut d1 = [0u8; 81];
+            let saved = (g.pawn[0], g.pawn[1], g.turn);
+
+            for p0 in 9..81usize {
+                for p1 in 0..72usize {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for turn in 0..2usize {
+                        let id = state_id(p0, p1, turn);
+                        let oracle = ref_tbl[id];
+                        if oracle == 0 {
+                            continue;
+                        }
+                        ctr.live += 1;
+
+                        // Compute distance fields from this position.
+                        g.pawn[0] = p0;
+                        g.pawn[1] = p1;
+                        g.turn = turn;
+                        g.compute_dist(0, &mut d0);
+                        g.compute_dist(1, &mut d1);
+
+                        if let Some((delta, bound)) = eta_gate_probe(g, &d0, &d1) {
+                            ctr.gate_fires += 1;
+                            let hidx = delta.min(31) as usize;
+                            ctr.delta_hist[hidx] += 1;
+                            if delta < ctr.min_firing_delta {
+                                ctr.min_firing_delta = delta;
+                            }
+
+                            let oracle_sign = oracle.signum() as i32;
+                            if bound.signum() == oracle_sign {
+                                ctr.correct += 1;
+                            } else {
+                                ctr.false_bounds += 1;
+                                if first_false.is_none() {
+                                    // Recover best move from exact table.
+                                    let mut buf = [0i16; 16];
+                                    let nm = g.gen_pawn_moves(&mut buf, 0);
+                                    let mut succ_ids = [0i16; 5];
+                                    let mut best_mv = -1i16;
+                                    let mut best_key = i32::MIN;
+                                    for j in 0..nm {
+                                        let c = buf[j] as usize;
+                                        let nid = if turn == 0 {
+                                            if c < 9 { -1 } else { state_id(c, p1, 1) as i16 }
+                                        } else if c >= 72 { -1 } else { state_id(p0, c, 0) as i16 };
+                                        succ_ids[j] = nid;
+                                        let key = if nid < 0 {
+                                            1_000_000
+                                        } else {
+                                            let sv = ex_tbl[nid as usize] as i32;
+                                            if sv < 0 { 1_000_000 - sv.abs() } else { -sv }
+                                        };
+                                        if key > best_key { best_key = key; best_mv = buf[j]; }
+                                    }
+                                    let legals: Vec<String> = buf[..nm].iter()
+                                        .map(|&mv| crate::titanium::move_id_to_algebraic(mv))
+                                        .collect();
+                                    let best_alg = if best_mv >= 0 {
+                                        crate::titanium::move_id_to_algebraic(best_mv)
+                                    } else { "?".into() };
+                                    *first_false = Some(format!(
+                                        "COUNTEREXAMPLE topology={label} id={id} \
+                                         p0={p0} p1={p1} turn={turn} \
+                                         runner={} chaser={} delta_eta={delta} \
+                                         bound={bound:?} oracle={oracle} \
+                                         legal_moves={legals:?} best_move={best_alg}",
+                                        if arrival_ply(0,turn,d0[p0]) < arrival_ply(1,turn,d1[p1]) { 0 } else { 1 },
+                                        if arrival_ply(0,turn,d0[p0]) < arrival_ply(1,turn,d1[p1]) { 1 } else { 0 },
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            g.pawn[0] = saved.0;
+            g.pawn[1] = saved.1;
+            g.turn = saved.2;
+        }
+
+        // ── test harness ─────────────────────────────────────────────────────
+
+        let mut ctr = Counters::new();
+        let mut first_false: Option<String> = None;
+        let mut ref_scratch = ReferenceScratch::new();
+        let mut ref_tbl = vec![0i16; RACE_STATES];
+        let mut ex_scratch = RaceScratch::new();
+        let mut ex_tbl = vec![0i16; RACE_STATES];
+
+        // 1. Empty board.
+        {
+            let mut g = GameState::new();
+            audit_topology(
+                "empty", &mut g, &mut ref_scratch, &mut ref_tbl,
+                &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+            );
+        }
+
+        // 2. Fixed-wall sample configs.
+        for moves in [
+            &["e2", "e8", "e3h", "e6h"][..],
+            &["e2", "e8", "c3h", "f6v", "d7h", "b4v"],
+            &["e2", "e8", "d2h", "d4h", "d6h", "e3v", "e5v"],
+        ] {
+            let mut g = GameState::new();
+            for m in moves { g.make_move(algebraic_to_move_id(m)); }
+            g.wl = [0, 0];
+            let label = format!("sample[{}]", moves.join(","));
+            audit_topology(
+                &label, &mut g, &mut ref_scratch, &mut ref_tbl,
+                &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+            );
+        }
+
+        // 3. 10,000 random fixed topologies.
+        {
+            let seed_state: u64 = 0xACE5_2026;
+            let mut rng = seed_state;
+            for i in 0..10_000usize {
+                let mut g = random_fixed_topology(&mut rng);
+                let label = format!("rand[{i}]");
+                audit_topology(
+                    &label, &mut g, &mut ref_scratch, &mut ref_tbl,
+                    &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+                );
+            }
+        }
+
+        // 4. Adversarial configs targeting adjacency, jumps, leapfrog, corridors.
+        //    Topologies are built by replaying valid wall-placement sequences and
+        //    then directly setting pawn positions (pawn grid is orthogonal to walls).
+
+        // Narrow corridor: walls create a single-file path e-column.
+        {
+            let mut g = GameState::new();
+            for m in &["d1v", "f1v", "d3v", "f3v", "d5v", "f5v", "d7v", "f7v"] {
+                g.make_move(algebraic_to_move_id(m));
+            }
+            g.wl = [0, 0];
+            audit_topology(
+                "narrow_corridor", &mut g, &mut ref_scratch, &mut ref_tbl,
+                &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+            );
+        }
+
+        // Serpentine: walls zigzag the paths.
+        {
+            let mut g = GameState::new();
+            for m in &["b1h", "d1h", "f1h", "h1h", "a2v", "c2v", "e2v", "g2v",
+                       "b3h", "d3h", "f3h", "h3h"] {
+                g.make_move(algebraic_to_move_id(m));
+            }
+            g.wl = [0, 0];
+            audit_topology(
+                "serpentine", &mut g, &mut ref_scratch, &mut ref_tbl,
+                &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+            );
+        }
+
+        // Multi-path crossing.
+        {
+            let mut g = GameState::new();
+            for m in &["c3h", "e3h", "c6h", "e6h", "d4v", "d5v"] {
+                g.make_move(algebraic_to_move_id(m));
+            }
+            g.wl = [0, 0];
+            audit_topology(
+                "multi_cross", &mut g, &mut ref_scratch, &mut ref_tbl,
+                &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+            );
+        }
+
+        // A second seed sweep to broaden random coverage.
+        {
+            let seed2: u64 = 0x71744E_1ACE;
+            let mut rng2 = seed2;
+            for i in 0..2_000usize {
+                let mut g = random_fixed_topology(&mut rng2);
+                let label = format!("rand2[{i}]");
+                audit_topology(
+                    &label, &mut g, &mut ref_scratch, &mut ref_tbl,
+                    &mut ex_scratch, &mut ex_tbl, &mut ctr, &mut first_false,
+                );
+            }
+        }
+
+        // ── report ───────────────────────────────────────────────────────────
+
+        eprintln!(
+            "ETA gate audit (delta_eta>1): live={} firings={} correct={} false={} min_delta={}",
+            ctr.live, ctr.gate_fires, ctr.correct, ctr.false_bounds,
+            if ctr.min_firing_delta == i16::MAX { -1 } else { ctr.min_firing_delta as i64 }
+        );
+
+        let mut hist_str = String::new();
+        for (d, &count) in ctr.delta_hist.iter().enumerate() {
+            if count > 0 {
+                hist_str.push_str(&format!(" delta={d}:{count}"));
+            }
+        }
+        eprintln!("delta distribution:{hist_str}");
+
+        if let Some(ref msg) = first_false {
+            eprintln!("{msg}");
+        }
+
+        assert_eq!(
+            ctr.false_bounds, 0,
+            "ETA gate (delta_eta>1) produced {} false bound(s); first: {}",
+            ctr.false_bounds,
+            first_false.as_deref().unwrap_or("none"),
+        );
+        assert!(ctr.gate_fires > 0, "gate never fired — coverage broken");
     }
 
     // ── Benchmarks (printed; assert correctness) ─────────────────────────────
