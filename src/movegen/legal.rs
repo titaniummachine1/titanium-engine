@@ -254,6 +254,13 @@ pub struct GeometricWallCache {
     len: usize,
 }
 
+impl GeometricWallCache {
+    /// Slice of the cached legal wall moves.
+    pub fn wall_slice(&self) -> &[Move] {
+        &self.moves[..self.len]
+    }
+}
+
 /// Who requested the cached geometric wall set (for profiling).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GeometricWallCacheRole {

@@ -7,14 +7,14 @@
 //!   `net_weights_frozen.bin` — pinned v13 baseline (ti-pure anchor + v15-frozen)
 //!
 //! Blob layout (little-endian f64):
-//!   Wskip[16] B1[32] W2[32] W1C[36864] PO[2592] PX[2592]
+//!   Wskip[18] B1[32] W2[32] W1C[36864] PO[2592] PX[2592]
 //!   goal_inv_p0, goal_inv_p1, pawn_fwd_p0, pawn_fwd_p1,
 //!   corridor_delta_p0, corridor_delta_p1, path_cross_p0, path_cross_p1,
 //!   choke_p0, choke_p1, contested  (each 81×32 except contested is shared)
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 pub const NET_H: usize = 32;
-pub const WSKIP_LEN: usize = 16;
+pub const WSKIP_LEN: usize = 18;
 const W1C_LEN: usize = 9 * 128 * NET_H;
 const PO_LEN: usize = 81 * NET_H;
 const PX_LEN: usize = 81 * NET_H;
@@ -25,7 +25,7 @@ pub const NET_WEIGHT_F64S: usize =
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("net_weights_frozen.bin");
 pub struct Net {
-    pub ws: [f64; 16],
+    pub ws: [f64; WSKIP_LEN],
     pub b1: [f64; NET_H],
     pub w2: [f64; NET_H],
     pub w1c: Vec<f64>,

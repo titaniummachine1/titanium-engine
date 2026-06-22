@@ -47,7 +47,7 @@ use crate::titanium::race::{
     race_outcome, solve_race_config, RaceBound, RaceScratch, RACE_MATE, RACE_STATES,
 };
 use crate::titanium::reduction_sidecar::ReductionSidecar;
-use crate::util::grid::{flood_sq_from_bit, FLOOD_PLAYABLE};
+use crate::util::grid::{flood_bit_sq, flood_sq_from_bit, FLOOD_PLAYABLE};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
@@ -85,6 +85,49 @@ fn ace_graduated_eme_extension(move_index: usize, depth: i32) -> i32 {
     } else {
         1
     }
+}
+
+/// Count moves in `walls` that cross `route` (a flood u128 bitset, bit = flood_bit_sq(sq)).
+/// A wall crosses a route when both cells across one of its blocked edges are on the route.
+fn wall_crossing_count(walls: &[BoardMove], route: u128) -> u32 {
+    let mut n = 0u32;
+    for mv in walls {
+        let BoardMove::Wall { row, col, orientation } = *mv else { continue };
+        let r = row as usize;
+        let c = col as usize;
+        let bit = |r: usize, c: usize| (route & flood_bit_sq((r * 9 + c) as u8)) != 0;
+        let crosses = match orientation {
+            WallOrientation::Horizontal =>
+                (bit(r, c) && bit(r + 1, c)) || (bit(r, c + 1) && bit(r + 1, c + 1)),
+            WallOrientation::Vertical =>
+                (bit(r, c) && bit(r, c + 1)) || (bit(r + 1, c) && bit(r + 1, c + 1)),
+        };
+        if crosses {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Same as `wall_crossing_count` but takes a `[u8;81]` route array (route[r*9+c] != 0).
+fn wall_crossing_count_arr(walls: &[BoardMove], route: &[u8; 81]) -> u32 {
+    let mut n = 0u32;
+    for mv in walls {
+        let BoardMove::Wall { row, col, orientation } = *mv else { continue };
+        let r = row as usize;
+        let c = col as usize;
+        let cell = |r: usize, c: usize| route[r * 9 + c] != 0;
+        let crosses = match orientation {
+            WallOrientation::Horizontal =>
+                (cell(r, c) && cell(r + 1, c)) || (cell(r, c + 1) && cell(r + 1, c + 1)),
+            WallOrientation::Vertical =>
+                (cell(r, c) && cell(r, c + 1)) || (cell(r + 1, c) && cell(r + 1, c + 1)),
+        };
+        if crosses {
+            n += 1;
+        }
+    }
+    n
 }
 
 const TT_BITS: usize = 20;
@@ -1055,6 +1098,7 @@ impl TitaniumSearch {
         fill_sparse_route_masks(&self.g, self.g.pawn[0], &d0f, &mut route0, &mut flank0);
         fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1f, &mut route1, &mut flank1);
         let legal_walls = self.geometric_legal_wall_count();
+        let (cross_p0, cross_p1) = self.legal_path_crossing_counts_arr(&route0, &route1);
         let width_me = self.d0[self.dist0_idx]
             .iter()
             .filter(|&&d| d as i32 == d0_scalar as i32)
@@ -1065,7 +1109,8 @@ impl TitaniumSearch {
             .count();
         format!(
             "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\
-             \"d0\":{},\"d1\":{},\"legal_wall_count\":{},\"corridor_width0\":{},\"corridor_width1\":{},\
+             \"d0\":{},\"d1\":{},\"legal_wall_count\":{},\"legal_path_cross_p0\":{},\"legal_path_cross_p1\":{},\
+             \"corridor_width0\":{},\"corridor_width1\":{},\
              \"goal_inv_p0_field\":[{}],\"goal_inv_p1_field\":[{}],\
              \"pawn_fwd_p0_field\":[{}],\"pawn_fwd_p1_field\":[{}],\
              \"corridor_delta_p0_field\":[{}],\"corridor_delta_p1_field\":[{}],\
@@ -1087,6 +1132,8 @@ impl TitaniumSearch {
             d0_scalar,
             d1_scalar,
             legal_walls,
+            cross_p0,
+            cross_p1,
             width_me,
             width_opp,
             field(&d0f),
@@ -1203,9 +1250,10 @@ impl TitaniumSearch {
         t0.elapsed().as_millis() as f64 > budget
     }
 
-    fn route_feature_score(&self, nw: &Net) -> f64 {
+    /// Returns (score, route0_bits, route1_bits) so callers can reuse the route bitsets.
+    fn route_feature_score(&self, nw: &Net) -> (f64, u128, u128) {
         if !nw.route_active {
-            return 0.0;
+            return (0.0, 0, 0);
         }
         let d0f = &self.d0[self.dist0_idx];
         let d1f = &self.d1[self.dist1_idx];
@@ -1247,7 +1295,73 @@ impl TitaniumSearch {
             + sum_bits(me_near, &nw.route_near_me)
             + sum_bits(opp_near, &nw.route_near_opp)
             + sum_bits(contested, &nw.route_contested);
-        score
+        (score, route0, route1)
+    }
+
+    /// Count legal walls from cache that cross the given route u128 bitset (flood-indexed).
+    fn legal_path_crossing_counts_bits(&mut self, route0: u128, route1: u128) -> (u32, u32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            let _ = geometric_wall_len_cached(
+                &mut bridge.geometric_walls,
+                &mut bridge.board,
+                &mut bridge.bfs,
+                GeometricWallCacheRole::Eval,
+                Some(&mut bridge.wall_cache_stats),
+            );
+            let cache = bridge.geometric_walls.as_ref().unwrap();
+            return (
+                wall_crossing_count(cache.wall_slice(), route0),
+                wall_crossing_count(cache.wall_slice(), route1),
+            );
+        }
+        let mut board = Board::new();
+        for i in 0..self.g.hist_len {
+            let _ = board.make_move(move_id_to_board(self.g.hist_m[i]));
+        }
+        let mut scratch = BfsScratch::new();
+        let mut cache_opt: Option<GeometricWallCache> = None;
+        geometric_wall_len_cached(
+            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+        );
+        if let Some(ref cache) = cache_opt {
+            (wall_crossing_count(cache.wall_slice(), route0),
+             wall_crossing_count(cache.wall_slice(), route1))
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Count legal walls crossing each player's path (for eval JSON). Uses [u8;81] route arrays.
+    fn legal_path_crossing_counts_arr(&mut self, route0: &[u8; 81], route1: &[u8; 81]) -> (u32, u32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            let _ = geometric_wall_len_cached(
+                &mut bridge.geometric_walls,
+                &mut bridge.board,
+                &mut bridge.bfs,
+                GeometricWallCacheRole::Eval,
+                Some(&mut bridge.wall_cache_stats),
+            );
+            let cache = bridge.geometric_walls.as_ref().unwrap();
+            return (
+                wall_crossing_count_arr(cache.wall_slice(), route0),
+                wall_crossing_count_arr(cache.wall_slice(), route1),
+            );
+        }
+        let mut board = Board::new();
+        for i in 0..self.g.hist_len {
+            let _ = board.make_move(move_id_to_board(self.g.hist_m[i]));
+        }
+        let mut scratch = BfsScratch::new();
+        let mut cache_opt: Option<GeometricWallCache> = None;
+        geometric_wall_len_cached(
+            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+        );
+        if let Some(ref cache) = cache_opt {
+            (wall_crossing_count_arr(cache.wall_slice(), route0),
+             wall_crossing_count_arr(cache.wall_slice(), route1))
+        } else {
+            (0, 0)
+        }
     }
 
     fn refresh_dist(&mut self, ply: usize) {
@@ -1655,7 +1769,8 @@ impl TitaniumSearch {
             + ws[4] * d_opp
             + ws[9] * pd * (w_me + w_opp) / 20.0
             + ws[10] * wd * (d_me + d_opp) / 16.0;
-        out += self.route_feature_score(nw);
+        let (route_score, route0_bits, route1_bits) = self.route_feature_score(nw);
+        out += route_score;
         if w_opp_i == 0 {
             out += ws[6];
             if d_me <= d_opp {
@@ -1690,6 +1805,14 @@ impl TitaniumSearch {
                 .count()
         } as f64;
         out += ws[14] * legal_wall_norm + ws[15] * width_opp;
+        // ws[16]: legal walls crossing my path / 128; ws[17]: crossing opp path / 128
+        let (route_me_bits, route_opp_bits) = if me == 0 {
+            (route0_bits, route1_bits)
+        } else {
+            (route1_bits, route0_bits)
+        };
+        let (cross_me, cross_opp) = self.legal_path_crossing_counts_bits(route_me_bits, route_opp_bits);
+        out += ws[16] * cross_me as f64 / 128.0 + ws[17] * cross_opp as f64 / 128.0;
 
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
