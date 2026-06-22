@@ -479,63 +479,68 @@ impl RaceWinnerTable {
     }
 }
 
-/// Transient scratch for one attractor pass — predecessor lists, remaining-child
-/// counters, and per-state win/layer/best-move arrays.
-struct AttractorScratch {
-    predecessors: Vec<Vec<(u32, i16)>>,
-    remaining: Vec<u16>,
-    win: Vec<bool>,
-    layer: Vec<u16>,
-    best_mv: Vec<i16>,
+// ─────────────────────────────────────────────────────────────────────────────
+// CSR (compressed sparse row) predecessor graph for the FULL attractor.
+//
+// The legacy `attractor_pass` stores predecessors as `Vec<Vec<(u32,i16)>>` — one
+// heap allocation per state (13,122 small Vecs) plus a per-pop `mem::take`. The
+// CSR build stores all predecessor edges in ONE flat allocation indexed by a
+// per-state offsets array. Pure data-layout change: identical winner table.
+//
+// The edge MOVE is dropped: `best_mv` was computed by the legacy pass but never
+// read by `build_winner_table` (only `win`/`layer` feed the table), so CSR
+// stores parent state-ids only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reusable scratch for the CSR attractor. Buffers are cleared (not freed)
+/// between the P0 and P1 passes and across topology builds.
+struct RaceCsrScratch {
+    incoming: Vec<u32>,     // RACE_STATES: in-degree per child
+    offsets: Vec<u32>,      // RACE_STATES + 1: CSR row offsets
+    write_cursor: Vec<u32>, // RACE_STATES: scatter cursors
+    predecessors: Vec<u32>, // flat parent ids, len = total edges
+    edges: Vec<(u32, u32)>, // method-B temp edge list (parent, child)
+    remaining: Vec<u16>,    // RACE_STATES: unresolved AND children
+    win: Vec<bool>,         // RACE_STATES
+    layer: Vec<u16>,        // RACE_STATES
+    queue: Vec<usize>,      // flat FIFO with a read head
 }
 
-impl AttractorScratch {
+impl RaceCsrScratch {
     fn new() -> Self {
         Self {
-            predecessors: vec![Vec::new(); RACE_STATES],
+            incoming: vec![0; RACE_STATES],
+            offsets: vec![0; RACE_STATES + 1],
+            write_cursor: vec![0; RACE_STATES],
+            predecessors: Vec::new(),
+            edges: Vec::new(),
             remaining: vec![0; RACE_STATES],
             win: vec![false; RACE_STATES],
             layer: vec![u16::MAX; RACE_STATES],
-            best_mv: vec![NO_RACE_MOVE; RACE_STATES],
+            queue: Vec::new(),
         }
-    }
-
-    /// Transient heap bytes for one attractor pass (predecessor lists excluded —
-    /// they are data-dependent; this is the fixed per-state overhead).
-    #[cfg(test)]
-    fn scratch_bytes() -> usize {
-        RACE_STATES
-            * (std::mem::size_of::<Vec<(u32, i16)>>()
-                + std::mem::size_of::<u16>()
-                + std::mem::size_of::<bool>()
-                + std::mem::size_of::<u16>()
-                + std::mem::size_of::<i16>())
     }
 }
 
-/// Sentinel "no move" marker for the winner-table best-move field.
-const NO_RACE_MOVE: i16 = -1;
-
-/// Run one asymmetric attractor pass for `prover` over the fixed-wall topology
-/// `g_root` carries, using each side's own-goal distance field `own_goal_dist`.
-/// Fully iterative (backward reachability) — no recursion.
-fn attractor_pass(
+/// Shared transition generator for the asymmetric attractor. Produces EXACTLY
+/// the legacy `attractor_pass` edge set: seeds prover-home states (when
+/// `do_seed`), sets `remaining[parent]` = admitted child count, and invokes
+/// `edge(parent, child)` for every admitted transition (prover OR nodes use the
+/// progress/jump restriction; defender AND nodes use every legal move).
+#[inline]
+fn enumerate_attractor_graph<F: FnMut(u32, u32)>(
     g_root: &GameState,
     own_goal_dist: &[[u8; 81]; 2],
     prover: usize,
-    sc: &mut AttractorScratch,
+    win: &mut [bool],
+    layer: &mut [u16],
+    remaining: &mut [u16],
+    queue: &mut Vec<usize>,
+    do_seed: bool,
+    mut edge: F,
 ) {
-    for v in sc.predecessors.iter_mut() {
-        v.clear();
-    }
-    sc.remaining.iter_mut().for_each(|x| *x = 0);
-    sc.win.iter_mut().for_each(|x| *x = false);
-    sc.layer.iter_mut().for_each(|x| *x = u16::MAX);
-    sc.best_mv.iter_mut().for_each(|x| *x = NO_RACE_MOVE);
-
     let opp = prover ^ 1;
-    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
-
+    let mut buf = [0i16; 16];
     for p0 in 0..81usize {
         for p1 in 0..81usize {
             if p0 == p1 {
@@ -543,122 +548,146 @@ fn attractor_pass(
             }
             for turn in 0..2usize {
                 let id = state_id(p0, p1, turn);
-
-                // Seed: prover already home (regardless of whose turn it is).
                 let prover_home = is_home(prover, if prover == 0 { p0 } else { p1 });
                 if prover_home {
-                    sc.win[id] = true;
-                    sc.layer[id] = 0;
-                    queue.push_back(id);
+                    if do_seed {
+                        win[id] = true;
+                        layer[id] = 0;
+                        queue.push(id);
+                    }
                     continue;
                 }
-                // Opponent already home → prover cannot win; no outgoing edges.
-                let opp_home = is_home(opp, if opp == 0 { p0 } else { p1 });
-                if opp_home {
+                if is_home(opp, if opp == 0 { p0 } else { p1 }) {
                     continue;
                 }
-
                 let mut g = g_root.clone();
                 g.pawn[0] = p0;
                 g.pawn[1] = p1;
                 g.turn = turn;
-
-                let mut buf = [0i16; 16];
                 let nm = g.gen_pawn_moves(&mut buf, 0);
-
                 let side = turn;
                 let is_or = side == prover;
                 let src = if side == 0 { p0 } else { p1 };
                 let old_d = own_goal_dist[side][src];
                 let mut child_count: u16 = 0;
-
                 for &mv in &buf[..nm] {
                     let dst = mv as usize;
                     if is_or {
-                        // Restricted: Class A (own-goal Δ ≥ 1) or any jump.
                         let new_d = own_goal_dist[side][dst];
                         let delta = if new_d == u8::MAX {
                             i16::MIN / 2
                         } else {
                             old_d as i16 - new_d as i16
                         };
-                        let jump = is_race_jump(src, dst);
-                        if !(jump || delta >= 1) {
+                        if !(is_race_jump(src, dst) || delta >= 1) {
                             continue;
                         }
                     }
-                    // AND node (opponent to move): every legal move, unrestricted.
                     let mut cg = g.clone();
                     cg.make_move(mv);
                     let cid = state_id(cg.pawn[0], cg.pawn[1], cg.turn);
-                    sc.predecessors[cid].push((id as u32, mv));
+                    edge(id as u32, cid as u32);
                     child_count += 1;
                 }
-                sc.remaining[id] = child_count;
-            }
-        }
-    }
-
-    // Backward-reachability (attractor) propagation.
-    while let Some(c) = queue.pop_front() {
-        let cl = sc.layer[c];
-        // Take the predecessor list out to avoid a borrow conflict with the
-        // mutations below; restore it afterwards (lists are read once but a
-        // state can be re-reached as a different predecessor's child).
-        let preds = std::mem::take(&mut sc.predecessors[c]);
-        for &(p_u, mv) in preds.iter() {
-            let p = p_u as usize;
-            if sc.win[p] {
-                continue;
-            }
-            let p_turn = p & 1;
-            if p_turn == prover {
-                // OR node: one winning child is enough.
-                sc.win[p] = true;
-                sc.layer[p] = cl.saturating_add(1);
-                sc.best_mv[p] = mv;
-                queue.push_back(p);
-            } else {
-                // AND node: confirm only when every child is a prover win.
-                if sc.remaining[p] > 0 {
-                    sc.remaining[p] -= 1;
-                }
-                if sc.remaining[p] == 0 {
-                    sc.win[p] = true;
-                    sc.layer[p] = cl.saturating_add(1); // last (deepest) child ⟹ max resistance
-                    queue.push_back(p);
+                if do_seed {
+                    remaining[id] = child_count;
                 }
             }
         }
-        sc.predecessors[c] = preds;
     }
 }
 
-/// Build the full per-topology winner table for the wall layout `g` carries.
-/// Runs one attractor pass per prover and merges. Pawn position / turn on `g`
-/// are not consulted (the whole address space is swept) and are left untouched.
-pub fn build_winner_table(g: &GameState) -> RaceWinnerTable {
-    let mut own = [[u8::MAX; 81]; 2];
-    g.compute_dist(0, &mut own[0]);
-    g.compute_dist(1, &mut own[1]);
+/// CSR attractor pass. Builds the predecessor graph via a single transition pass
+/// into a flat edge list, then a counting-sort scatter into one contiguous CSR
+/// allocation, then backward-reachability propagation. (The two-pass variant —
+/// which regenerates transitions twice — was measured ~75% slower and dropped.)
+fn attractor_pass_csr(g_root: &GameState, own: &[[u8; 81]; 2], prover: usize, sc: &mut RaceCsrScratch) {
+    let n = RACE_STATES;
+    let RaceCsrScratch {
+        incoming,
+        offsets,
+        write_cursor,
+        predecessors,
+        edges,
+        remaining,
+        win,
+        layer,
+        queue,
+    } = sc;
 
-    let mut sc = AttractorScratch::new();
+    win[..n].fill(false);
+    layer[..n].fill(u16::MAX);
+    remaining[..n].fill(0);
+    incoming[..n].fill(0);
+    queue.clear();
+    edges.clear();
 
-    attractor_pass(g, &own, 0, &mut sc);
-    let win0 = sc.win.clone();
-    let layer0 = sc.layer.clone();
+    // Single transition pass: collect edges and per-child in-degree.
+    enumerate_attractor_graph(g_root, own, prover, win, layer, remaining, queue, true, |p, c| {
+        edges.push((p, c));
+        incoming[c as usize] += 1;
+    });
 
-    attractor_pass(g, &own, 1, &mut sc);
-    let win1 = &sc.win;
-    let layer1 = &sc.layer;
+    // Prefix sum → offsets; allocate the flat predecessor array once.
+    offsets[0] = 0;
+    for i in 0..n {
+        offsets[i + 1] = offsets[i] + incoming[i];
+    }
+    let total = offsets[n] as usize;
+    predecessors.clear();
+    predecessors.resize(total, 0u32);
+    write_cursor[..n].copy_from_slice(&offsets[..n]);
 
+    // Counting-sort scatter (stable: preserves enumeration order within a child).
+    for &(p, c) in edges.iter() {
+        let slot = write_cursor[c as usize] as usize;
+        predecessors[slot] = p;
+        write_cursor[c as usize] += 1;
+    }
+    debug_assert!((0..n).all(|i| write_cursor[i] == offsets[i + 1]));
+
+    // Backward-reachability propagation over the flat CSR (read-only here).
+    let mut head = 0usize;
+    while head < queue.len() {
+        let c = queue[head];
+        head += 1;
+        let cl = layer[c];
+        let begin = offsets[c] as usize;
+        let end = offsets[c + 1] as usize;
+        for k in begin..end {
+            let p = predecessors[k] as usize;
+            if win[p] {
+                continue;
+            }
+            if (p & 1) == prover {
+                win[p] = true;
+                layer[p] = cl.saturating_add(1);
+                queue.push(p);
+            } else {
+                if remaining[p] > 0 {
+                    remaining[p] -= 1;
+                }
+                if remaining[p] == 0 {
+                    win[p] = true;
+                    layer[p] = cl.saturating_add(1);
+                    queue.push(p);
+                }
+            }
+        }
+    }
+}
+
+/// Merge two per-prover (win, layer) results into the winner table.
+fn merge_winner_table(
+    win0: &[bool],
+    layer0: &[u16],
+    win1: &[bool],
+    layer1: &[u16],
+) -> RaceWinnerTable {
     let mut class = vec![0u8; RACE_STATES].into_boxed_slice();
     let mut layer = vec![u16::MAX; RACE_STATES].into_boxed_slice();
     for id in 0..RACE_STATES {
         if win0[id] {
-            // Determinacy: both provers cannot force a win at a legal live state.
-            // The only exception is the degenerate both-home synthetic state
-            // (p0 on row 0 AND p1 on row 8), which is outside the live domain.
             debug_assert!(
                 !win1[id] || {
                     let (p0c, p1c, _) = decode_state(id);
@@ -673,8 +702,23 @@ pub fn build_winner_table(g: &GameState) -> RaceWinnerTable {
             layer[id] = layer1[id];
         }
     }
-
     RaceWinnerTable { class, layer }
+}
+
+/// Build the full per-topology winner table for the wall layout `g` carries.
+/// Runs one CSR attractor pass per prover and merges. Pawn position / turn on
+/// `g` are not consulted (the whole address space is swept) and are untouched.
+pub fn build_winner_table(g: &GameState) -> RaceWinnerTable {
+    let mut own = [[u8::MAX; 81]; 2];
+    g.compute_dist(0, &mut own[0]);
+    g.compute_dist(1, &mut own[1]);
+
+    let mut sc = RaceCsrScratch::new();
+    attractor_pass_csr(g, &own, 0, &mut sc);
+    let win0 = sc.win.clone();
+    let layer0 = sc.layer.clone();
+    attractor_pass_csr(g, &own, 1, &mut sc);
+    merge_winner_table(&win0, &layer0, &sc.win, &sc.layer)
 }
 
 /// Fixed-wall topology key (FNV-1a over the horizontal+vertical wall bitboards).
@@ -3685,11 +3729,10 @@ mod tests {
             eprintln!(
                 "PERF[{label}] build={:.2}ms lookup={lookup_ns:.2}ns/state \
                  coverage: P0={p0} P1={p1} Unknown={unk} ({:.1}% decided)  \
-                 persistent={}B scratch={}B",
+                 persistent={}B",
                 best as f64 / 1000.0,
                 100.0 * (p0 + p1) as f64 / RACE_STATES as f64,
                 RaceWinnerTable::persistent_bytes(),
-                AttractorScratch::scratch_bytes(),
             );
         }
     }
@@ -3723,6 +3766,817 @@ mod tests {
         assert_eq!(verdict, RaceVerdict::Loss, "pure-race verdict: WRONG sign (would be a false bound)");
         // The winner table declines soundly (no false proof); production returns Unknown.
         assert_eq!(cls, RaceClass::Unknown, "winner table soundly declines (no false proof)");
+    }
+
+    /// Does the PRODUCTION winner table already encode "reaches goal FIRST"?
+    /// Empty board, p0=37 p1=28 turn=1: p1 jumps 28->46 over p0 and reaches row 8
+    /// in 7, beating p0's uninterfered arrival at 8. Correct verdict = P1 wins.
+    #[test]
+    fn winner_table_first_to_goal_empty_regression() {
+        let g = GameState::new();
+        let wt = build_winner_table(&g);
+
+        // Oracle for the empty board.
+        let mut gg = g.clone();
+        let mut rs = ReferenceScratch::new();
+        let mut oracle = vec![0i16; RACE_STATES];
+        solve_race_config_reference(&mut gg, &mut rs, &mut oracle);
+
+        // The pinned regression and its mirror.
+        let id = state_id(37, 28, 1);
+        eprintln!(
+            "WT 37/28/turn1: class={:?} oracle={} (stm=p1)",
+            wt.classify(id),
+            oracle[id]
+        );
+        assert_eq!(wt.classify(id), RaceClass::ProvenP1, "p1 jumps over p0 and wins first");
+
+        // Mirror by vertical reflection (row r -> 8-r) and player swap:
+        // (p0=37=r4c1, p1=28=r3c1, turn=1) -> (p0=46=r5c1, p1=37=r4c1, turn=0).
+        let mid = state_id(46, 37, 0);
+        eprintln!("WT mirror 46/37/turn0: class={:?} oracle={}", wt.classify(mid), oracle[mid]);
+        assert_eq!(wt.classify(mid), RaceClass::ProvenP0, "mirror: p0 jumps over p1 and wins first");
+
+        // Full empty-board winner audit: production table vs exact oracle.
+        let mut mism = 0u64;
+        let mut live = 0u64;
+        for p0 in 9..81usize {
+            for p1 in 0..72usize {
+                if p0 == p1 {
+                    continue;
+                }
+                for turn in 0..2usize {
+                    let sid = state_id(p0, p1, turn);
+                    let o = oracle[sid];
+                    if o == 0 {
+                        continue;
+                    }
+                    live += 1;
+                    let ow = if o > 0 { turn } else { turn ^ 1 };
+                    let cw = match wt.classify(sid) {
+                        RaceClass::ProvenP0 => Some(0usize),
+                        RaceClass::ProvenP1 => Some(1usize),
+                        RaceClass::Unknown => None,
+                    };
+                    if let Some(w) = cw {
+                        if w != ow {
+                            mism += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("WT empty-board audit: live={live} winner_mismatches={mism}");
+        assert_eq!(mism, 0, "production winner table winner mismatch on empty board");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Gate-3 build-speed experiment: K1 candidate filter + RAW_K1 classifier.
+    //
+    //   FULL   : the sound baseline — prover progress/jump, defender ALL legal.
+    //   RAW_K1 : prover progress/jump, defender restricted to cumulative
+    //            slack<=1 routes + jumps, used DIRECTLY as a classifier (NO full
+    //            verification). Tests whether shortest+2nd-shortest+jumps alone
+    //            capture every defensive resource.
+    //   K1→FULL: RAW_K1 win set as a candidate filter, then FULL re-verification
+    //            only over candidates. Tests whether K1 safely speeds up FULL.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[inline]
+    fn k1_prover_progress(own_p: &[u8; 81], src: usize, dst: usize, od: u8) -> bool {
+        let jump = cell_manhattan(src, dst) != 1;
+        let nd = own_p[dst];
+        let progress = nd != u8::MAX && od != u8::MAX && (od as i16 - nd as i16) >= 1;
+        jump || progress
+    }
+
+    /// FULL per-prover attractor (defender = every legal move). `cand=Some` runs
+    /// the FILTERED final pass (only candidate states can win; defender moves to
+    /// non-candidate children refute). `full_moves` counts defender moves
+    /// generated at AND nodes.
+    fn k1_attr_full(
+        g_root: &GameState,
+        own: &[[u8; 81]; 2],
+        prover: usize,
+        cand: Option<&[bool]>,
+        full_moves: &mut u64,
+    ) -> Vec<bool> {
+        let opp = prover ^ 1;
+        let mut pred: Vec<Vec<u32>> = vec![Vec::new(); RACE_STATES];
+        let mut remaining = vec![0u16; RACE_STATES];
+        let mut win = vec![false; RACE_STATES];
+        let mut q: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        let mut buf = [0i16; 16];
+        for p0 in 0..81usize {
+            for p1 in 0..81usize {
+                if p0 == p1 {
+                    continue;
+                }
+                for turn in 0..2usize {
+                    let id = state_id(p0, p1, turn);
+                    if let Some(c) = cand {
+                        if !c[id] {
+                            continue;
+                        }
+                    }
+                    if is_home(prover, if prover == 0 { p0 } else { p1 }) {
+                        win[id] = true;
+                        q.push_back(id as u32);
+                        continue;
+                    }
+                    if is_home(opp, if opp == 0 { p0 } else { p1 }) {
+                        continue;
+                    }
+                    let mut g = g_root.clone();
+                    g.pawn[0] = p0;
+                    g.pawn[1] = p1;
+                    g.turn = turn;
+                    let nm = g.gen_pawn_moves(&mut buf, 0);
+                    if turn == prover {
+                        let src = if prover == 0 { p0 } else { p1 };
+                        let od = own[prover][src];
+                        for &mv in &buf[..nm] {
+                            if k1_prover_progress(&own[prover], src, mv as usize, od) {
+                                let mut cg = g.clone();
+                                cg.make_move(mv);
+                                let cid = state_id(cg.pawn[0], cg.pawn[1], cg.turn);
+                                pred[cid].push(id as u32);
+                            }
+                        }
+                    } else {
+                        let mut cnt = 0u16;
+                        for &mv in &buf[..nm] {
+                            let mut cg = g.clone();
+                            cg.make_move(mv);
+                            let cid = state_id(cg.pawn[0], cg.pawn[1], cg.turn);
+                            pred[cid].push(id as u32);
+                            cnt += 1;
+                        }
+                        remaining[id] = cnt;
+                        *full_moves += cnt as u64;
+                    }
+                }
+            }
+        }
+        while let Some(c) = q.pop_front() {
+            let preds = std::mem::take(&mut pred[c as usize]);
+            for &p in &preds {
+                let pu = p as usize;
+                if win[pu] {
+                    continue;
+                }
+                if let Some(cc) = cand {
+                    if !cc[pu] {
+                        continue;
+                    }
+                }
+                if (pu & 1) == prover {
+                    win[pu] = true;
+                    q.push_back(p);
+                } else {
+                    if remaining[pu] > 0 {
+                        remaining[pu] -= 1;
+                    }
+                    if remaining[pu] == 0 {
+                        win[pu] = true;
+                        q.push_back(p);
+                    }
+                }
+            }
+            pred[c as usize] = preds;
+        }
+        win
+    }
+
+    /// RESTRICTED per-prover attractor (RAW_K1). Defender limited to cumulative
+    /// slack<=`max_slack` routes + productive jumps (jumps repay slack). Returns
+    /// the win set at slack 0. `restr_moves` counts defender moves admitted.
+    fn k1_attr_restricted(
+        g_root: &GameState,
+        own: &[[u8; 81]; 2],
+        prover: usize,
+        max_slack: usize,
+        restr_moves: &mut u64,
+    ) -> Vec<bool> {
+        let opp = prover ^ 1;
+        let slk = max_slack + 1;
+        let ns = RACE_STATES * slk;
+        let mut pred: Vec<Vec<u32>> = vec![Vec::new(); ns];
+        let mut remaining = vec![0u16; ns];
+        let mut win = vec![false; ns];
+        let mut q: std::collections::VecDeque<u32> = std::collections::VecDeque::new();
+        let mut buf = [0i16; 16];
+        for p0 in 0..81usize {
+            for p1 in 0..81usize {
+                if p0 == p1 {
+                    continue;
+                }
+                for turn in 0..2usize {
+                    let id = state_id(p0, p1, turn);
+                    let prover_home = is_home(prover, if prover == 0 { p0 } else { p1 });
+                    let opp_home = is_home(opp, if opp == 0 { p0 } else { p1 });
+                    let mut g = g_root.clone();
+                    g.pawn[0] = p0;
+                    g.pawn[1] = p1;
+                    g.turn = turn;
+                    let nm = if prover_home || opp_home {
+                        0
+                    } else {
+                        g.gen_pawn_moves(&mut buf, 0)
+                    };
+                    for s in 0..slk {
+                        let aug = id * slk + s;
+                        if prover_home {
+                            win[aug] = true;
+                            q.push_back(aug as u32);
+                            continue;
+                        }
+                        if opp_home {
+                            continue;
+                        }
+                        if turn == prover {
+                            let src = if prover == 0 { p0 } else { p1 };
+                            let od = own[prover][src];
+                            for &mv in &buf[..nm] {
+                                if k1_prover_progress(&own[prover], src, mv as usize, od) {
+                                    let mut cg = g.clone();
+                                    cg.make_move(mv);
+                                    let cid = state_id(cg.pawn[0], cg.pawn[1], cg.turn);
+                                    pred[cid * slk + s].push(aug as u32);
+                                }
+                            }
+                        } else {
+                            let before = own[opp][if opp == 0 { p0 } else { p1 }];
+                            let mut cnt = 0u16;
+                            for &mv in &buf[..nm] {
+                                let dst = mv as usize;
+                                let after = own[opp][dst];
+                                // Exclude moves we cannot slack-evaluate (keeps the
+                                // candidate set a safe SUPERSET of FULL wins).
+                                if before == u8::MAX || after == u8::MAX {
+                                    continue;
+                                }
+                                let extra = 1 + after as i32 - before as i32;
+                                let next = (s as i32 + extra).max(0);
+                                if next <= max_slack as i32 {
+                                    *restr_moves += 1;
+                                    let mut cg = g.clone();
+                                    cg.make_move(mv);
+                                    let cid = state_id(cg.pawn[0], cg.pawn[1], cg.turn);
+                                    pred[cid * slk + next as usize].push(aug as u32);
+                                    cnt += 1;
+                                }
+                            }
+                            remaining[aug] = cnt;
+                            // Vacuous AND: the (restricted) defender has no legal
+                            // response ⟹ prover win. Required for the candidate set
+                            // to stay a SUPERSET of the FULL win set.
+                            if cnt == 0 {
+                                win[aug] = true;
+                                q.push_back(aug as u32);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        while let Some(c) = q.pop_front() {
+            let preds = std::mem::take(&mut pred[c as usize]);
+            for &p in &preds {
+                let pu = p as usize;
+                if win[pu] {
+                    continue;
+                }
+                let turn = (pu / slk) & 1;
+                if turn == prover {
+                    win[pu] = true;
+                    q.push_back(p);
+                } else {
+                    if remaining[pu] > 0 {
+                        remaining[pu] -= 1;
+                    }
+                    if remaining[pu] == 0 {
+                        win[pu] = true;
+                        q.push_back(p);
+                    }
+                }
+            }
+            pred[c as usize] = preds;
+        }
+        let mut cand = vec![false; RACE_STATES];
+        for id in 0..RACE_STATES {
+            if win[id * slk] {
+                cand[id] = true;
+            }
+        }
+        cand
+    }
+
+    #[inline]
+    fn k1_merge(w0: &[bool], w1: &[bool], id: usize) -> u8 {
+        match (w0[id], w1[id]) {
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 0,
+            (true, true) => 3, // conflict (both provers) — a bug if it occurs on a legal state
+        }
+    }
+
+    #[test]
+    fn gate3_k1_filter_and_raw_audit() {
+        use std::time::Instant;
+
+        // Corpus: empty board + 2 pinned + 8 named + 40 legal topologies.
+        const ADV: [u64; 8] = [
+            0xC0111D_A001, 0x5E2A_A002, 0xC2055_A003, 0x51DE_A004,
+            0xBAC0_A005, 0x1EAA_A006, 0xAA0D_A007, 0x701E_A008,
+        ];
+        let legal_topo = |index: usize| -> GameState {
+            let mut rng = 0xACE5_2026u64 ^ (index as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
+            loop {
+                if let Some(t) = generate_legal_full_wall_topology(&mut rng, 256) {
+                    return t.g;
+                }
+            }
+        };
+        let mut topos: Vec<GameState> = vec![GameState::new(), legal_topo(92), legal_topo(24)];
+        for s in ADV {
+            let mut rng = s;
+            if let Some(t) = generate_legal_full_wall_topology(&mut rng, 256) {
+                topos.push(t.g);
+            }
+        }
+        for i in 0..40usize {
+            topos.push(legal_topo(i));
+        }
+
+        // Aggregate metrics.
+        let (mut full_eq_b, mut full_eq_c) = (true, true);
+        let mut full_vs_oracle_mism = 0u64;
+        let mut raw_false_wins = 0u64;
+        let mut raw_missed_wins = 0u64;
+        let mut raw_exact = 0u64;
+        // True (oracle-relative) unsoundness: RAW proves a winner the oracle
+        // contradicts. This is the real soundness test (FULL is sound but
+        // incomplete, so "differs from FULL" is NOT the same as "wrong").
+        let mut raw_k1_oracle_false = 0u64;
+        let mut raw_k2_oracle_false = 0u64;
+        let mut first_raw_k2_oracle_cx: Option<String> = None;
+        // RAW_K2 (slack<=2) vs FULL.
+        let mut raw_k2_false = 0u64;
+        let mut raw_k2_missed = 0u64;
+        let mut raw_k2_exact = 0u64;
+        let mut raw_k2_unknown = 0u64;
+        let mut k2_eq_full = true;
+        let mut first_raw_k2_cx: Option<String> = None;
+        let (mut t_raw_k2, mut t_k2hyb) = (0u128, 0u128);
+        let (mut k2_filter_moves, mut k2_final_moves, mut k2_cand_states) = (0u64, 0u64, 0u64);
+        let mut states_audited = 0u64;
+        let (mut full_moves_tot, mut c_filter_moves, mut c_final_moves) = (0u64, 0u64, 0u64);
+        let mut cand_states_c = 0u64;
+        let (mut t_full, mut t_raw, mut t_c) = (0u128, 0u128, 0u128);
+        let mut first_raw_cx: Option<String> = None;
+        let mut first_c_mismatch: Option<String> = None;
+
+        for g in &topos {
+            let mut own = [[u8::MAX; 81]; 2];
+            g.compute_dist(0, &mut own[0]);
+            g.compute_dist(1, &mut own[1]);
+
+            // Oracle.
+            let mut gg = g.clone();
+            let mut rs = ReferenceScratch::new();
+            let mut oracle = vec![0i16; RACE_STATES];
+            solve_race_config_reference(&mut gg, &mut rs, &mut oracle);
+
+            // FULL baseline.
+            let t = Instant::now();
+            let mut fm0 = 0u64;
+            let mut fm1 = 0u64;
+            let fa0 = k1_attr_full(g, &own, 0, None, &mut fm0);
+            let fa1 = k1_attr_full(g, &own, 1, None, &mut fm1);
+            t_full += t.elapsed().as_micros();
+            full_moves_tot += fm0 + fm1;
+
+            // Cross-check FULL == production build_winner_table.
+            let prod = build_winner_table(g);
+
+            // RAW_K1 (slack<=1 defender, used directly).
+            let t = Instant::now();
+            let mut rm = 0u64;
+            let r0 = k1_attr_restricted(g, &own, 0, 1, &mut rm);
+            let r1 = k1_attr_restricted(g, &own, 1, 1, &mut rm);
+            t_raw += t.elapsed().as_micros();
+
+            // K1→FULL hybrid C (slack<=1 candidate filter, then FULL verify).
+            let t = Instant::now();
+            let mut cfm = 0u64;
+            let mut cf0 = 0u64;
+            let mut cf1 = 0u64;
+            let c0_cand = k1_attr_restricted(g, &own, 1, 1, &mut cfm);
+            let c1_cand = k1_attr_restricted(g, &own, 1, 1, &mut cfm);
+            let cb0 = k1_attr_full(g, &own, 0, Some(&c0_cand), &mut cf0);
+            let cb1 = k1_attr_full(g, &own, 1, Some(&c1_cand), &mut cf1);
+            t_c += t.elapsed().as_micros();
+            c_filter_moves += cfm;
+            c_final_moves += cf0 + cf1;
+            cand_states_c += c0_cand.iter().filter(|&&b| b).count() as u64
+                + c1_cand.iter().filter(|&&b| b).count() as u64;
+
+            // K1→FULL hybrid B (slack<=0 candidate filter).
+            let mut bfm = 0u64;
+            let mut bf0 = 0u64;
+            let mut bf1 = 0u64;
+            let b0_cand = k1_attr_restricted(g, &own, 0, 0, &mut bfm);
+            let b1_cand = k1_attr_restricted(g, &own, 1, 0, &mut bfm);
+            let bb0 = k1_attr_full(g, &own, 0, Some(&b0_cand), &mut bf0);
+            let bb1 = k1_attr_full(g, &own, 1, Some(&b1_cand), &mut bf1);
+
+            // RAW_K2 (slack<=2 defender, used directly).
+            let t = Instant::now();
+            let mut rm2 = 0u64;
+            let r0_k2 = k1_attr_restricted(g, &own, 0, 2, &mut rm2);
+            let r1_k2 = k1_attr_restricted(g, &own, 1, 2, &mut rm2);
+            t_raw_k2 += t.elapsed().as_micros();
+
+            // K2_HYBRID (slack<=2 candidate filter, then FULL verification).
+            let t = Instant::now();
+            let mut k2fm = 0u64;
+            let mut k2f0 = 0u64;
+            let mut k2f1 = 0u64;
+            let k2c0 = k1_attr_restricted(g, &own, 0, 2, &mut k2fm);
+            let k2c1 = k1_attr_restricted(g, &own, 1, 2, &mut k2fm);
+            let k2b0 = k1_attr_full(g, &own, 0, Some(&k2c0), &mut k2f0);
+            let k2b1 = k1_attr_full(g, &own, 1, Some(&k2c1), &mut k2f1);
+            t_k2hyb += t.elapsed().as_micros();
+            k2_filter_moves += k2fm;
+            k2_final_moves += k2f0 + k2f1;
+            k2_cand_states += k2c0.iter().filter(|&&b| b).count() as u64
+                + k2c1.iter().filter(|&&b| b).count() as u64;
+
+            // Per-state comparison.
+            for p0 in 9..81usize {
+                for p1 in 0..72usize {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for turn in 0..2usize {
+                        let id = state_id(p0, p1, turn);
+                        let o = oracle[id];
+                        if o == 0 {
+                            continue;
+                        }
+                        states_audited += 1;
+                        let full_c = k1_merge(&fa0, &fa1, id);
+                        let raw_c = k1_merge(&r0, &r1, id);
+                        let b_c = k1_merge(&bb0, &bb1, id);
+                        let cc = k1_merge(&cb0, &cb1, id);
+
+                        // FULL vs production table.
+                        let prod_c = match prod.classify(id) {
+                            RaceClass::ProvenP0 => 1,
+                            RaceClass::ProvenP1 => 2,
+                            RaceClass::Unknown => 0,
+                        };
+                        assert_eq!(full_c, prod_c, "FULL reimpl != production table id={id}");
+
+                        // FULL vs oracle (winner soundness).
+                        let ow = (if o > 0 { turn } else { turn ^ 1 }) as u8 + 1; // 1=p0,2=p1
+                        if full_c != 0 && full_c != 3 && full_c != ow {
+                            full_vs_oracle_mism += 1;
+                        }
+
+                        // Hybrid equality.
+                        if b_c != full_c {
+                            full_eq_b = false;
+                        }
+                        if cc != full_c {
+                            full_eq_c = false;
+                            if first_c_mismatch.is_none() {
+                                first_c_mismatch = Some(format!(
+                                    "id={id} p0={p0} p1={p1} turn={turn} C={cc} FULL={full_c} oracle={o}"
+                                ));
+                            }
+                        }
+
+                        // RAW_K1 vs FULL.
+                        if raw_c == full_c {
+                            raw_exact += 1;
+                        }
+                        let raw_proves = raw_c == 1 || raw_c == 2;
+                        let full_proves = full_c == 1 || full_c == 2;
+                        if raw_proves && (!full_proves || raw_c != full_c || raw_c == 3) {
+                            raw_false_wins += 1;
+                            if first_raw_cx.is_none() {
+                                first_raw_cx = Some(k1_raw_counterexample(
+                                    g, &own, p0, p1, turn, raw_c, full_c, o,
+                                ));
+                            }
+                        }
+                        if full_proves && !raw_proves {
+                            raw_missed_wins += 1;
+                        }
+
+                        // RAW_K2 (slack<=2) vs FULL.
+                        let raw2_c = k1_merge(&r0_k2, &r1_k2, id);
+                        let k2h_c = k1_merge(&k2b0, &k2b1, id);
+                        if raw2_c == full_c {
+                            raw_k2_exact += 1;
+                        }
+                        if raw2_c == 0 {
+                            raw_k2_unknown += 1;
+                        }
+                        let raw2_proves = raw2_c == 1 || raw2_c == 2;
+                        if raw2_proves && (!full_proves || raw2_c != full_c || raw2_c == 3) {
+                            raw_k2_false += 1;
+                            if first_raw_k2_cx.is_none() {
+                                first_raw_k2_cx = Some(k1_raw_counterexample(
+                                    g, &own, p0, p1, turn, raw2_c, full_c, o,
+                                ));
+                            }
+                        }
+                        if full_proves && !raw2_proves {
+                            raw_k2_missed += 1;
+                        }
+
+                        // TRUE unsoundness (vs ORACLE): RAW proves a winner that
+                        // the exact oracle says is the loser. (raw*_c, ow ∈ {1,2}.)
+                        if raw_proves && raw_c != ow {
+                            raw_k1_oracle_false += 1;
+                        }
+                        if raw2_proves && raw2_c != ow {
+                            raw_k2_oracle_false += 1;
+                            if first_raw_k2_oracle_cx.is_none() {
+                                first_raw_k2_oracle_cx = Some(k1_raw_counterexample(
+                                    g, &own, p0, p1, turn, raw2_c, full_c, o,
+                                ));
+                            }
+                        }
+                        if k2h_c != full_c {
+                            k2_eq_full = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("── Gate-3 K1 audit ───────────────────────────────────────────");
+        eprintln!("topologies:              {}", topos.len());
+        eprintln!("states audited:          {states_audited}");
+        eprintln!("FULL vs oracle mismatch: {full_vs_oracle_mism}");
+        eprintln!("B (slack0)→FULL == FULL: {full_eq_b}");
+        eprintln!("C (slack1)→FULL == FULL: {full_eq_c}");
+        eprintln!("── RAW_K1 (slack<=1 alone) vs FULL ──");
+        eprintln!("RAW_K1 false wins:       {raw_false_wins}");
+        eprintln!("RAW_K1 missed wins:      {raw_missed_wins}");
+        eprintln!("RAW_K1 exact matches:    {raw_exact} / {states_audited}");
+        eprintln!("── work / timing ──");
+        eprintln!("FULL defender moves:     {full_moves_tot}");
+        eprintln!("C filter moves:          {c_filter_moves}");
+        eprintln!("C final-pass moves:      {c_final_moves}");
+        eprintln!("C candidate states:      {cand_states_c}");
+        eprintln!("time FULL:               {} us", t_full);
+        eprintln!("time RAW_K1:             {} us", t_raw);
+        eprintln!("time C (filter+final):   {} us", t_c);
+        if let Some(ref m) = first_raw_cx {
+            eprintln!("first RAW_K1 false win:\n{m}");
+        }
+        if let Some(ref m) = first_c_mismatch {
+            eprintln!("first C-vs-FULL mismatch: {m}");
+        }
+        eprintln!("── ORACLE-relative unsoundness (the REAL soundness test) ──");
+        eprintln!("RAW_K1 oracle-wrong wins: {raw_k1_oracle_false}");
+        eprintln!("RAW_K2 oracle-wrong wins: {raw_k2_oracle_false}");
+        eprintln!("── RAW_K2 (slack<=2 alone) vs FULL ──");
+        eprintln!("RAW_K2 differs-from-FULL: {raw_k2_false} (incl. RAW more-complete-than-FULL)");
+        eprintln!("RAW_K2 missed wins:      {raw_k2_missed}");
+        eprintln!("RAW_K2 exact matches:    {raw_k2_exact} / {states_audited}");
+        eprintln!("RAW_K2 Unknown:          {raw_k2_unknown}");
+        if let Some(ref m) = first_raw_k2_oracle_cx {
+            eprintln!("first RAW_K2 ORACLE-WRONG win:\n{m}");
+        }
+        eprintln!("K2_HYBRID == FULL:       {k2_eq_full}");
+        eprintln!("K2 candidate states:     {k2_cand_states}");
+        eprintln!("K2 filter moves:         {k2_filter_moves}");
+        eprintln!("K2 final-pass moves:     {k2_final_moves}");
+        eprintln!("time RAW_K2:             {} us", t_raw_k2);
+        eprintln!("time K2_HYBRID:          {} us", t_k2hyb);
+        if let Some(ref m) = first_raw_k2_cx {
+            eprintln!("first RAW_K2 false win:\n{m}");
+        }
+        let faster = t_c < t_full;
+        eprintln!("VERDICT: K1 hybrid faster than FULL? {faster}  (filter+final vs full)");
+        eprintln!("VERDICT: K2 hybrid faster than FULL? {}  ", t_k2hyb < t_full);
+        eprintln!("──────────────────────────────────────────────────────────────");
+
+        // Hard invariants that MUST hold (independent of the experiment outcome):
+        assert_eq!(full_vs_oracle_mism, 0, "FULL table winner mismatch vs oracle");
+        // (FULL == production table is asserted per-state in the loop.)
+        // The hybrid equality (full_eq_b / full_eq_c) and timing are reported as
+        // experiment outcomes, not gated — the optimization is accepted only if it
+        // matches FULL AND is faster, which the report lets us judge.
+    }
+
+    /// Build a detailed RAW_K1 false-win counterexample: find a defender move
+    /// FULL uses (cumulative slack >= 2, omitted by K1) and whether it sets up a
+    /// later straight/diagonal jump.
+    fn k1_raw_counterexample(
+        g_root: &GameState,
+        own: &[[u8; 81]; 2],
+        p0: usize,
+        p1: usize,
+        turn: usize,
+        raw_c: u8,
+        full_c: u8,
+        oracle: i16,
+    ) -> String {
+        let mut g = g_root.clone();
+        g.pawn[0] = p0;
+        g.pawn[1] = p1;
+        g.turn = turn;
+        let defender = turn; // at the proving state, side to move acts; report its omitted moves
+        let mut buf = [0i16; 16];
+        let nm = g.gen_pawn_moves(&mut buf, 0);
+        let dcell = if defender == 0 { p0 } else { p1 };
+        let before = own[defender][dcell];
+        let mut omitted = String::new();
+        for &mv in &buf[..nm] {
+            let dst = mv as usize;
+            let after = own[defender][dst];
+            let extra = if after == u8::MAX || before == u8::MAX {
+                99
+            } else {
+                1 + after as i32 - before as i32
+            };
+            if extra >= 2 {
+                let jump = cell_manhattan(dcell, dst) != 1;
+                omitted.push_str(&format!(
+                    "    omitted defender {dcell}->{dst} extra(slack)={extra} jump={jump}\n"
+                ));
+            }
+        }
+        let oracle_winner = if oracle > 0 { turn } else { turn ^ 1 };
+        format!(
+            "  topology walls hw/vw nonzero; p0={p0} p1={p1} turn={turn}\n\
+             {omitted}    RAW={raw_c} FULL={full_c} oracle_winner=P{oracle_winner} (1=p0,2=p1; 3=conflict)"
+        )
+    }
+
+    /// FULL recorded-corpus soundness gate for RAW_K2 (slack<=2 defender used
+    /// directly): does it EVER prove the wrong winner vs the exact oracle across
+    /// every recorded zero-wall topology? Soundness only (no timing/hybrid).
+    #[test]
+    fn gate3_raw_k2_full_corpus_soundness() {
+        use std::collections::HashMap;
+
+        let root = match repo_root() {
+            Some(r) => r,
+            None => {
+                eprintln!("SKIP: no repo root");
+                return;
+            }
+        };
+        let sqlite = load_games_from_sqlite(&root.join("training/data/all_games.db"));
+        let text = load_games_from_text_files(&root.join("training/data"));
+        let all: Vec<(String, Vec<i16>)> = sqlite.into_iter().chain(text).collect();
+        assert!(!all.is_empty(), "no games loaded");
+
+        // Unique zero-wall topologies.
+        let mut topo: HashMap<([u8; 64], [u8; 64]), ()> = HashMap::new();
+        for (_src, moves) in &all {
+            for (_ply, g) in replay_collect_zero_wall_states(moves) {
+                topo.entry((g.hw, g.vw)).or_insert(());
+            }
+        }
+        let keys: Vec<_> = topo.into_keys().collect();
+
+        let mut states = 0u64;
+        let mut k2_oracle_false = 0u64;
+        let mut k2_more_complete = 0u64; // RAW_K2 decides where FULL declines, oracle-correct
+        let mut first_cx: Option<String> = None;
+
+        for (hw, vw) in &keys {
+            let mut g = build_game_with_walls(hw, vw);
+            let mut own = [[u8::MAX; 81]; 2];
+            g.compute_dist(0, &mut own[0]);
+            g.compute_dist(1, &mut own[1]);
+
+            let mut rs = ReferenceScratch::new();
+            let mut oracle = vec![0i16; RACE_STATES];
+            solve_race_config_reference(&mut g, &mut rs, &mut oracle);
+
+            let mut dummy = 0u64;
+            let r0 = k1_attr_restricted(&g, &own, 0, 2, &mut dummy);
+            let r1 = k1_attr_restricted(&g, &own, 1, 2, &mut dummy);
+            let prod = build_winner_table(&g);
+
+            for p0 in 9..81usize {
+                for p1 in 0..72usize {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for turn in 0..2usize {
+                        let id = state_id(p0, p1, turn);
+                        let o = oracle[id];
+                        if o == 0 {
+                            continue;
+                        }
+                        states += 1;
+                        let raw = k1_merge(&r0, &r1, id);
+                        if raw != 1 && raw != 2 {
+                            continue;
+                        }
+                        let ow = (if o > 0 { turn } else { turn ^ 1 }) as u8 + 1;
+                        if raw != ow {
+                            k2_oracle_false += 1;
+                            if first_cx.is_none() {
+                                let full_c = match prod.classify(id) {
+                                    RaceClass::ProvenP0 => 1,
+                                    RaceClass::ProvenP1 => 2,
+                                    RaceClass::Unknown => 0,
+                                };
+                                first_cx = Some(k1_raw_counterexample(
+                                    &g, &own, p0, p1, turn, raw, full_c, o,
+                                ));
+                            }
+                        } else if prod.classify(id) == RaceClass::Unknown {
+                            k2_more_complete += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!("── RAW_K2 full-corpus soundness ──────────────────────────────");
+        eprintln!("topologies:              {}", keys.len());
+        eprintln!("live states:             {states}");
+        eprintln!("RAW_K2 oracle-wrong:     {k2_oracle_false}");
+        eprintln!("RAW_K2 more-complete:    {k2_more_complete} (decides where FULL declines, oracle-correct)");
+        if let Some(ref m) = first_cx {
+            eprintln!("first oracle-wrong:\n{m}");
+        }
+        eprintln!("──────────────────────────────────────────────────────────────");
+        assert_eq!(k2_oracle_false, 0, "RAW_K2 proved a wrong winner vs oracle");
+    }
+
+    // ── CSR winner-table parity regression ───────────────────────────────────
+
+    fn csr_legal_topo(index: usize) -> GameState {
+        let mut rng = 0xACE5_2026u64 ^ (index as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
+        loop {
+            if let Some(t) = generate_legal_full_wall_topology(&mut rng, 256) {
+                return t.g;
+            }
+        }
+    }
+
+    /// The CSR winner table must agree with the exact oracle on every live state
+    /// across the empty board, named adversarial seeds, and legal topologies.
+    #[test]
+    fn csr_winner_table_oracle_parity() {
+        const ADV: [u64; 8] = [
+            0xC0111D_A001, 0x5E2A_A002, 0xC2055_A003, 0x51DE_A004,
+            0xBAC0_A005, 0x1EAA_A006, 0xAA0D_A007, 0x701E_A008,
+        ];
+        let mut topos = vec![GameState::new(), csr_legal_topo(92), csr_legal_topo(24)];
+        for s in ADV {
+            let mut rng = s;
+            if let Some(t) = generate_legal_full_wall_topology(&mut rng, 256) {
+                topos.push(t.g);
+            }
+        }
+        for i in 0..40usize {
+            topos.push(csr_legal_topo(i));
+        }
+
+        let mut mism = 0u64;
+        for g in &topos {
+            let wt = build_winner_table(g);
+            let mut gg = g.clone();
+            let mut rs = ReferenceScratch::new();
+            let mut oracle = vec![0i16; RACE_STATES];
+            solve_race_config_reference(&mut gg, &mut rs, &mut oracle);
+            for id in 0..RACE_STATES {
+                let o = oracle[id];
+                if o == 0 {
+                    continue;
+                }
+                let turn = id & 1;
+                let ow = if o > 0 { turn } else { turn ^ 1 };
+                let cw = match wt.classify(id) {
+                    RaceClass::ProvenP0 => Some(0usize),
+                    RaceClass::ProvenP1 => Some(1usize),
+                    RaceClass::Unknown => None,
+                };
+                if let Some(w) = cw {
+                    if w != ow {
+                        mism += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("CSR winner-table oracle parity: topos={} winner_mismatches={mism}", topos.len());
+        assert_eq!(mism, 0, "CSR winner table winner mismatch vs oracle");
     }
 
     #[test]
