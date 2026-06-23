@@ -43,10 +43,30 @@ use crate::movegen::{
 use crate::path::flood::expand_frontier;
 use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
-use crate::util::grid::{flood_sq_from_bit, FLOOD_PLAYABLE};
+use crate::util::grid::{flood_bit_sq, flood_sq_from_bit, FLOOD_PLAYABLE};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
+
+/// Count legal walls from `walls` that cross `route` (a flood u128 bitset).
+/// A wall crosses a route when both cells across one of its blocked edges are on the route.
+fn wall_crossing_count(walls: &[BoardMove], route: u128) -> u32 {
+    let mut n = 0u32;
+    for mv in walls {
+        let BoardMove::Wall { row, col, orientation } = *mv else { continue };
+        let r = row as usize;
+        let c = col as usize;
+        let bit = |r: usize, c: usize| (route & flood_bit_sq((r * 9 + c) as u8)) != 0;
+        let crosses = match orientation {
+            WallOrientation::Horizontal =>
+                (bit(r, c) && bit(r + 1, c)) || (bit(r, c + 1) && bit(r + 1, c + 1)),
+            WallOrientation::Vertical =>
+                (bit(r, c) && bit(r, c + 1)) || (bit(r + 1, c) && bit(r + 1, c + 1)),
+        };
+        if crosses { n += 1; }
+    }
+    n
+}
 
 /// Graduated LMR starts after this move index (JS acev10: `i >= 4`).
 const ACE_LMR_AFTER_MOVE: usize = 4;
@@ -885,6 +905,39 @@ impl AceSearch {
         ) as u32
     }
 
+    /// Count legal walls crossing each player's route bits (for ws[16]/ws[17]).
+    fn legal_path_crossing_counts_bits(&mut self, route0: u128, route1: u128) -> (u32, u32) {
+        if let Some(bridge) = self.bridge.as_mut() {
+            let _ = geometric_wall_len_cached(
+                &mut bridge.geometric_walls,
+                &mut bridge.board,
+                &mut bridge.bfs,
+                GeometricWallCacheRole::Eval,
+                Some(&mut bridge.wall_cache_stats),
+            );
+            let cache = bridge.geometric_walls.as_ref().unwrap();
+            return (
+                wall_crossing_count(cache.wall_slice(), route0),
+                wall_crossing_count(cache.wall_slice(), route1),
+            );
+        }
+        let mut board = Board::new();
+        for i in 0..self.g.hist_len {
+            let _ = board.make_move(ace_move_to_board(self.g.hist_m[i]));
+        }
+        let mut scratch = BfsScratch::new();
+        let mut cache_opt: Option<GeometricWallCache> = None;
+        geometric_wall_len_cached(
+            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+        );
+        if let Some(ref cache) = cache_opt {
+            (wall_crossing_count(cache.wall_slice(), route0),
+             wall_crossing_count(cache.wall_slice(), route1))
+        } else {
+            (0, 0)
+        }
+    }
+
     /// Wall-cache profiling counters (TiBridge path only).
     pub fn wall_cache_stats(&self) -> Option<GeometricWallCacheStats> {
         self.bridge
@@ -1102,9 +1155,9 @@ impl AceSearch {
         t0.elapsed().as_millis() as f64 > budget
     }
 
-    fn route_feature_score(&self, nw: &Net) -> f64 {
+    fn route_feature_score(&self, nw: &Net) -> (f64, u128, u128) {
         if !nw.route_active {
-            return 0.0;
+            return (0.0, 0, 0);
         }
         let d0f = &self.d0[self.dist0_idx];
         let d1f = &self.d1[self.dist1_idx];
@@ -1146,7 +1199,7 @@ impl AceSearch {
             + sum_bits(me_near, &nw.route_near_me)
             + sum_bits(opp_near, &nw.route_near_opp)
             + sum_bits(contested, &nw.route_contested);
-        score
+        (score, route0, route1)
     }
 
     fn refresh_dist(&mut self, ply: usize) {
@@ -1469,7 +1522,8 @@ impl AceSearch {
             + ws[4] * d_opp
             + ws[9] * pd * (w_me + w_opp) / 20.0
             + ws[10] * wd * (d_me + d_opp) / 16.0;
-        out += self.route_feature_score(nw);
+        let (route_score, route0_bits, route1_bits) = self.route_feature_score(nw);
+        out += route_score;
         if w_opp_i == 0 {
             out += ws[6];
             if d_me <= d_opp {
@@ -1504,6 +1558,14 @@ impl AceSearch {
                 .count()
         } as f64;
         out += ws[14] * legal_wall_norm + ws[15] * width_opp;
+        // ws[16]: legal walls crossing my path / 128; ws[17]: crossing opp path / 128
+        let (route_me_bits, route_opp_bits) = if me == 0 {
+            (route0_bits, route1_bits)
+        } else {
+            (route1_bits, route0_bits)
+        };
+        let (cross_me, cross_opp) = self.legal_path_crossing_counts_bits(route_me_bits, route_opp_bits);
+        out += ws[16] * cross_me as f64 / 128.0 + ws[17] * cross_opp as f64 / 128.0;
 
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
