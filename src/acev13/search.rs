@@ -906,36 +906,22 @@ impl AceSearch {
     }
 
     /// Count legal walls crossing each player's route bits (for ws[16]/ws[17]).
+    /// Returns (0, 0) when no bridge cache is available (WASM path) to avoid
+    /// paying a full move-replay + wall generation on every eval node.
     fn legal_path_crossing_counts_bits(&mut self, route0: u128, route1: u128) -> (u32, u32) {
-        if let Some(bridge) = self.bridge.as_mut() {
-            let _ = geometric_wall_len_cached(
-                &mut bridge.geometric_walls,
-                &mut bridge.board,
-                &mut bridge.bfs,
-                GeometricWallCacheRole::Eval,
-                Some(&mut bridge.wall_cache_stats),
-            );
-            let cache = bridge.geometric_walls.as_ref().unwrap();
-            return (
-                wall_crossing_count(cache.wall_slice(), route0),
-                wall_crossing_count(cache.wall_slice(), route1),
-            );
-        }
-        let mut board = Board::new();
-        for i in 0..self.g.hist_len {
-            let _ = board.make_move(ace_move_to_board(self.g.hist_m[i]));
-        }
-        let mut scratch = BfsScratch::new();
-        let mut cache_opt: Option<GeometricWallCache> = None;
-        geometric_wall_len_cached(
-            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+        let Some(bridge) = self.bridge.as_mut() else { return (0, 0) };
+        let _ = geometric_wall_len_cached(
+            &mut bridge.geometric_walls,
+            &mut bridge.board,
+            &mut bridge.bfs,
+            GeometricWallCacheRole::Eval,
+            Some(&mut bridge.wall_cache_stats),
         );
-        if let Some(ref cache) = cache_opt {
-            (wall_crossing_count(cache.wall_slice(), route0),
-             wall_crossing_count(cache.wall_slice(), route1))
-        } else {
-            (0, 0)
-        }
+        let cache = bridge.geometric_walls.as_ref().unwrap();
+        (
+            wall_crossing_count(cache.wall_slice(), route0),
+            wall_crossing_count(cache.wall_slice(), route1),
+        )
     }
 
     /// Wall-cache profiling counters (TiBridge path only).
