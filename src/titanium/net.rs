@@ -3,18 +3,19 @@
 //! Philosophy: NN = geometric prior, search = tactical proof. See `field_planes.rs`.
 //!
 //! Two embedded blobs:
-//!   `net_weights.bin`        — v15 live (micro-train + deploy updates this)
-//!   `net_weights_frozen.bin` — pinned v13 baseline (ti-pure anchor + v15-frozen)
+//!   `net_weights.bin`        — v15 hard / latest trained (micro-train + deploy updates this)
+//!   `net_weights_medium.bin` — previous promoted live (website Medium tier)
+//!   `net_weights_frozen.bin` — pinned v13 baseline (website Easy tier)
 //!
 //! Blob layout (little-endian f64):
-//!   Wskip[18] B1[32] W2[32] W1C[36864] PO[2592] PX[2592]
+//!   Wskip[20] B1[32] W2[32] W1C[36864] PO[2592] PX[2592]
 //!   goal_inv_p0, goal_inv_p1, pawn_fwd_p0, pawn_fwd_p1,
 //!   corridor_delta_p0, corridor_delta_p1, path_cross_p0, path_cross_p1,
 //!   choke_p0, choke_p1, contested  (each 81×32 except contested is shared)
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 pub const NET_H: usize = 32;
-pub const WSKIP_LEN: usize = 18;
+pub const WSKIP_LEN: usize = 20;
 const W1C_LEN: usize = 9 * 128 * NET_H;
 const PO_LEN: usize = 81 * NET_H;
 const PX_LEN: usize = 81 * NET_H;
@@ -23,6 +24,7 @@ const FIELD_PLANE_SETS: usize = 5;
 pub const NET_WEIGHT_F64S: usize =
     WSKIP_LEN + NET_H + NET_H + W1C_LEN + PO_LEN + PX_LEN + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
+static NET_MEDIUM_BYTES: &[u8] = include_bytes!("net_weights_medium.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("net_weights_frozen.bin");
 pub struct Net {
     pub ws: [f64; WSKIP_LEN],
@@ -38,6 +40,10 @@ pub struct Net {
     pub route_near_opp: Vec<f64>,
     pub route_contested: Vec<f64>,
     pub route_active: bool,
+    /// Scalar inputs are pre-normalized to [-1,1]/[0,1] in evaluate() when true.
+    /// Set for new live net_weights.bin trained with normalization.
+    /// Frozen ACE v13 weights (net_weights_frozen.bin) keep this false (raw inputs).
+    pub normed: bool,
 }
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(count);
@@ -86,19 +92,32 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         route_near_opp,
         route_contested,
         route_active,
+        normed: false, // caller sets this
     }
 }
 /// Training / deployed weights (`net_weights.bin`, overridable via `TITANIUM_NET_WEIGHTS_PATH`).
+/// These weights expect *normalized* scalar inputs in `evaluate()` (normed=true).
 pub fn net() -> &'static Net {
     static NET: OnceLock<Net> = OnceLock::new();
     NET.get_or_init(|| {
-        if let Ok(path) = std::env::var("TITANIUM_NET_WEIGHTS_PATH") {
+        let mut n = if let Ok(path) = std::env::var("TITANIUM_NET_WEIGHTS_PATH") {
             let bytes = std::fs::read(&path)
                 .unwrap_or_else(|e| panic!("TITANIUM_NET_WEIGHTS_PATH read failed ({path}): {e}"));
             load_net_from_bytes(&bytes)
         } else {
             load_net_from_bytes(NET_BYTES)
-        }
+        };
+        n.normed = true;
+        n
+    })
+}
+/// Previous promoted live weights (`net_weights_medium.bin`) — website Medium tier.
+pub fn net_medium() -> &'static Net {
+    static NET: OnceLock<Net> = OnceLock::new();
+    NET.get_or_init(|| {
+        let mut n = load_net_from_bytes(NET_MEDIUM_BYTES);
+        n.normed = true;
+        n
     })
 }
 /// Original v13 baseline — same search as v15, frozen HalfPW (`net_weights_frozen.bin`).

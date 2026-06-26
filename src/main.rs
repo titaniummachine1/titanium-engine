@@ -60,14 +60,14 @@ fn main() {
         "perft-race" => run_perft_race(&args),
         "perft-id" => run_perft_id(&args),
         "thread-bench" => run_thread_bench(&args),
-        "moves" => run_moves(),
+        "moves" => run_moves(&args),
         "genmove" => run_genmove(&args),
         "ace-bench" => run_ace_bench(&args),
         "ace-perft" => run_ace_perft(&args),
         "cat" => run_cat(&args),
         "eval" => run_eval(&args),
-        "eval-batch" => run_eval_batch(),
-        "eval-packed-batch" => run_eval_packed_batch(),
+        "eval-batch" => run_eval_batch(&args),
+        "eval-packed-batch" => run_eval_packed_batch(&args),
         "reduction-probe" => run_reduction_probe(&args),
         "reduction-shadow" => run_reduction_shadow(&args),
         "fields" => run_fields(&args),
@@ -112,7 +112,8 @@ fn print_usage() {
     println!("  titanium ace-perft [depth] [--iters N] — ACE vs Titanium movegen perft compare");
     println!("  titanium eval [moves...] [--json]     — HalfPW net eval dump (trainer parity)");
     println!(
-        "  titanium eval-packed-batch            — stdin: u32 row + 24-byte packed state records"
+        "  titanium eval-packed-batch            — stdin: u32 row + 24-byte packed state records\n\
+         titanium eval-packed-batch --packed-file PATH --row-start N --row-count M"
     );
     println!(
         "  titanium fields [moves...] [--check]  — ASCII distance/corridor field grids + invariants"
@@ -439,10 +440,15 @@ fn run_perft_race(args: &[String]) {
     );
 }
 
-fn run_moves() {
-    let board = Board::new();
+fn run_moves(args: &[String]) {
+    let mut board = Board::new();
+    for mv in args.iter().skip(2) {
+        if mv.starts_with("--") {
+            break;
+        }
+        board.apply_algebraic(mv);
+    }
     let moves = generate_legal_moves(&board);
-    println!("{} legal moves at startpos", moves.len());
     for mv in moves {
         println!("{}", titanium::format_move(mv));
     }
@@ -565,9 +571,7 @@ fn run_eval(args: &[String]) {
 
 /// ASCII grids for NNUE distance / corridor fields — eyeball training geometry.
 fn run_fields(args: &[String]) {
-    use titanium::fields_viz::{
-        compute_nnue_fields, render_fields_text, validate_fields,
-    };
+    use titanium::fields_viz::{compute_nnue_fields, render_fields_text, validate_fields};
     use titanium::{algebraic_to_move_id, GameState};
     let check = args.iter().any(|a| a == "--check");
     let mut g = GameState::new();
@@ -596,9 +600,10 @@ fn run_fields(args: &[String]) {
 /// Dramatically faster than launching `titanium eval --json` per position (single startup).
 /// Input:  `e2 e8 e3 e7 d3h f5v`  (space-separated algebraic moves, empty line = startpos)
 /// Output: one compact JSON record per line (same format as `eval --json`)
-fn run_eval_batch() {
+fn run_eval_batch(args: &[String]) {
     use std::io::{self, BufRead};
     use titanium::{algebraic_to_move_id, GameState, TitaniumSearch};
+    let score_only = args.iter().any(|a| a == "--score-only" || a == "--compact");
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -614,7 +619,11 @@ fn run_eval_batch() {
             g.make_move(algebraic_to_move_id(tok));
         }
         let mut s = TitaniumSearch::grafted(g, None);
-        println!("{}", s.eval_dump_json());
+        if score_only {
+            println!("{{\"eval\":{}}}", s.eval_position());
+        } else {
+            println!("{}", s.eval_dump_json());
+        }
     }
 }
 
@@ -623,9 +632,72 @@ fn json_escape(s: &str) -> String {
 }
 
 /// Batch eval from canonical packed states — stdin records: u32 LE row index + 24-byte packed state.
-fn run_eval_packed_batch() {
-    use std::io::Read;
+/// File mode: `--packed-file PATH --row-start N --row-count M` reads contiguous 24-byte rows
+/// (no per-row index) so Python workers pass only a path + range.
+fn run_eval_packed_batch(args: &[String]) {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
     use titanium::{titanium_game_from_packed, TitaniumSearch, PACKED_STATE_LEN};
+
+    let mut packed_file: Option<&str> = None;
+    let mut row_start: u64 = 0;
+    let mut row_count: u64 = 0;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--packed-file" => {
+                packed_file = args.get(i + 1).map(|s| s.as_str());
+                i += 2;
+            }
+            "--row-start" => {
+                row_start = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--row-count" => {
+                row_count = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    if let Some(path) = packed_file {
+        if row_count == 0 {
+            eprintln!("eval-packed-batch: --row-count required with --packed-file");
+            std::process::exit(1);
+        }
+        let mut file = File::open(path).unwrap_or_else(|e| {
+            eprintln!("eval-packed-batch open {path}: {e}");
+            std::process::exit(1);
+        });
+        file.seek(SeekFrom::Start(row_start * PACKED_STATE_LEN as u64))
+            .unwrap_or_else(|e| {
+                eprintln!("eval-packed-batch seek: {e}");
+                std::process::exit(1);
+            });
+        let mut packed = [0u8; PACKED_STATE_LEN];
+        for rel in 0..row_count {
+            if let Err(e) = file.read_exact(&mut packed) {
+                eprintln!("eval-packed-batch read {path} row {}: {e}", row_start + rel);
+                std::process::exit(1);
+            }
+            match titanium_game_from_packed(&packed) {
+                Ok(g) => {
+                    let mut s = TitaniumSearch::grafted(g, None);
+                    println!("{}", s.eval_dump_json_packed(rel as u32));
+                }
+                Err(err) => {
+                    println!(
+                        "{{\"row\":{rel},\"ok\":false,\"protocol\":\"eval-packed-v1\",\"error\":\"{}\"}}",
+                        json_escape(&err)
+                    );
+                }
+            }
+        }
+        return;
+    }
 
     let mut stdin = std::io::stdin().lock();
     let mut record = [0u8; 4 + PACKED_STATE_LEN];
@@ -1303,6 +1375,8 @@ enum MatchEngine {
     AceV13GraftedPartial,
     /// Grafted + frozen v13 HalfPW (A/B vs titanium-v15 training weights).
     AceV13GraftedFrozen,
+    /// Grafted + previous promoted live HalfPW (website Medium tier).
+    AceV13GraftedMedium,
     /// Production graft with RaceProof/cert gates disabled. Experimental A/B only.
     AceV13GraftedNoRaceProof,
     /// Titanium v15 experimental — wall-ignorance loss certificate (frozen net).
@@ -1320,6 +1394,7 @@ impl MatchEngine {
                 Some(MatchEngine::AceV13Grafted)
             }
             "titanium-v15-frozen" => Some(MatchEngine::AceV13GraftedFrozen),
+            "titanium-v15-medium" => Some(MatchEngine::AceV13GraftedMedium),
             "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
                 Some(MatchEngine::AceV13GraftedNoRaceProof)
             }
@@ -1350,6 +1425,9 @@ impl MatchEngine {
             MatchEngine::AceV13GraftedPartial => "ace-v13 grafted + Lague partial-iteration",
             MatchEngine::AceV13GraftedFrozen => {
                 "Titanium v15 frozen (gen13 + O1 movegen + cert + adaptive-TT, v13 HalfPW)"
+            }
+            MatchEngine::AceV13GraftedMedium => {
+                "Titanium v15 medium (previous promoted live NNUE)"
             }
             MatchEngine::AceV13GraftedNoRaceProof => "Titanium v15 without RaceProof/cert gates",
             MatchEngine::AceV13GraftedWallIgnore => {
@@ -1389,6 +1467,7 @@ impl Seat {
             | MatchEngine::AceV13Grafted
             | MatchEngine::AceV13GraftedPartial
             | MatchEngine::AceV13GraftedFrozen
+            | MatchEngine::AceV13GraftedMedium
             | MatchEngine::AceV13GraftedNoRaceProof
             | MatchEngine::AceV13GraftedWallIgnore => {
                 let mut g = GameState::new();
@@ -1398,6 +1477,7 @@ impl Seat {
                 let search = match engine {
                     MatchEngine::AceV13Grafted => TitaniumSearch::grafted(g, tt_bits),
                     MatchEngine::AceV13GraftedFrozen => TitaniumSearch::grafted_frozen(g, tt_bits),
+                    MatchEngine::AceV13GraftedMedium => TitaniumSearch::grafted_medium(g, tt_bits),
                     MatchEngine::AceV13GraftedNoRaceProof => {
                         TitaniumSearch::grafted_no_raceproof(g, tt_bits)
                     }
@@ -1447,7 +1527,7 @@ impl Seat {
                 Some(format_move(report.best_move))
             }
             Seat::Ace { search } => {
-                let r = search.think(time_ms, 30, false, false, "match");
+                let r = search.think(time_ms, 30, 0, false, false, "match");
                 if r.mv == titanium::TITANIUM_NO_MOVE {
                     return None;
                 }
@@ -1556,7 +1636,7 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
             | "ace-v13-pure" | "ace-v13-grafted" | "ace-v13-grafted-no-raceproof"
             | "ace-v13-ti-pure"
             // Titanium production engines (use titanium search core)
-            | "titanium-v14" | "titanium-v15" | "titanium-v15-frozen"
+            | "titanium-v14" | "titanium-v15" | "titanium-v15-medium" | "titanium-v15-frozen"
             | "titanium-v15-no-raceproof" => Some(w[1].as_str()),
             _ => None,
         }
@@ -1582,6 +1662,7 @@ fn uses_titanium_module(flag: &str) -> bool {
         || flag == "titanium-v14"
         || flag == "titanium-v15"
         || flag == "titanium-v15-frozen"
+        || flag == "titanium-v15-medium"
         || flag == "titanium-v15-no-raceproof"
 }
 
@@ -1620,6 +1701,8 @@ fn run_genmove_ace(args: &[String]) {
     let eme0 = label.contains("pmc");
     let mut time_ms = 4000u64;
     let mut max_depth = 30i32;
+    let mut max_nodes = 0u64;
+    let mut threads = 1usize;
     let mut full = false;
     let mut log = false;
     let mut eme = eme0;
@@ -1633,9 +1716,21 @@ fn run_genmove_ace(args: &[String]) {
                 i += 2;
                 continue;
             }
+        } else if arg == "--nodes" {
+            if let Some(n) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                max_nodes = n;
+                i += 2;
+                continue;
+            }
         } else if arg == "--depth" {
             if let Some(d) = args.get(i + 1).and_then(|s| s.parse::<i32>().ok()) {
                 max_depth = d;
+                i += 2;
+                continue;
+            }
+        } else if arg == "--threads" {
+            if let Some(n) = args.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
+                threads = n.max(1);
                 i += 2;
                 continue;
             }
@@ -1722,6 +1817,8 @@ fn run_genmove_ace(args: &[String]) {
             eme,
             time_ms,
             max_depth,
+            max_nodes,
+            threads,
             full,
             log,
             ..Default::default()

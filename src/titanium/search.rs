@@ -28,10 +28,12 @@ use crate::titanium::move_id_to_board;
 use crate::util::clock::{Duration, Instant};
 
 use crate::cat::prune::{
-    gap_play_zone_mask, get_shortest_path, wall_in_dead_zone, wall_should_search,
+    gap_play_zone_mask, get_shortest_path, move_corridor_attention, wall_in_dead_zone,
+    wall_should_search,
 };
-use crate::cat::CorridorAttention;
+use crate::cat::{CorridorAttention, CAT_COLD_CM, CAT_HOT_CM};
 use crate::core::board::{Board, Move as BoardMove, Player, Undo, WallOrientation};
+use crate::movegen::legal::generate_pawn_moves_for;
 use crate::movegen::{
     generate_legal_moves_slice_cached, geometric_wall_len_cached, GeometricWallCache,
     GeometricWallCacheRole, GeometricWallCacheStats, MAX_LEGAL_MOVES,
@@ -41,7 +43,7 @@ use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
 use crate::titanium::certify::{certify, CertifyOpts};
 use crate::titanium::game::{GameState, ZOBRIST};
-use crate::titanium::net::{net, net_frozen, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
+use crate::titanium::net::{net, net_frozen, net_medium, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
 use crate::titanium::packed_state::FEATURE_SCHEMA;
 use crate::titanium::race::{
     race_outcome, solve_race_config, RaceBound, RaceScratch, RACE_MATE, RACE_STATES,
@@ -72,6 +74,11 @@ fn ace_graduated_lmr_reduction(move_index: usize, depth: i32) -> i32 {
     red
 }
 
+struct LmrCatContext {
+    board: Board,
+    cat: CorridorAttention,
+}
+
 /// EME extends only the first ordered wall moves after the TT/best move.
 /// Index 0 (TT move) already gets full depth; extending more siblings
 /// compounds multiplicatively down the tree and explodes the node count.
@@ -92,15 +99,24 @@ fn ace_graduated_eme_extension(move_index: usize, depth: i32) -> i32 {
 fn wall_crossing_count(walls: &[BoardMove], route: u128) -> u32 {
     let mut n = 0u32;
     for mv in walls {
-        let BoardMove::Wall { row, col, orientation } = *mv else { continue };
+        let BoardMove::Wall {
+            row,
+            col,
+            orientation,
+        } = *mv
+        else {
+            continue;
+        };
         let r = row as usize;
         let c = col as usize;
         let bit = |r: usize, c: usize| (route & flood_bit_sq((r * 9 + c) as u8)) != 0;
         let crosses = match orientation {
-            WallOrientation::Horizontal =>
-                (bit(r, c) && bit(r + 1, c)) || (bit(r, c + 1) && bit(r + 1, c + 1)),
-            WallOrientation::Vertical =>
-                (bit(r, c) && bit(r, c + 1)) || (bit(r + 1, c) && bit(r + 1, c + 1)),
+            WallOrientation::Horizontal => {
+                (bit(r, c) && bit(r + 1, c)) || (bit(r, c + 1) && bit(r + 1, c + 1))
+            }
+            WallOrientation::Vertical => {
+                (bit(r, c) && bit(r, c + 1)) || (bit(r + 1, c) && bit(r + 1, c + 1))
+            }
         };
         if crosses {
             n += 1;
@@ -113,15 +129,24 @@ fn wall_crossing_count(walls: &[BoardMove], route: u128) -> u32 {
 fn wall_crossing_count_arr(walls: &[BoardMove], route: &[u8; 81]) -> u32 {
     let mut n = 0u32;
     for mv in walls {
-        let BoardMove::Wall { row, col, orientation } = *mv else { continue };
+        let BoardMove::Wall {
+            row,
+            col,
+            orientation,
+        } = *mv
+        else {
+            continue;
+        };
         let r = row as usize;
         let c = col as usize;
         let cell = |r: usize, c: usize| route[r * 9 + c] != 0;
         let crosses = match orientation {
-            WallOrientation::Horizontal =>
-                (cell(r, c) && cell(r + 1, c)) || (cell(r, c + 1) && cell(r + 1, c + 1)),
-            WallOrientation::Vertical =>
-                (cell(r, c) && cell(r, c + 1)) || (cell(r + 1, c) && cell(r + 1, c + 1)),
+            WallOrientation::Horizontal => {
+                (cell(r, c) && cell(r + 1, c)) || (cell(r, c + 1) && cell(r + 1, c + 1))
+            }
+            WallOrientation::Vertical => {
+                (cell(r, c) && cell(r, c + 1)) || (cell(r + 1, c) && cell(r + 1, c + 1))
+            }
         };
         if crosses {
             n += 1;
@@ -217,6 +242,7 @@ pub struct AceDepthLogEntry {
     pub pv: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct ThinkResult {
     pub mv: i16,
     pub score: i32,
@@ -226,6 +252,32 @@ pub struct ThinkResult {
     pub white_dist: u8,
     pub black_dist: u8,
     pub depth_log: Vec<AceDepthLogEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchProfile {
+    pub worker_id: usize,
+    pub late_wall_skip_pct: u8,
+    pub lmr_bias: i32,
+}
+
+impl SearchProfile {
+    pub const fn main() -> Self {
+        Self {
+            worker_id: 0,
+            late_wall_skip_pct: 0,
+            lmr_bias: 0,
+        }
+    }
+
+    pub fn helper(worker_id: usize) -> Self {
+        let lane = worker_id.min(4);
+        Self {
+            worker_id,
+            late_wall_skip_pct: (lane * 20).min(60) as u8,
+            lmr_bias: lane.saturating_sub(1).min(3) as i32,
+        }
+    }
 }
 
 /// One complete late-move pipeline observation. These records are emitted only
@@ -302,6 +354,11 @@ mod score_label_tests {
 }
 
 pub fn think_result_progress_json(engine_label: &str, result: &ThinkResult) -> String {
+    let root_move = if result.mv >= 0 {
+        Some(super::move_id_to_algebraic(result.mv))
+    } else {
+        None
+    };
     ace_progress_json(
         engine_label,
         &result.depth_log,
@@ -311,6 +368,7 @@ pub fn think_result_progress_json(engine_label: &str, result: &ThinkResult) -> S
         result.white_dist,
         result.black_dist,
         result.ms,
+        root_move.as_deref(),
     )
 }
 
@@ -323,6 +381,7 @@ fn ace_progress_json(
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
+    root_move: Option<&str>,
 ) -> String {
     let mut depth_json = String::new();
     for (i, e) in depth_log.iter().enumerate() {
@@ -338,8 +397,14 @@ fn ace_progress_json(
         ));
     }
     let root_score_text = score_label(root_score);
+    let root_move_json = root_move
+        .map(|m| {
+            let esc = m.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#","rootMove":"{esc}""#)
+        })
+        .unwrap_or_default();
     format!(
-        r#"{{"engine":"{engine_label}","stoppedBy":"{engine_label}","searchDepth":{search_depth},"nodes":{nodes},"rootScore":{root_score},"rootScoreText":"{root_score_text}","whiteDist":{white_dist},"blackDist":{black_dist},"elapsedMs":{elapsed_ms},"depthLog":[{depth_json}]}}"#
+        r#"{{"engine":"{engine_label}","stoppedBy":"{engine_label}","searchDepth":{search_depth},"nodes":{nodes},"rootScore":{root_score},"rootScoreText":"{root_score_text}","whiteDist":{white_dist},"blackDist":{black_dist},"elapsedMs":{elapsed_ms}{root_move_json},"depthLog":[{depth_json}]}}"#
     )
 }
 
@@ -362,6 +427,7 @@ fn emit_ace_progress(
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
+    root_move: Option<&str>,
     #[cfg(feature = "wasm")] wasm_cb: Option<&js_sys::Function>,
 ) {
     let json = ace_progress_json(
@@ -373,6 +439,7 @@ fn emit_ace_progress(
         white_dist,
         black_dist,
         elapsed_ms,
+        root_move,
     );
     #[cfg(feature = "wasm")]
     emit_ace_progress_wasm(&json, wasm_cb);
@@ -476,6 +543,7 @@ pub struct TitaniumSearch {
     wall_ignore_cert_override: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     eme: bool,
+    search_profile: SearchProfile,
     pub nodes: u64,
     deadline: Instant,
     root_best: i16,
@@ -619,6 +687,7 @@ impl TitaniumSearch {
             cert_eval_leaves_only: false,
             wall_ignore_cert_override: None,
             eme: false,
+            search_profile: SearchProfile::main(),
             nodes: 0,
             deadline: Instant::now(),
             root_best: super::TITANIUM_NO_MOVE,
@@ -688,6 +757,10 @@ impl TitaniumSearch {
         self.eme = true;
     }
 
+    pub fn set_search_profile(&mut self, profile: SearchProfile) {
+        self.search_profile = profile;
+    }
+
     /// Enable offline observation of complete native LMR move pipelines.
     /// `target=None` records baseline events; `Some(n)` applies +1 only to event n.
     /// `min_depth` skips events at local depth < min_depth so shallow-tree events
@@ -727,11 +800,23 @@ impl TitaniumSearch {
     /// Pure JS-port baseline + O1 movegen only. Uses **frozen** v13 HalfPW weights
     /// (`net_weights_frozen.bin`) — never picks up live training/deploy updates.
     pub fn with_ti_movegen_pure(g: GameState) -> Box<Self> {
+        let mut search = Self::with_ti_movegen_frozen(g);
+        search.pure_mode = true;
+        search
+    }
+
+    /// ACE v13 reference tiers (MoveGen+) — O1 movegen + **frozen** HalfPW only.
+    /// Website ACE v13 must never pick up live `net_weights.bin` deploy updates.
+    pub fn with_ti_movegen_frozen(g: GameState) -> Box<Self> {
+        let mut search = Self::with_ti_movegen(g);
+        search.net = net_frozen();
+        search
+    }
+
+    /// Faithful ace-v13-pure movegen with immutable frozen HalfPW.
+    pub fn new_frozen(g: GameState) -> Box<Self> {
         let mut search = Self::new(g);
         search.net = net_frozen();
-        search.bridge = Some(TiBridge::from_game(&search.g));
-        search.ti_movegen = true;
-        search.pure_mode = true;
         search
     }
 
@@ -773,6 +858,11 @@ impl TitaniumSearch {
     /// Same as [`grafted`] but uses the frozen v13 HalfPW blob (training A/B control).
     pub fn grafted_frozen(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
         Self::grafted_with_weights(g, tt_bits, net_frozen())
+    }
+
+    /// Same as [`grafted`] but uses the previous promoted live blob (website Medium tier).
+    pub fn grafted_medium(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
+        Self::grafted_with_weights(g, tt_bits, net_medium())
     }
 
     /// Production graft minus RaceProof/cert gates. Experimental only: useful for
@@ -1022,6 +1112,40 @@ impl TitaniumSearch {
         ) as u32
     }
 
+    /// Best CAT pawn-move heat for P0/P1. Raw centi-heat; model inputs divide by 256.
+    pub fn cat_best_scores(&mut self) -> (u16, u16) {
+        fn best_for(board: &Board, cat: &CorridorAttention, player: Player) -> u16 {
+            let mut moves = [BoardMove::Pawn { row: 0, col: 0 }; 8];
+            let n = generate_pawn_moves_for(board, player, &mut moves);
+            let mut best = 0u16;
+            for mv in &moves[..n] {
+                if let BoardMove::Pawn { row, col } = *mv {
+                    best = best.max(cat.square_heat(row, col));
+                }
+            }
+            best
+        }
+
+        if let Some(bridge) = self.bridge.as_mut() {
+            let cat = bridge.bfs.build_corridor_attention(&bridge.board);
+            return (
+                best_for(&bridge.board, &cat, Player::One),
+                best_for(&bridge.board, &cat, Player::Two),
+            );
+        }
+
+        let mut board = Board::new();
+        for i in 0..self.g.hist_len {
+            let _ = board.make_move(move_id_to_board(self.g.hist_m[i]));
+        }
+        let mut scratch = BfsScratch::new();
+        let cat = scratch.build_corridor_attention(&board);
+        (
+            best_for(&board, &cat, Player::One),
+            best_for(&board, &cat, Player::Two),
+        )
+    }
+
     /// Wall-cache profiling counters (TiBridge path only).
     pub fn wall_cache_stats(&self) -> Option<GeometricWallCacheStats> {
         self.bridge.as_ref().map(|b| b.wall_cache_stats)
@@ -1099,6 +1223,7 @@ impl TitaniumSearch {
         fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1f, &mut route1, &mut flank1);
         let legal_walls = self.geometric_legal_wall_count();
         let (cross_p0, cross_p1) = self.legal_path_crossing_counts_arr(&route0, &route1);
+        let (cat_best_p0, cat_best_p1) = self.cat_best_scores();
         let width_me = self.d0[self.dist0_idx]
             .iter()
             .filter(|&&d| d as i32 == d0_scalar as i32)
@@ -1110,6 +1235,7 @@ impl TitaniumSearch {
         format!(
             "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\
              \"d0\":{},\"d1\":{},\"legal_wall_count\":{},\"legal_path_cross_p0\":{},\"legal_path_cross_p1\":{},\
+             \"cat_best_p0\":{},\"cat_best_p1\":{},\
              \"corridor_width0\":{},\"corridor_width1\":{},\
              \"goal_inv_p0_field\":[{}],\"goal_inv_p1_field\":[{}],\
              \"pawn_fwd_p0_field\":[{}],\"pawn_fwd_p1_field\":[{}],\
@@ -1134,6 +1260,8 @@ impl TitaniumSearch {
             legal_walls,
             cross_p0,
             cross_p1,
+            cat_best_p0,
+            cat_best_p1,
             width_me,
             width_opp,
             field(&d0f),
@@ -1211,6 +1339,11 @@ impl TitaniumSearch {
         let white_dist = self.d0[self.dist0_idx][self.g.pawn[0]];
         let black_dist = self.d1[self.dist1_idx][self.g.pawn[1]];
         let elapsed_ms = self.stream_t0.elapsed().as_millis() as u64;
+        let root_move = if self.stream_last_best >= 0 {
+            Some(super::move_id_to_algebraic(self.stream_last_best))
+        } else {
+            None
+        };
         emit_ace_progress(
             &self.stream_label,
             &self.stream_depth_log,
@@ -1220,6 +1353,7 @@ impl TitaniumSearch {
             white_dist,
             black_dist,
             elapsed_ms,
+            root_move.as_deref(),
             #[cfg(feature = "wasm")]
             self.wasm_progress.as_ref(),
         );
@@ -1321,18 +1455,28 @@ impl TitaniumSearch {
         let mut scratch = BfsScratch::new();
         let mut cache_opt: Option<GeometricWallCache> = None;
         geometric_wall_len_cached(
-            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+            &mut cache_opt,
+            &mut board,
+            &mut scratch,
+            GeometricWallCacheRole::Eval,
+            None,
         );
         if let Some(ref cache) = cache_opt {
-            (wall_crossing_count(cache.wall_slice(), route0),
-             wall_crossing_count(cache.wall_slice(), route1))
+            (
+                wall_crossing_count(cache.wall_slice(), route0),
+                wall_crossing_count(cache.wall_slice(), route1),
+            )
         } else {
             (0, 0)
         }
     }
 
     /// Count legal walls crossing each player's path (for eval JSON). Uses [u8;81] route arrays.
-    fn legal_path_crossing_counts_arr(&mut self, route0: &[u8; 81], route1: &[u8; 81]) -> (u32, u32) {
+    fn legal_path_crossing_counts_arr(
+        &mut self,
+        route0: &[u8; 81],
+        route1: &[u8; 81],
+    ) -> (u32, u32) {
         if let Some(bridge) = self.bridge.as_mut() {
             let _ = geometric_wall_len_cached(
                 &mut bridge.geometric_walls,
@@ -1354,11 +1498,17 @@ impl TitaniumSearch {
         let mut scratch = BfsScratch::new();
         let mut cache_opt: Option<GeometricWallCache> = None;
         geometric_wall_len_cached(
-            &mut cache_opt, &mut board, &mut scratch, GeometricWallCacheRole::Eval, None,
+            &mut cache_opt,
+            &mut board,
+            &mut scratch,
+            GeometricWallCacheRole::Eval,
+            None,
         );
         if let Some(ref cache) = cache_opt {
-            (wall_crossing_count_arr(cache.wall_slice(), route0),
-             wall_crossing_count_arr(cache.wall_slice(), route1))
+            (
+                wall_crossing_count_arr(cache.wall_slice(), route0),
+                wall_crossing_count_arr(cache.wall_slice(), route1),
+            )
         } else {
             (0, 0)
         }
@@ -1760,40 +1910,14 @@ impl TitaniumSearch {
         let nw = self.net;
         let ws = &nw.ws;
 
-        let pd = d_opp - d_me;
-        let wd = w_me - w_opp;
-        let mut out = ws[0]
-            + ws[1] * pd
-            + ws[2] * wd
-            + ws[3] * d_me
-            + ws[4] * d_opp
-            + ws[9] * pd * (w_me + w_opp) / 20.0
-            + ws[10] * wd * (d_me + d_opp) / 16.0;
         let (route_score, route0_bits, route1_bits) = self.route_feature_score(nw);
-        out += route_score;
-        if w_opp_i == 0 {
-            out += ws[6];
-            if d_me <= d_opp {
-                out += ws[5];
-            }
-        } else if w_me_i == 0 {
-            out += ws[8];
-            if d_opp <= d_me - 1.0 {
-                out += ws[7];
-            }
-        }
-        if d_opp <= 4.0 {
-            out += ws[11] * if w_me < 3.0 { w_me } else { 3.0 };
-        }
-        if d_me <= 4.0 {
-            out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
-        }
-        // ws[13]: fragile-lead (tempo × opp walls — a lead is fragile when opp can spend walls)
-        out += ws[13] * pd * w_opp / 10.0;
-        // ws[14]: unrealized wall action capacity (path-valid slots / 128). NOT corridor width.
+        let (route_me_bits, route_opp_bits) = if me == 0 {
+            (route0_bits, route1_bits)
+        } else {
+            (route1_bits, route0_bits)
+        };
         let legal_wall_norm = self.geometric_legal_wall_count() as f64 / 128.0;
-        // ws[15]: opponent corridor width on their goal field (matches halfpw.py).
-        let width_opp = if me == 0 {
+        let width_opp_raw = if me == 0 {
             self.d1[self.dist1_idx]
                 .iter()
                 .filter(|&&d| d as i32 == d_opp_i)
@@ -1804,15 +1928,93 @@ impl TitaniumSearch {
                 .filter(|&&d| d as i32 == d_opp_i)
                 .count()
         } as f64;
-        out += ws[14] * legal_wall_norm + ws[15] * width_opp;
-        // ws[16]: legal walls crossing my path / 128; ws[17]: crossing opp path / 128
-        let (route_me_bits, route_opp_bits) = if me == 0 {
-            (route0_bits, route1_bits)
+        let (cross_me, cross_opp) =
+            self.legal_path_crossing_counts_bits(route_me_bits, route_opp_bits);
+        let cross_me_norm = cross_me as f64 / 128.0;
+        let cross_opp_norm = cross_opp as f64 / 128.0;
+        let (cat_p0, cat_p1) = self.cat_best_scores();
+        let (cat_me, cat_opp) = if me == 0 {
+            (cat_p0, cat_p1)
         } else {
-            (route1_bits, route0_bits)
+            (cat_p1, cat_p0)
         };
-        let (cross_me, cross_opp) = self.legal_path_crossing_counts_bits(route_me_bits, route_opp_bits);
-        out += ws[16] * cross_me as f64 / 128.0 + ws[17] * cross_opp as f64 / 128.0;
+        let cat_me_norm = cat_me as f64 / 256.0;
+        let cat_opp_norm = cat_opp as f64 / 256.0;
+
+        let mut out = if nw.normed {
+            // Normalized evaluation: all scalar inputs in [-1,1] / [0,1].
+            // Weights trained with build_feature_cache v2-normed schema must use this path.
+            let d_me_n = d_me / 16.0; // [0, 1]
+            let d_opp_n = d_opp / 16.0; // [0, 1]
+            let w_me_n = w_me / 10.0; // [0, 1]
+            let w_opp_n = w_opp / 10.0; // [0, 1]
+            let pd_n = (d_opp - d_me) / 16.0; // [-1, 1]
+            let wd_n = (w_me - w_opp) / 10.0; // [-1, 1]
+            let mut o = ws[0]
+                + ws[1] * pd_n
+                + ws[2] * wd_n
+                + ws[3] * d_me_n
+                + ws[4] * d_opp_n
+                + ws[9] * pd_n * (w_me_n + w_opp_n)
+                + ws[10] * wd_n * (d_me_n + d_opp_n);
+            if w_opp_i == 0 {
+                o += ws[6];
+                if d_me_i <= d_opp_i {
+                    o += ws[5];
+                }
+            } else if w_me_i == 0 {
+                o += ws[8];
+                if d_opp_i <= d_me_i - 1 {
+                    o += ws[7];
+                }
+            }
+            if d_opp_i <= 4 {
+                o += ws[11] * w_me_n.min(0.3);
+            }
+            if d_me_i <= 4 {
+                o += ws[12] * w_opp_n.min(0.3);
+            }
+            o += ws[13] * pd_n * w_opp_n;
+            o += ws[14] * legal_wall_norm + ws[15] * width_opp_raw / 9.0;
+            o += ws[16] * cross_me_norm + ws[17] * cross_opp_norm;
+            o += ws[18] * cat_me_norm + ws[19] * cat_opp_norm;
+            o
+        } else {
+            // Legacy raw evaluation path — for frozen ACE v13 weights which were
+            // calibrated with unnormalized scalar inputs. Do not modify this path.
+            let pd = d_opp - d_me;
+            let wd = w_me - w_opp;
+            let mut o = ws[0]
+                + ws[1] * pd
+                + ws[2] * wd
+                + ws[3] * d_me
+                + ws[4] * d_opp
+                + ws[9] * pd * (w_me + w_opp) / 20.0
+                + ws[10] * wd * (d_me + d_opp) / 16.0;
+            if w_opp_i == 0 {
+                o += ws[6];
+                if d_me <= d_opp {
+                    o += ws[5];
+                }
+            } else if w_me_i == 0 {
+                o += ws[8];
+                if d_opp <= d_me - 1.0 {
+                    o += ws[7];
+                }
+            }
+            if d_opp <= 4.0 {
+                o += ws[11] * if w_me < 3.0 { w_me } else { 3.0 };
+            }
+            if d_me <= 4.0 {
+                o += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
+            }
+            o += ws[13] * pd * w_opp / 10.0;
+            o += ws[14] * legal_wall_norm + ws[15] * width_opp_raw;
+            o += ws[16] * cross_me_norm + ws[17] * cross_opp_norm;
+            o += ws[18] * cat_me_norm + ws[19] * cat_opp_norm;
+            o
+        };
+        out += route_score;
 
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
@@ -2162,7 +2364,8 @@ impl TitaniumSearch {
     }
 
     fn order_moves(&self, ply: usize, moves: &mut [i16], tt_move: i16, cm_move: i16) {
-        let dist_me = if self.g.turn == 0 {
+        let me = self.g.turn;
+        let dist_me = if me == 0 {
             &self.d0[self.dist0_idx]
         } else {
             &self.d1[self.dist1_idx]
@@ -2170,11 +2373,73 @@ impl TitaniumSearch {
         let k = &self.killers[ply];
         let n = moves.len();
         let mut sc = [0i32; 160];
+
+        // Both BFS distance fields valid after refresh_dist.
+        // d0[cell] = distance from cell to player-0's goal row.
+        // d1[cell] = distance from cell to player-1's goal row.
+        let d0 = &self.d0[self.dist0_idx];
+        let d1 = &self.d1[self.dist1_idx];
+
+        // --- One-time setup for pawn-centric CAT scoring ----------------------
+        // Corridor widths + pawn row/col + total distances.
+        // All free: no extra BFS — reuses d0/d1 already computed for eval.
+        //
+        // Key formula per blocked edge (el, er) for player p:
+        //   entry   = cell with higher d_p (the side pawn approaches from)
+        //   detour  = manhattan(pawn_p, entry) + d_p[entry] - total_p
+        //           = 0 when edge is on the pawn's current optimal route
+        //           ≥ 0 always (triangle inequality)
+        //   weight  = max(0, MAX_DETOUR - detour)  → fades to 0 beyond range
+        //   contrib = BASE * weight / corridor_width
+        //   sign    = +contrib if blocking opponent, -contrib if blocking self
+        //
+        // Result: walls on/near the active battle zone score high; remote walls
+        // score near zero and are ordered below killers/history naturally.
+        let mut cw0 = [0i32; 18];
+        let mut cw1 = [0i32; 18];
+        let (pr0, pc0, pr1, pc1, total0, total1);
+        if !self.pure_mode {
+            for &dv in d0.iter() {
+                let d = dv as usize;
+                if d < 18 {
+                    cw0[d] += 1;
+                }
+            }
+            for &dv in d1.iter() {
+                let d = dv as usize;
+                if d < 18 {
+                    cw1[d] += 1;
+                }
+            }
+            pr0 = (self.g.pawn[0] / 9) as i32;
+            pc0 = (self.g.pawn[0] % 9) as i32;
+            pr1 = (self.g.pawn[1] / 9) as i32;
+            pc1 = (self.g.pawn[1] % 9) as i32;
+            total0 = d0[self.g.pawn[0]] as i32;
+            total1 = d1[self.g.pawn[1]] as i32;
+        } else {
+            pr0 = 0;
+            pc0 = 0;
+            pr1 = 0;
+            pc1 = 0;
+            total0 = 0;
+            total1 = 0;
+        }
+        // Edges within MAX_DETOUR extra steps of optimal get full-to-zero score.
+        const MAX_DETOUR: i32 = 6;
+        // BASE per edge at detour=0, width=1.  2 edges x 2 players = x4 max.
+        // Typical mid-game (detour=2, width=3): 20000*4/3 ≈ 27k total — keeps
+        // walls below killers (900k) and history-dominated moves in range.
+        const BASE: i32 = 20_000;
+        // ----------------------------------------------------------------------
+
         for i in 0..n {
             let m = moves[i];
             sc[i] = if m == tt_move {
                 2_000_000_000
             } else if m < 100 {
+                // Pawn moves: BFS distance at destination covers all routes,
+                // not just one — advancing to lower d = progress on every path.
                 1_000_000 - dist_me[m as usize] as i32 * 1000
             } else if m == k[0] {
                 900_000
@@ -2182,6 +2447,78 @@ impl TitaniumSearch {
                 870_000
             } else if m == k[1] {
                 850_000
+            } else if !self.pure_mode {
+                // ── Pawn-centric CAT wall priority ────────────────────────────
+                //
+                // hw (m<200): blocks vertical edges   a↔a+9,  (a+1)↔(a+10)
+                // vw (m≥200): blocks horizontal edges a↔a+1,  (a+9)↔(a+10)
+                //
+                // For each edge and each player we compute a detour cost:
+                //   detour = manhattan(pawn, entry_cell) + d_goal[entry] - total
+                // This is zero on the pawn's current optimal route and grows
+                // as the wall moves away from the active path.  No extra BFS —
+                // manhattan is free; d0/d1 are already computed for NNUE eval.
+                // ─────────────────────────────────────────────────────────────
+
+                let slot = (m % 100) as usize;
+                let a = (slot >> 3) * 9 + (slot & 7);
+                let (e0_l, e0_r, e1_l, e1_r) = if m < 200 {
+                    (a, a + 9, a + 1, a + 10)
+                } else {
+                    (a, a + 1, a + 9, a + 10)
+                };
+
+                let mut cat = 0i32;
+
+                macro_rules! score_edge {
+                    ($el:expr, $er:expr) => {
+                        // ── player 0 ──
+                        {
+                            let d0l = d0[$el] as i32;
+                            let d0r = d0[$er] as i32;
+                            if d0l != d0r {
+                                // entry = cell pawn approaches from (higher d = further from goal)
+                                let entry = if d0l > d0r { $el } else { $er };
+                                let ei = entry as i32;
+                                let manh = ((ei / 9) - pr0).abs() + ((ei % 9) - pc0).abs();
+                                let detour = manh + d0[entry] as i32 - total0;
+                                let weight = (MAX_DETOUR - detour).max(0);
+                                if weight > 0 {
+                                    let layer = d0l.min(d0r) as usize;
+                                    if layer < 18 {
+                                        let width = cw0[layer].max(1);
+                                        let c = BASE * weight / width;
+                                        cat += if me == 0 { -c } else { c };
+                                    }
+                                }
+                            }
+                        }
+                        // ── player 1 ──
+                        {
+                            let d1l = d1[$el] as i32;
+                            let d1r = d1[$er] as i32;
+                            if d1l != d1r {
+                                let entry = if d1l > d1r { $el } else { $er };
+                                let ei = entry as i32;
+                                let manh = ((ei / 9) - pr1).abs() + ((ei % 9) - pc1).abs();
+                                let detour = manh + d1[entry] as i32 - total1;
+                                let weight = (MAX_DETOUR - detour).max(0);
+                                if weight > 0 {
+                                    let layer = d1l.min(d1r) as usize;
+                                    if layer < 18 {
+                                        let width = cw1[layer].max(1);
+                                        let c = BASE * weight / width;
+                                        cat += if me == 1 { -c } else { c };
+                                    }
+                                }
+                            }
+                        }
+                    };
+                }
+                score_edge!(e0_l, e0_r);
+                score_edge!(e1_l, e1_r);
+
+                cat + self.history_tbl[m as usize]
             } else {
                 self.history_tbl[m as usize]
             };
@@ -2198,6 +2535,58 @@ impl TitaniumSearch {
             }
             moves[(b + 1) as usize] = mv;
             sc[(b + 1) as usize] = ms;
+        }
+    }
+
+    #[inline]
+    fn profile_skips_late_wall(
+        &self,
+        ply: usize,
+        depth: i32,
+        move_index: usize,
+        move_count: usize,
+        mv: i16,
+        tt_move: i16,
+    ) -> bool {
+        let pct = self.search_profile.late_wall_skip_pct as usize;
+        if pct == 0
+            || ply == 0
+            || depth < ACE_LMR_MIN_DEPTH
+            || mv < 100
+            || mv == tt_move
+            || move_count <= ACE_LMR_AFTER_MOVE + 1
+        {
+            return false;
+        }
+        let skip = move_count.saturating_mul(pct) / 100;
+        if skip == 0 {
+            return false;
+        }
+        let keep = move_count.saturating_sub(skip).max(ACE_LMR_AFTER_MOVE + 1);
+        move_index >= keep
+    }
+
+    fn lmr_cat_context(&mut self, depth: i32) -> Option<LmrCatContext> {
+        if self.pure_mode || depth < ACE_LMR_MIN_DEPTH {
+            return None;
+        }
+        let bridge = self.bridge.as_mut()?;
+        let cat = bridge.bfs.build_corridor_attention(&bridge.board);
+        Some(LmrCatContext {
+            board: bridge.board.clone(),
+            cat,
+        })
+    }
+
+    fn cat_shaped_lmr_reduction(base_red: i32, cat_cm: i32) -> i32 {
+        if cat_cm >= i32::from(CAT_HOT_CM) {
+            0
+        } else if cat_cm >= i32::from(CAT_COLD_CM) {
+            (base_red - 1).max(1)
+        } else if cat_cm == 0 {
+            base_red + 2
+        } else {
+            base_red + 1
         }
     }
 
@@ -2371,6 +2760,7 @@ impl TitaniumSearch {
             0
         };
         self.order_moves(ply, &mut moves[..n], tt_move, cm_move);
+        let lmr_cat_ctx = self.lmr_cat_context(depth);
 
         let mut best = i32::MIN; // JS -Infinity
         let mut best_move: i16 = 0;
@@ -2378,6 +2768,9 @@ impl TitaniumSearch {
 
         for i in 0..n {
             let m = moves[i];
+            if self.profile_skips_late_wall(ply, depth, i, n, m, tt_move) {
+                continue;
+            }
             // frontier LMP
             if depth <= 2
                 && ply > 0
@@ -2433,8 +2826,15 @@ impl TitaniumSearch {
                 && m >= 100
                 && m != tt_move
             {
-                // graduated LMR
-                let red = ace_graduated_lmr_reduction(i, depth);
+                // Graduated LMR, shaped by canonical CAT heat. CAT marks all
+                // exact/near-shortest corridor families, so equal-route walls are
+                // not treated like random remote walls just because they miss the
+                // single witness path used for cheap filtering.
+                let base_red = ace_graduated_lmr_reduction(i, depth) + self.search_profile.lmr_bias;
+                let red = lmr_cat_ctx.as_ref().map_or(base_red, |ctx| {
+                    let cat_cm = move_corridor_attention(&ctx.board, move_id_to_board(m), &ctx.cat);
+                    Self::cat_shaped_lmr_reduction(base_red, cat_cm)
+                });
                 if self.reduction_sidecar.is_some() {
                     let started = Instant::now();
                     let hidden = self.current_hidden_features();
@@ -2687,6 +3087,7 @@ impl TitaniumSearch {
         &mut self,
         time_ms: u64,
         max_depth: i32,
+        max_nodes: u64,
         full: bool,
         log: bool,
         engine_label: &str,
@@ -2753,6 +3154,7 @@ impl TitaniumSearch {
                     -(RACE_MATE - rk)
                 };
                 if log {
+                    let root_move = super::move_id_to_algebraic(best_m);
                     emit_ace_progress(
                         engine_label,
                         &[],
@@ -2762,6 +3164,7 @@ impl TitaniumSearch {
                         self.d0[self.dist0_idx][self.g.pawn[0]],
                         self.d1[self.dist1_idx][self.g.pawn[1]],
                         rt0.elapsed().as_millis() as u64,
+                        Some(root_move.as_str()),
                         #[cfg(feature = "wasm")]
                         self.wasm_progress.as_ref(),
                     );
@@ -2812,14 +3215,15 @@ impl TitaniumSearch {
                 }
             }
         }
-        self.think_search(time_ms, max_depth, full, log, engine_label)
+        self.think_search(time_ms, max_depth, max_nodes, full, log, engine_label)
     }
 
-    /// Iterative deepening within `time_ms`. `full` disables the easy-move stop.
+    /// Iterative deepening within `time_ms` / `max_nodes`. `full` disables easy-move stop.
     fn think_search(
         &mut self,
         time_ms: u64,
         max_depth: i32,
+        max_nodes: u64,
         full: bool,
         log: bool,
         engine_label: &str,
@@ -2922,6 +3326,9 @@ impl TitaniumSearch {
                 break;
             }
             if Instant::now() >= self.deadline {
+                break;
+            }
+            if max_nodes > 0 && self.nodes >= max_nodes {
                 break;
             }
             // RaceProof: in-tree solves only when cheap to amortize

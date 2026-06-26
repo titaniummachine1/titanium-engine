@@ -8,10 +8,12 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::titanium::search::think_result_progress_json;
+use crate::cat::cat_snapshot_json;
+use crate::core::board::Board;
+use crate::titanium::search::{think_result_progress_json, SearchProfile};
 use crate::titanium::{
-    algebraic_to_move_id, move_id_to_algebraic, GameState, ThinkResult, TitaniumParams,
-    TitaniumSearch, TITANIUM_NO_MOVE,
+    algebraic_to_move_id, build_search_for_engine_flag, move_id_to_algebraic, GameState,
+    ThinkResult, TitaniumParams, TitaniumSearch, TITANIUM_NO_MOVE,
 };
 
 fn titanium_v15_params_from_mode(
@@ -24,11 +26,13 @@ fn titanium_v15_params_from_mode(
     TitaniumParams {
         time_ms: (movetime_ms as u64).max(1),
         max_depth: if max_depth > 0 { max_depth } else { 30 },
+        max_nodes: 0,
         full: false,
         cat: false,
         ti_movegen,
         log: false,
         eme,
+        threads: 1,
     }
 }
 
@@ -59,13 +63,14 @@ fn build_titanium_search(
     params: TitaniumParams,
     engine_label: &str,
 ) -> TitaniumSearch {
+    if engine_label.starts_with("ace-v13")
+        || engine_label.starts_with("titanium-v15")
+        || engine_label.starts_with("titanium-v14")
+        || engine_label.contains("grafted")
+    {
+        return *build_search_for_engine_flag(engine_label, g);
+    }
     let mut search = match engine_label {
-        "titanium-v15" | "titanium-v14" | "ace-v13-grafted" => *TitaniumSearch::grafted(g, None),
-        "titanium-v15-frozen" => *TitaniumSearch::grafted_frozen(g, None),
-        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
-            *TitaniumSearch::grafted_no_raceproof(g, None)
-        }
-        "ace-v13-ti-pure" => *TitaniumSearch::with_ti_movegen_pure(g),
         _ if params.ti_movegen && params.cat => *TitaniumSearch::with_ti_movegen_and_cat(g),
         _ if params.ti_movegen => *TitaniumSearch::with_ti_movegen(g),
         _ if params.cat => *TitaniumSearch::with_cat(g),
@@ -93,6 +98,7 @@ fn titanium_genmove_with_progress(
     let result = search.think(
         params.time_ms,
         params.max_depth,
+        params.max_nodes,
         params.full,
         stream,
         engine_label,
@@ -122,6 +128,26 @@ fn replay_moves(moves: &str) -> Result<GameState, JsError> {
         g.make_move(algebraic_to_move_id(text));
     }
     Ok(g)
+}
+
+fn replay_board(moves: &str) -> Result<Board, JsError> {
+    let mut board = Board::new();
+    for text in moves.split_whitespace().filter(|s| !s.is_empty()) {
+        if board.is_terminal().is_some() {
+            return Err(JsError::new(&format!(
+                "illegal replay past terminal: {text}"
+            )));
+        }
+        board.apply_algebraic(text);
+    }
+    Ok(board)
+}
+
+/// Engine-backed CAT v3 snapshot for static/WASM hosting.
+#[wasm_bindgen]
+pub fn cat_snapshot(moves: &str) -> Result<String, JsError> {
+    let mut board = replay_board(moves)?;
+    Ok(cat_snapshot_json(&mut board))
 }
 
 /// ACE Rust port in WASM — one-shot genmove from a move list (GitHub Pages; no native binary).
@@ -170,28 +196,35 @@ impl WasmAceEngine {
 pub struct WasmEngine {
     search: TitaniumSearch,
     engine_label: String,
+    last_depth: i32,
+    last_nodes: u64,
 }
 
 #[wasm_bindgen]
 impl WasmEngine {
-    /// `frozen = true` → pinned pre-train NNUE (`titanium-v15-frozen`).
+    /// `tier`: 0 = frozen (Easy), 1 = medium (previous live), 2 = hard (latest live).
     #[wasm_bindgen(constructor)]
-    pub fn new(frozen: bool) -> WasmEngine {
+    pub fn new(tier: u8) -> WasmEngine {
         let g = GameState::new();
-        let (search, engine_label) = if frozen {
-            (
+        let (search, engine_label) = match tier {
+            0 => (
                 *TitaniumSearch::grafted_frozen(g, None),
                 "titanium-v15-frozen".to_string(),
-            )
-        } else {
-            (
+            ),
+            1 => (
+                *TitaniumSearch::grafted_medium(g, None),
+                "titanium-v15-medium".to_string(),
+            ),
+            _ => (
                 *TitaniumSearch::grafted(g, None),
                 "titanium-v15".to_string(),
-            )
+            ),
         };
         WasmEngine {
             search,
             engine_label,
+            last_depth: 0,
+            last_nodes: 0,
         }
     }
 
@@ -223,27 +256,68 @@ impl WasmEngine {
     pub fn go(
         &mut self,
         movetime_ms: u32,
-        _max_nodes: u32,
+        max_nodes: u32,
         on_progress: Option<js_sys::Function>,
     ) -> String {
+        self.go_with_profile(movetime_ms, max_nodes, 0, 0, 0, on_progress)
+    }
+
+    /// Search with a per-worker `SearchProfile` (main vs helper lanes for multi-worker LazySMP).
+    /// WASM cannot spawn OS threads; each Web Worker calls this with its own `WasmEngine` instance.
+    pub fn go_with_profile(
+        &mut self,
+        movetime_ms: u32,
+        max_nodes: u32,
+        worker_id: u32,
+        late_wall_skip_pct: u32,
+        lmr_bias: i32,
+        on_progress: Option<js_sys::Function>,
+    ) -> String {
+        let profile = SearchProfile {
+            worker_id: worker_id as usize,
+            late_wall_skip_pct: late_wall_skip_pct.min(100) as u8,
+            lmr_bias,
+        };
+        self.search.set_search_profile(profile);
         self.search.set_wasm_progress(on_progress.clone());
-        let stream = on_progress.is_some();
+        let stream = on_progress.is_some() && profile.worker_id == 0;
         if self.search.g.winner() >= 0 {
+            self.last_depth = 0;
+            self.last_nodes = 0;
             return "(none)".to_string();
         }
         let result = self.search.think(
             (movetime_ms as u64).max(1),
             30,
+            max_nodes as u64,
             false,
             stream,
             &self.engine_label,
         );
         self.search.set_wasm_progress(None);
+        self.last_depth = result.depth;
+        self.last_nodes = result.nodes;
+        if let Some(f) = on_progress.as_ref() {
+            if profile.worker_id == 0 {
+                let json = think_result_progress_json(&self.engine_label, &result);
+                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&json));
+            }
+        }
         if result.mv == TITANIUM_NO_MOVE {
             "(none)".to_string()
         } else {
             move_id_to_algebraic(result.mv)
         }
+    }
+
+    /// Depth reached on the last `go` / `go_with_profile` call.
+    pub fn last_search_depth(&self) -> i32 {
+        self.last_depth
+    }
+
+    /// Nodes searched on the last `go` / `go_with_profile` call.
+    pub fn last_search_nodes(&self) -> u64 {
+        self.last_nodes
     }
 
     /// Space-separated legal moves (not used by the site worker; kept for API compat).

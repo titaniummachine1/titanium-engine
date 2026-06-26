@@ -46,15 +46,16 @@ pub mod wall_ignore_corridor;
 
 pub use game::GameState;
 pub use packed_state::{
-    titanium_game_from_packed, decode_packed_state, pack_state, FEATURE_SCHEMA, PACKED_STATE_LEN,
+    decode_packed_state, pack_state, titanium_game_from_packed, FEATURE_SCHEMA, PACKED_STATE_LEN,
     POSITION_SCHEMA_VERSION,
 };
 pub use perft::{
-    default_timeout, oracle_nodes, perft_titanium_native_timed, perft_titanium_ti_timed,
-    perft_titanium_timed, perft_engine_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
+    default_timeout, oracle_nodes, perft_engine_timed, perft_titanium_native_timed,
+    perft_titanium_ti_timed, perft_titanium_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
 };
 pub use search::{
-    board_move_to_move_id, TitaniumSearch, ReductionProbeEvent, ReductionShadowStats, ThinkResult,
+    board_move_to_move_id, ReductionProbeEvent, ReductionShadowStats, SearchProfile, ThinkResult,
+    TitaniumSearch,
 };
 pub use session::run_titanium_session_stdio;
 pub use session_v15::run_v15_session_stdio;
@@ -122,6 +123,10 @@ pub fn move_id_to_algebraic(m: i16) -> String {
 pub struct TitaniumParams {
     pub time_ms: u64,
     pub max_depth: i32,
+    /// Stop after this many nodes (0 = unlimited). Acts as a hard ceiling
+    /// checked between iterative-deepening iterations; `time_ms` still applies
+    /// as a wall-clock deadline so neither limit is ever exceeded.
+    pub max_nodes: u64,
     /// Disable the easy-move early stop (search the full time budget).
     pub full: bool,
     /// Hybrid: CAT-filter wall moves at inner nodes.
@@ -132,6 +137,8 @@ pub struct TitaniumParams {
     pub log: bool,
     /// Early Move Extensions on ordered wall moves (mirror of graduated LMR).
     pub eme: bool,
+    /// Search workers. Worker 0 is authoritative; helpers run speculative profiles.
+    pub threads: usize,
 }
 
 impl Default for TitaniumParams {
@@ -139,13 +146,144 @@ impl Default for TitaniumParams {
         Self {
             time_ms: 4000,
             max_depth: 30,
+            max_nodes: 0,
             full: false,
             cat: false,
             ti_movegen: false,
             log: false,
             eme: false,
+            threads: 1,
         }
     }
+}
+
+/// Build a warm search instance for CLI / WASM / session REPL.
+/// ACE v13 reference modes always use frozen HalfPW; Titanium v15 live uses `net()`.
+pub fn build_search_for_engine_flag(engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
+    let mut search = match engine_flag {
+        "ace-v13-pure" => TitaniumSearch::new_frozen(g),
+        "ace-v13-ti-pure" => TitaniumSearch::with_ti_movegen_pure(g),
+        "titanium-v15-frozen" => TitaniumSearch::grafted_frozen(g, None),
+        "titanium-v15-medium" => TitaniumSearch::grafted_medium(g, None),
+        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
+            TitaniumSearch::grafted_no_raceproof(g, None)
+        }
+        "ace-v13-grafted" | "titanium-v14" | "titanium-v15" => TitaniumSearch::grafted(g, None),
+        "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc" => TitaniumSearch::with_ti_movegen_frozen(g),
+        _ if engine_flag.starts_with("ace-v13") => TitaniumSearch::with_ti_movegen_frozen(g),
+        _ => TitaniumSearch::with_ti_movegen(g),
+    };
+    if engine_flag.contains("pmc") {
+        search.enable_eme();
+    }
+    search
+}
+
+fn build_search_with_params(
+    engine_label: &str,
+    g: GameState,
+    params: TitaniumParams,
+) -> Box<TitaniumSearch> {
+    let mut search = if engine_label.starts_with("ace-v13")
+        || engine_label.starts_with("titanium-v15")
+        || engine_label.starts_with("titanium-v14")
+        || engine_label.contains("grafted")
+    {
+        build_search_for_engine_flag(engine_label, g)
+    } else {
+        let mut s = match engine_label {
+            _ if params.ti_movegen && params.cat => TitaniumSearch::with_ti_movegen_and_cat(g),
+            _ if params.ti_movegen => TitaniumSearch::with_ti_movegen(g),
+            _ if params.cat => TitaniumSearch::with_cat(g),
+            _ => TitaniumSearch::new(g),
+        };
+        if params.eme {
+            s.enable_eme();
+        }
+        s
+    };
+    if params.eme {
+        search.enable_eme();
+    }
+    search
+}
+
+fn think_with_profile(
+    engine_label: &str,
+    g: GameState,
+    params: TitaniumParams,
+    profile: SearchProfile,
+) -> (ThinkResult, u64) {
+    let mut search = build_search_with_params(engine_label, g, params);
+    search.set_search_profile(profile);
+    let result = search.think(
+        params.time_ms,
+        params.max_depth,
+        params.max_nodes,
+        params.full,
+        params.log && profile.worker_id == 0,
+        engine_label,
+    );
+    let winner = search.g.winner();
+    let nodes = result.nodes;
+    let result = if result.mv == 0 && winner >= 0 {
+        ThinkResult {
+            mv: TITANIUM_NO_MOVE,
+            ..result
+        }
+    } else {
+        result
+    };
+    (result, nodes)
+}
+
+fn titanium_genmove_parallel(
+    g: GameState,
+    params: TitaniumParams,
+    engine_label: &str,
+) -> Option<(String, ThinkResult)> {
+    let threads = if params.max_nodes > 0 {
+        1
+    } else {
+        params.threads.max(1)
+    };
+    let helper_count = threads.saturating_sub(1);
+    let mut handles = Vec::with_capacity(helper_count);
+    for worker_id in 1..threads {
+        let g_worker = g.clone();
+        let label = engine_label.to_string();
+        let mut worker_params = params;
+        worker_params.log = false;
+        worker_params.time_ms = worker_params
+            .time_ms
+            .saturating_mul(9)
+            .saturating_div(10)
+            .max(1);
+        handles.push(std::thread::spawn(move || {
+            think_with_profile(
+                &label,
+                g_worker,
+                worker_params,
+                SearchProfile::helper(worker_id),
+            )
+        }));
+    }
+
+    let (mut result, _) = think_with_profile(engine_label, g, params, SearchProfile::main());
+    let mut total_nodes = result.nodes;
+    for handle in handles {
+        if let Ok((helper, nodes)) = handle.join() {
+            total_nodes = total_nodes.saturating_add(nodes);
+            if helper.depth > result.depth && helper.mv == result.mv {
+                result.depth = helper.depth;
+            }
+        }
+    }
+    result.nodes = total_nodes;
+    if result.mv == TITANIUM_NO_MOVE {
+        return None;
+    }
+    Some((move_id_to_algebraic(result.mv), result))
 }
 
 /// CLI entry — plays `moves` (algebraic) from startpos, thinks, returns best move.
@@ -161,35 +299,7 @@ pub fn titanium_genmove(
     if g.winner() >= 0 {
         return None;
     }
-    let mut search = match engine_label {
-        "titanium-v15" | "titanium-v14" | "ace-v13-grafted" => TitaniumSearch::grafted(g, None),
-        "titanium-v15-frozen" => TitaniumSearch::grafted_frozen(g, None),
-        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
-            TitaniumSearch::grafted_no_raceproof(g, None)
-        }
-        "ace-v13-ti-pure" => TitaniumSearch::with_ti_movegen_pure(g),
-        _ if params.ti_movegen && params.cat => TitaniumSearch::with_ti_movegen_and_cat(g),
-        _ if params.ti_movegen => TitaniumSearch::with_ti_movegen(g),
-        _ if params.cat => TitaniumSearch::with_cat(g),
-        _ => TitaniumSearch::new(g),
-    };
-    if params.eme {
-        search.enable_eme();
-    }
-    let result = search.think(
-        params.time_ms,
-        params.max_depth,
-        params.full,
-        params.log,
-        engine_label,
-    );
-    if result.mv == TITANIUM_NO_MOVE {
-        return None;
-    }
-    if result.mv == 0 && search.g.winner() >= 0 {
-        return None;
-    }
-    Some((move_id_to_algebraic(result.mv), result))
+    titanium_genmove_parallel(g, params, engine_label)
 }
 
 /// Offline-only deterministic LMR probe. Each invocation starts from a fresh,
@@ -212,7 +322,7 @@ pub fn reduction_counterfactual_probe(
     }
     let mut search = TitaniumSearch::grafted(g, Some(18));
     search.enable_reduction_probe(target_ordinal, event_limit, min_event_depth);
-    let result = search.think(3_600_000, depth, true, false, "reduction-probe");
+    let result = search.think(3_600_000, depth, 0, true, false, "reduction-probe");
     Some((result, search.reduction_probe_events().to_vec()))
 }
 
@@ -231,7 +341,7 @@ pub fn reduction_shadow_probe(
     }
     let mut search = TitaniumSearch::grafted(g, Some(18));
     search.enable_reduction_shadow(sidecar_path)?;
-    let result = search.think(3_600_000, depth, true, false, "reduction-shadow");
+    let result = search.think(3_600_000, depth, 0, true, false, "reduction-shadow");
     Ok((result, search.reduction_shadow_stats()))
 }
 
@@ -284,16 +394,44 @@ mod tests {
         let params = TitaniumParams {
             time_ms: 500,
             max_depth: 4,
+            max_nodes: 0,
             full: false,
             cat: false,
             ti_movegen: true,
             log: false,
             eme: false,
+            threads: 1,
         };
         let (alg, result) = titanium_genmove(&moves, params, "ace-v13-ti").expect("best move");
         assert_eq!(alg, "a9");
         assert_eq!(result.mv, 0);
         assert_ne!(result.mv, TITANIUM_NO_MOVE);
+    }
+
+    #[test]
+    fn threaded_helpers_keep_authoritative_root_move() {
+        let moves = vec!["e2".to_string(), "e8".to_string()];
+        let params = TitaniumParams {
+            time_ms: 1000,
+            max_depth: 2,
+            full: true,
+            ti_movegen: true,
+            threads: 1,
+            ..Default::default()
+        };
+        let threaded_params = TitaniumParams {
+            threads: 2,
+            ..params
+        };
+
+        let (single_alg, single) =
+            titanium_genmove(&moves, params, "ace-v13-ti").expect("single-thread best move");
+        let (threaded_alg, threaded) =
+            titanium_genmove(&moves, threaded_params, "ace-v13-ti").expect("threaded best move");
+
+        assert_eq!(threaded_alg, single_alg);
+        assert_eq!(threaded.mv, single.mv);
+        assert!(threaded.nodes >= single.nodes);
     }
 
     #[test]
@@ -413,13 +551,17 @@ mod tests {
             g.make_move(algebraic_to_move_id(mv));
         }
         let mut baseline = TitaniumSearch::grafted(g, Some(18));
-        let expected = baseline.think(3_600_000, 4, true, false, "baseline");
+        let expected = baseline.think(3_600_000, 4, 0, true, false, "baseline");
 
         let path = std::env::temp_dir().join(format!(
             "titanium-neutral-sidecar-{}.bin",
             std::process::id()
         ));
-        std::fs::write(&path, crate::titanium::reduction_sidecar::neutral_test_blob()).unwrap();
+        std::fs::write(
+            &path,
+            crate::titanium::reduction_sidecar::neutral_test_blob(),
+        )
+        .unwrap();
         let (actual, stats) = reduction_shadow_probe(&moves, 4, &path).unwrap();
         let _ = std::fs::remove_file(path);
         assert_eq!(
