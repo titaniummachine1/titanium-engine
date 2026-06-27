@@ -5,8 +5,8 @@
 pub const CAT_CORRIDOR_CM: u16 = 200;
 
 /// Exact and near-shortest corridors are search-relevant; larger detours are zero.
-/// v4: 2 — delta 3 painted the whole open board and kept too many walls in search.
-pub const MAX_RELEVANT_CORRIDOR_DELTA: u16 = 2;
+/// Keep at least four suboptimal route sets visible to avoid single-path tunnel vision.
+pub const MAX_RELEVANT_CORRIDOR_DELTA: u16 = 4;
 pub const BOTTLENECK_CORRIDOR_DELTA: u16 = 2;
 pub const BOTTLENECK_BONUS_CM: u16 = 40;
 

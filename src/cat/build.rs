@@ -15,12 +15,14 @@ fn corridor_heat(delta: u16) -> u16 {
         return 0;
     }
     // Exact rounded values of `CAT_CORRIDOR_CM / (1 + delta·log2(delta+2))` for
-    // delta 0/1/2 — kept as a LUT so the per-square hot loop never evaluates a
+    // delta 0..4 — kept as a LUT so the per-square hot loop never evaluates a
     // float `log2`. Bit-identical to the old formula:
     //   delta 0 → 200/1.0       = 200
     //   delta 1 → 200/(1+log2 3) = 77
     //   delta 2 → 200/(1+2·log2 4) = 40
-    const HEAT_LUT: [u16; (MAX_RELEVANT_CORRIDOR_DELTA + 1) as usize] = [200, 77, 40];
+    //   delta 3 → 200/(1+3·log2 5) = 25
+    //   delta 4 → 200/(1+4·log2 6) = 18
+    const HEAT_LUT: [u16; (MAX_RELEVANT_CORRIDOR_DELTA + 1) as usize] = [200, 77, 40, 25, 18];
     debug_assert_eq!(
         CAT_CORRIDOR_CM, 200,
         "HEAT_LUT computed for CAT_CORRIDOR_CM=200"
@@ -159,26 +161,29 @@ fn add_player_corridor_attention(
     }
 }
 
+pub fn build_player_corridor_attention(
+    scratch: &mut BfsScratch,
+    board: &Board,
+    player: Player,
+) -> CorridorAttention {
+    let masks = DirMasks::from_board(board);
+    let mut out = CorridorAttention::default();
+    let (dist_from, dist_to) = scratch.dist_scratch_mut();
+    add_player_corridor_attention(board, player, masks, &mut out, dist_from, dist_to);
+    out
+}
+
 /// Per-square heat for the web overlay — max of each player's corridor signal.
 ///
 /// Search sums both players into one `CorridorAttention` (contested corridors run hotter
 /// in LMR). The board tint uses `max` so two overlapping paths do not paint the whole grid.
 pub fn build_corridor_display_squares(scratch: &mut BfsScratch, board: &Board) -> [u16; 81] {
-    let masks = DirMasks::from_board(board);
-    let mut white = CorridorAttention::default();
-    let mut black = CorridorAttention::default();
-    {
-        let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(board, Player::One, masks, &mut white, dist_from, dist_to);
-    }
-    {
-        let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        add_player_corridor_attention(board, Player::Two, masks, &mut black, dist_from, dist_to);
-    }
+    let white = build_player_corridor_attention(scratch, board, Player::One);
+    let black = build_player_corridor_attention(scratch, board, Player::Two);
     let mut out = [0u16; 81];
     for i in 0..81 {
-        let corridor = white.square_heat[i].max(black.square_heat[i]);
-        let bottleneck = white.bottleneck_heat[i].max(black.bottleneck_heat[i]);
+        let corridor = white.square_heat[i].saturating_add(black.square_heat[i]);
+        let bottleneck = white.bottleneck_heat[i].saturating_add(black.bottleneck_heat[i]);
         out[i] = corridor.saturating_add(bottleneck);
     }
     out
