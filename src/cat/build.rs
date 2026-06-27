@@ -182,8 +182,15 @@ pub fn build_corridor_display_squares(scratch: &mut BfsScratch, board: &Board) -
     let black = build_player_corridor_attention(scratch, board, Player::Two);
     let mut out = [0u16; 81];
     for i in 0..81 {
-        let corridor = white.square_heat[i].saturating_add(black.square_heat[i]);
-        let bottleneck = white.bottleneck_heat[i].saturating_add(black.bottleneck_heat[i]);
+        let white_heat = white.square_heat[i];
+        let black_heat = black.square_heat[i];
+        let shared = white_heat.min(black_heat);
+        let corridor = white_heat
+            .max(black_heat)
+            .saturating_add(shared.saturating_mul(3) / 4);
+        let bottleneck = white.bottleneck_heat[i]
+            .max(black.bottleneck_heat[i])
+            .saturating_add(white.bottleneck_heat[i].min(black.bottleneck_heat[i]) / 2);
         out[i] = corridor.saturating_add(bottleneck);
     }
     out

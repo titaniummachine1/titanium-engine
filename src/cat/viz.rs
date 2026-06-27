@@ -163,9 +163,11 @@ fn direct_wall_heat(
     else {
         return 0;
     };
-    let route_edge = white_cat
-        .wall_edge_heat(row, col, orientation)
-        .saturating_add(black_cat.wall_edge_heat(row, col, orientation));
+    let white_edge = white_cat.wall_edge_heat(row, col, orientation);
+    let black_edge = black_cat.wall_edge_heat(row, col, orientation);
+    let route_edge = white_edge
+        .max(black_edge)
+        .saturating_add(white_edge.min(black_edge).saturating_mul(3) / 4);
     let corridor =
         route_edge.saturating_add(wall_shape_attention_bonus(board, mv, search_cat).max(0) as u16);
     let route_relevant = route_edge > 0
