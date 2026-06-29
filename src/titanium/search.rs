@@ -28,7 +28,7 @@ use crate::titanium::move_id_to_board;
 use crate::util::clock::{Duration, Instant};
 
 use crate::cat::prune::{
-    cat_heat_refs_from_scores, cat_v16_lmr_fringe_pct_for_worker, cat_v16_lmr_reduction_plies,
+    cat_heat_refs_from_scores, cat_v16_lmr_extra_plies, cat_v16_lmr_fringe_pct_for_worker,
     gap_play_zone_mask, get_shortest_path, move_corridor_attention_with_denial,
     move_corridor_attention_with_path, move_impact_heat, wall_in_dead_zone, wall_should_search,
     CatHeatRefs,
@@ -3360,7 +3360,12 @@ impl TitaniumSearch {
                 let ace_red = ace_graduated_lmr_reduction(i, depth);
                 let red = if cat_lmr_active {
                     let mv = move_id_to_board(m);
-                    let cat_red = cat_v16_lmr_reduction_plies(
+                    // CAT as a continuous modifier ON TOP of base index-LMR (v16
+                    // design): red = ace_red + max_extra·(1−cat_norm)^γ. High-impact
+                    // moves add ~0; low-impact moves get the extra reduction. Capped
+                    // so the move keeps >=1 ply — the reduced search re-searches at
+                    // full depth on a raised alpha (below), so underestimates recover.
+                    let cat_extra = cat_v16_lmr_extra_plies(
                         mv,
                         cat_heats[i],
                         cat_refs,
@@ -3368,7 +3373,7 @@ impl TitaniumSearch {
                         self.cat_lmr_fringe_pct,
                         new_depth as u32,
                     ) as i32;
-                    ace_red.max(cat_red)
+                    (ace_red + cat_extra).min((new_depth - 1).max(0))
                 } else {
                     ace_red
                 };
