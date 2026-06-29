@@ -33,13 +33,16 @@ fn corridor_heat(delta: u16) -> u16 {
     HEAT_LUT[delta as usize]
 }
 
-/// Centi-percent (45–100): gentle linear fade along the race — near-pawn squares
-/// stay hottest, but mid-corridor wall zones keep meaningful heat for deeper play.
+/// Centi-percent (68–100): gentle linear fade along the race. The near-pawn
+/// squares are still slightly hottest, but the deep corridor — where walls
+/// actually decide the race — keeps most of its heat. The floor was raised
+/// 45→68 (corridor +~50%) because the old curve over-focused on the pawn:
+/// near-pawn squares are easy to walk around, mid/far corridor blocks are not.
 fn pawn_path_weight(dist_from: u8, shortest_to_goal: u8) -> u16 {
     if shortest_to_goal == 0 || shortest_to_goal == u8::MAX {
         return 100;
     }
-    const MIN_WEIGHT: u16 = 45;
+    const MIN_WEIGHT: u16 = 68;
     const MAX_WEIGHT: u16 = 100;
     let from = u32::from(dist_from.min(shortest_to_goal));
     let total = u32::from(shortest_to_goal);

@@ -16,6 +16,7 @@ pub mod bench_instr;
 pub mod cat;
 pub mod core;
 pub mod eval;
+pub mod friend_perft;
 pub mod movegen;
 pub mod opening;
 pub mod oracle;

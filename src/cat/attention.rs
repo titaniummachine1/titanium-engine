@@ -43,10 +43,20 @@ impl CorridorAttention {
         let edge_heat = |a: (u8, u8), b: (u8, u8)| -> u16 {
             let ai = square_index(a.0, a.1) as usize;
             let bi = square_index(b.0, b.1) as usize;
-            let corridor = self.square_heat[ai].min(self.square_heat[bi]);
-            if corridor == 0 {
+            let ha = self.square_heat[ai];
+            let hb = self.square_heat[bi];
+            let hi = ha.max(hb);
+            if hi == 0 {
+                // both cells off-path: this wall touches no corridor
                 return 0;
             }
+            // A wall fully on the corridor (both cells hot) reads full; a wall
+            // that only *touches* the corridor on one side still registers — at
+            // lo + 40% of the gap — instead of collapsing to ~0 under min().
+            // Walls touching the contested path are tactically live even when
+            // they don't block the exact current edge.
+            let lo = ha.min(hb);
+            let corridor = lo + (hi - lo) * 2 / 5;
             let bottleneck = self.bottleneck_heat[ai].min(self.bottleneck_heat[bi]);
             corridor.saturating_add(bottleneck)
         };

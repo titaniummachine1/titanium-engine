@@ -55,6 +55,7 @@ fn main() {
 
     match args[1].as_str() {
         "perft" => run_perft(&args),
+        "friend-perft" => titanium::friend_perft::run(),
         "divide" => run_divide(&args),
         "bench" => run_bench(&args),
         "perft-race" => run_perft_race(&args),
