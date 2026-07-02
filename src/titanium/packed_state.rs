@@ -99,17 +99,27 @@ pub fn ace_pawn_cell_to_python(ace_cell: usize) -> u8 {
     ((8 - ace_row) * 9 + col) as u8
 }
 
+/// ACE wall slot ((7-row)*8+col, row 0 = rank 8) → Python slot (row*8+col, row 0 = rank 1).
+#[inline]
+fn ace_wall_slot_to_python(ace_slot: usize) -> usize {
+    let ace_row = ace_slot / 8;
+    let col = ace_slot % 8;
+    (7 - ace_row) * 8 + col
+}
+
 /// Packed state bytes identical to `PositionState.packed_state()` / opening DAG keys.
 /// Differs from [`pack_state`] (training round-trip) in pawn cell coordinates and STM.
+/// Wall slots need the same row flip as pawn cells — raw masks miss every
+/// book position after the first wall move.
 pub fn pack_state_dag(g: &GameState) -> [u8; PACKED_STATE_LEN] {
     let mut hw_mask: u64 = 0;
     let mut vw_mask: u64 = 0;
     for slot in 0..64 {
         if g.hw[slot] != 0 {
-            hw_mask |= 1u64 << slot;
+            hw_mask |= 1u64 << ace_wall_slot_to_python(slot);
         }
         if g.vw[slot] != 0 {
-            vw_mask |= 1u64 << slot;
+            vw_mask |= 1u64 << ace_wall_slot_to_python(slot);
         }
     }
     let mut out = [0u8; PACKED_STATE_LEN];
@@ -234,6 +244,19 @@ mod tests {
             packed,
             [
                 1, 4, 76, 10, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn pack_state_dag_matches_python_two_walls() {
+        // Position after e2 e8 e3 e7 e4 e6 h3h d6h — python packed_state bytes.
+        let g = game_from_moves(&["e2", "e8", "e3", "e7", "e4", "e6", "h3h", "d6h"]);
+        let packed = pack_state_dag(&g);
+        assert_eq!(
+            packed,
+            [
+                1, 31, 49, 9, 9, 0, 0, 0, 0, 0, 128, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
             ]
         );
     }
