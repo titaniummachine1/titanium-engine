@@ -322,6 +322,73 @@ mod lazy_smp_tests {
     }
 }
 
+/// 18 bits = 6MB native; wasm gets 16 bits (1.5MB) — browser memory is the
+/// scarce resource there (multi-engine pages have crashed on warm-cache RAM).
+#[cfg(not(target_arch = "wasm32"))]
+const EVAL_CACHE_BITS: usize = 18;
+#[cfg(target_arch = "wasm32")]
+const EVAL_CACHE_BITS: usize = 16;
+const EVAL_CACHE_SIZE: usize = 1 << EVAL_CACHE_BITS;
+
+/// One-cache-line static-eval cache entry (see `eval_cache` field).
+#[derive(Clone, Copy)]
+struct EvalCacheEntry {
+    key: u64,
+    val: f64,
+    /// wl0<<8|wl1 verify tag; u16::MAX = empty slot.
+    meta: u16,
+}
+
+impl Default for EvalCacheEntry {
+    fn default() -> Self {
+        Self {
+            key: 0,
+            val: 0.0,
+            meta: u16::MAX,
+        }
+    }
+}
+
+/// Wall-topology → goal-distance-fields cache (both players). Sibling walls and
+/// iterative-deepening re-searches revisit the same topologies constantly; a hit
+/// turns a two-sided BFS reflood into a short memcpy. ~2.8KB/entry.
+#[cfg(not(target_arch = "wasm32"))]
+const DIST_LRU_BITS: usize = 9;
+#[cfg(target_arch = "wasm32")]
+const DIST_LRU_BITS: usize = 7;
+const DIST_LRU_SIZE: usize = 1 << DIST_LRU_BITS;
+
+#[derive(Clone)]
+struct DistTopoEntry {
+    /// wall_topology_key (hi<<32|lo); u64::MAX = empty.
+    key: u64,
+    d0_depth: u16,
+    d1_depth: u16,
+    d0: [u8; 81],
+    d1: [u8; 81],
+    d0_layers: [u128; 81],
+    d1_layers: [u128; 81],
+}
+
+impl Default for DistTopoEntry {
+    fn default() -> Self {
+        Self {
+            key: u64::MAX,
+            d0_depth: 0,
+            d1_depth: 0,
+            d0: [255; 81],
+            d1: [255; 81],
+            d0_layers: [0; 81],
+            d1_layers: [0; 81],
+        }
+    }
+}
+
+#[inline]
+fn dist_lru_slot(wkey: u64) -> usize {
+    (wkey.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - DIST_LRU_BITS)) as usize
+}
+
 const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
@@ -723,6 +790,25 @@ pub fn is_proven_loss_score(score: i32) -> bool {
     abs >= MATE - 1_000 || (abs >= RACE_MATE - 1_000 && abs <= RACE_MATE + 500)
 }
 
+/// Pack a 0/1 wall-slot byte array into a u64 bitboard (bit s = slot s occupied).
+/// ACE wall slots only ever hold 0 or 1; eight bytes gather at a time via the
+/// bit-0 multiply trick so the NNUE accumulator diff is a couple of XORs instead
+/// of a 128-slot byte scan per eval.
+#[inline]
+fn wall_slot_bits(slots: &[u8; 64]) -> u64 {
+    const LSB: u64 = 0x0101_0101_0101_0101;
+    const GATHER: u64 = 0x0102_0408_1020_4080;
+    let mut out = 0u64;
+    let mut i = 0;
+    while i < 8 {
+        let w = u64::from_le_bytes(slots[i * 8..i * 8 + 8].try_into().unwrap());
+        debug_assert!(w & !LSB == 0, "wall slot bytes must be 0/1");
+        out |= ((w & LSB).wrapping_mul(GATHER) >> 56) << (i * 8);
+        i += 1;
+    }
+    out
+}
+
 /// Proven forced win in the race or true-mate band.
 #[inline]
 pub fn is_proven_win_score(score: i32) -> bool {
@@ -1023,6 +1109,20 @@ pub struct TitaniumSearch {
     d0_layers: [[u128; 81]; MAX_PLY],
     d1_layers: [[u128; 81]; MAX_PLY],
     d0_layer_depth: [usize; MAX_PLY],
+    /// Wall-topology zobrist (`wall_topology_key`, hi<<32|lo) of the fields last
+    /// written into each ply slot. After an unmake the parent's fields are still
+    /// in its slot — a key match restores them instead of re-flooding. u64::MAX =
+    /// never written.
+    d0_key: [u64; MAX_PLY],
+    d1_key: [u64; MAX_PLY],
+    /// Static-eval cache: the NNUE + scalar + route portion of `evaluate` is a
+    /// pure function of (position hash, walls-remaining) for a fixed net, and the
+    /// search transposes heavily. Cert/race floors are applied AFTER the cached
+    /// value so their budgeted/stateful behavior is untouched. Direct-mapped;
+    /// key 0 with meta u16::MAX = empty. wl is verified separately because the
+    /// zobrist hash does not encode per-player wall counts.
+    eval_cache: Vec<EvalCacheEntry>,
+    dist_lru: Vec<DistTopoEntry>,
     d1_layer_depth: [usize; MAX_PLY],
     dist0_idx: usize, // active ply slot in d0 (JS: this.dist0 array ref)
     dist1_idx: usize,
@@ -1033,8 +1133,8 @@ pub struct TitaniumSearch {
     // HalfPW accumulator cache
     np_acc0: [f64; NET_H],
     np_acc1: [f64; NET_H],
-    np_hw: [u8; 64],
-    np_vw: [u8; 64],
+    np_hbits: u64,
+    np_vbits: u64,
     np_b0: i32,
     np_b1v: i32,
     net: &'static Net,
@@ -1223,6 +1323,10 @@ impl TitaniumSearch {
             d0_layers: [[0; 81]; MAX_PLY],
             d1_layers: [[0; 81]; MAX_PLY],
             d0_layer_depth: [0; MAX_PLY],
+            d0_key: [u64::MAX; MAX_PLY],
+            d1_key: [u64::MAX; MAX_PLY],
+            eval_cache: vec![EvalCacheEntry::default(); EVAL_CACHE_SIZE],
+            dist_lru: vec![DistTopoEntry::default(); DIST_LRU_SIZE],
             d1_layer_depth: [0; MAX_PLY],
             dist0_idx: 0,
             dist1_idx: 0,
@@ -1232,8 +1336,8 @@ impl TitaniumSearch {
             dir_masks_cache: DirMasks::default(),
             np_acc0: [0.0; NET_H],
             np_acc1: [0.0; NET_H],
-            np_hw: [0; 64],
-            np_vw: [0; 64],
+            np_hbits: 0,
+            np_vbits: 0,
             np_b0: -1,
             np_b1v: -1,
             net: net(),
@@ -2369,24 +2473,21 @@ impl TitaniumSearch {
             (route1, route0, near1, near0)
         };
         let contested = (me_route | me_near) & (opp_route | opp_near);
-        let canonical = |sq: usize| if self.g.turn == 0 { sq } else { NET_MIRC[sq] };
-        let sum_bits = |mut bits: u128, weights: &[f64]| {
+        let bybit = &nw.route_bybit[self.g.turn];
+        let sum_bits = |mut bits: u128, tbl: &[f64; 128]| {
             let mut sum = 0.0;
             while bits != 0 {
                 let bit = bits.trailing_zeros();
                 bits &= bits - 1;
-                let sq = FLOOD_SQ_BY_BIT[bit as usize];
-                if sq != u8::MAX {
-                    sum += weights[canonical(sq as usize)];
-                }
+                sum += tbl[bit as usize];
             }
             sum
         };
-        let score = sum_bits(me_route, &nw.route_me)
-            + sum_bits(opp_route, &nw.route_opp)
-            + sum_bits(me_near, &nw.route_near_me)
-            + sum_bits(opp_near, &nw.route_near_opp)
-            + sum_bits(contested, &nw.route_contested);
+        let score = sum_bits(me_route, &bybit[0])
+            + sum_bits(opp_route, &bybit[1])
+            + sum_bits(me_near, &bybit[2])
+            + sum_bits(opp_near, &bybit[3])
+            + sum_bits(contested, &bybit[4]);
         (score, route0, route1)
     }
 
@@ -2433,6 +2534,49 @@ impl TitaniumSearch {
         crate::bench_instr::record(|b| &mut b.refresh_dist, || self.refresh_dist_inner(ply))
     }
 
+    /// Copy one player's fields for `wkey` from the topology cache into ply slot.
+    fn dist_lru_load(&mut self, wkey: u64, ply: usize, player: usize) -> bool {
+        let e = &self.dist_lru[dist_lru_slot(wkey)];
+        if e.key != wkey {
+            return false;
+        }
+        if player == 0 {
+            self.d0[ply] = e.d0;
+            if self.net.route_active {
+                let d = e.d0_depth as usize;
+                self.d0_layers[ply][..d].copy_from_slice(&e.d0_layers[..d]);
+                self.d0_layer_depth[ply] = d;
+            }
+        } else {
+            self.d1[ply] = e.d1;
+            if self.net.route_active {
+                let d = e.d1_depth as usize;
+                self.d1_layers[ply][..d].copy_from_slice(&e.d1_layers[..d]);
+                self.d1_layer_depth[ply] = d;
+            }
+        }
+        true
+    }
+
+    /// Store BOTH players' current fields under `wkey` (contents at the live
+    /// dist indices are valid for the current topology by construction).
+    fn dist_lru_store(&mut self, wkey: u64) {
+        let i0 = self.dist0_idx;
+        let i1 = self.dist1_idx;
+        let e = &mut self.dist_lru[dist_lru_slot(wkey)];
+        e.key = wkey;
+        e.d0 = self.d0[i0];
+        e.d1 = self.d1[i1];
+        if self.net.route_active {
+            let d0 = self.d0_layer_depth[i0];
+            let d1 = self.d1_layer_depth[i1];
+            e.d0_depth = d0 as u16;
+            e.d1_depth = d1 as u16;
+            e.d0_layers[..d0].copy_from_slice(&self.d0_layers[i0][..d0]);
+            e.d1_layers[..d1].copy_from_slice(&self.d1_layers[i1][..d1]);
+        }
+    }
+
     fn refresh_dist_inner(&mut self, ply: usize) {
         let stamp = self.g.wall_stamp;
         if self.cached_stamp == stamp {
@@ -2464,47 +2608,73 @@ impl TitaniumSearch {
                 } else {
                     None
                 };
+                let wkey = if refresh0 || refresh1 {
+                    let (k_lo, k_hi) = self.wall_topology_key();
+                    (k_hi as u64) << 32 | k_lo as u64
+                } else {
+                    0
+                };
+                // Restore-instead-of-reflood also applies here: iterative
+                // deepening and transpositions revisit the same (ply, topology)
+                // constantly — a key match means the slot already holds these
+                // exact fields.
+                let mut reflooded = false;
                 if refresh0 {
                     self.dist0_idx = ply; // redirect first: never write an ancestor's array
-                    if self.net.route_active {
-                        self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal(
-                            0,
-                            masks.expect("refresh masks"),
-                            &mut self.d0_layers[ply],
-                        );
-                        materialize_distance_layers(
-                            &self.d0_layers[ply],
-                            self.d0_layer_depth[ply],
-                            &mut self.d0[ply],
-                        );
-                    } else {
-                        fill_ace_dist_to_goal_with_masks(
-                            0,
-                            masks.expect("refresh masks"),
-                            &mut self.d0[ply],
-                        );
+                    if self.d0_key[ply] != wkey {
+                        self.d0_key[ply] = wkey;
+                        if !self.dist_lru_load(wkey, ply, 0) {
+                            reflooded = true;
+                            if self.net.route_active {
+                                self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal(
+                                    0,
+                                    masks.expect("refresh masks"),
+                                    &mut self.d0_layers[ply],
+                                );
+                                materialize_distance_layers(
+                                    &self.d0_layers[ply],
+                                    self.d0_layer_depth[ply],
+                                    &mut self.d0[ply],
+                                );
+                            } else {
+                                fill_ace_dist_to_goal_with_masks(
+                                    0,
+                                    masks.expect("refresh masks"),
+                                    &mut self.d0[ply],
+                                );
+                            }
+                        }
                     }
                 }
                 if refresh1 {
                     self.dist1_idx = ply;
-                    if self.net.route_active {
-                        self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal(
-                            1,
-                            masks.expect("refresh masks"),
-                            &mut self.d1_layers[ply],
-                        );
-                        materialize_distance_layers(
-                            &self.d1_layers[ply],
-                            self.d1_layer_depth[ply],
-                            &mut self.d1[ply],
-                        );
-                    } else {
-                        fill_ace_dist_to_goal_with_masks(
-                            1,
-                            masks.expect("refresh masks"),
-                            &mut self.d1[ply],
-                        );
+                    if self.d1_key[ply] != wkey {
+                        self.d1_key[ply] = wkey;
+                        if !self.dist_lru_load(wkey, ply, 1) {
+                            reflooded = true;
+                            if self.net.route_active {
+                                self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal(
+                                    1,
+                                    masks.expect("refresh masks"),
+                                    &mut self.d1_layers[ply],
+                                );
+                                materialize_distance_layers(
+                                    &self.d1_layers[ply],
+                                    self.d1_layer_depth[ply],
+                                    &mut self.d1[ply],
+                                );
+                            } else {
+                                fill_ace_dist_to_goal_with_masks(
+                                    1,
+                                    masks.expect("refresh masks"),
+                                    &mut self.d1[ply],
+                                );
+                            }
+                        }
                     }
+                }
+                if reflooded {
+                    self.dist_lru_store(wkey);
                 }
                 self.cached_stamp = stamp;
                 return;
@@ -2512,31 +2682,60 @@ impl TitaniumSearch {
         }
         self.dist0_idx = ply; // own arrays: ancestors stay intact
         self.dist1_idx = ply;
-        let masks = self.current_dir_masks();
-        crate::bench_instr::record(
-            |b| &mut b.shortest_path,
-            || {
-                if self.net.route_active {
-                    self.d0_layer_depth[ply] =
-                        fill_ace_dist_layers_to_goal(0, masks, &mut self.d0_layers[ply]);
-                    self.d1_layer_depth[ply] =
-                        fill_ace_dist_layers_to_goal(1, masks, &mut self.d1_layers[ply]);
-                    materialize_distance_layers(
-                        &self.d0_layers[ply],
-                        self.d0_layer_depth[ply],
-                        &mut self.d0[ply],
-                    );
-                    materialize_distance_layers(
-                        &self.d1_layers[ply],
-                        self.d1_layer_depth[ply],
-                        &mut self.d1[ply],
-                    );
-                } else {
-                    fill_ace_dist_to_goal_with_masks(0, masks, &mut self.d0[ply]);
-                    fill_ace_dist_to_goal_with_masks(1, masks, &mut self.d1[ply]);
-                }
-            },
-        );
+        let wkey = {
+            let (k_lo, k_hi) = self.wall_topology_key();
+            (k_hi as u64) << 32 | k_lo as u64
+        };
+        // Restore-instead-of-reflood: the slot already holds fields for this
+        // exact wall topology (typical after unmaking a wall back to this node).
+        let d0_ok = self.d0_key[ply] == wkey;
+        let d1_ok = self.d1_key[ply] == wkey;
+        if d0_ok && d1_ok {
+            self.cached_stamp = stamp;
+            return;
+        }
+        let d0_todo = !d0_ok && !self.dist_lru_load(wkey, ply, 0);
+        let d1_todo = !d1_ok && !self.dist_lru_load(wkey, ply, 1);
+        if d0_todo || d1_todo {
+            let masks = self.current_dir_masks();
+            crate::bench_instr::record(
+                |b| &mut b.shortest_path,
+                || {
+                    if self.net.route_active {
+                        if d0_todo {
+                            self.d0_layer_depth[ply] =
+                                fill_ace_dist_layers_to_goal(0, masks, &mut self.d0_layers[ply]);
+                            materialize_distance_layers(
+                                &self.d0_layers[ply],
+                                self.d0_layer_depth[ply],
+                                &mut self.d0[ply],
+                            );
+                        }
+                        if d1_todo {
+                            self.d1_layer_depth[ply] =
+                                fill_ace_dist_layers_to_goal(1, masks, &mut self.d1_layers[ply]);
+                            materialize_distance_layers(
+                                &self.d1_layers[ply],
+                                self.d1_layer_depth[ply],
+                                &mut self.d1[ply],
+                            );
+                        }
+                    } else {
+                        if d0_todo {
+                            fill_ace_dist_to_goal_with_masks(0, masks, &mut self.d0[ply]);
+                        }
+                        if d1_todo {
+                            fill_ace_dist_to_goal_with_masks(1, masks, &mut self.d1[ply]);
+                        }
+                    }
+                },
+            );
+        }
+        self.d0_key[ply] = wkey;
+        self.d1_key[ply] = wkey;
+        if d0_todo || d1_todo {
+            self.dist_lru_store(wkey);
+        }
         self.cached_stamp = stamp;
     }
 
@@ -2741,62 +2940,72 @@ impl TitaniumSearch {
 
     #[inline(always)]
     fn ensure_nnue_wall_accumulators(&mut self, nw: &Net, b0: i32, b1: i32) {
+        let cur_h = wall_slot_bits(&self.g.hw);
+        let cur_v = wall_slot_bits(&self.g.vw);
         if b0 != self.np_b0 || b1 != self.np_b1v {
             crate::bench_instr::record(
                 |b| &mut b.nnue_full_refresh,
                 || {
                     self.np_acc0.fill(0.0);
                     self.np_acc1.fill(0.0);
-                    for s in 0..64 {
-                        if self.g.hw[s] != 0 {
-                            let o0 = (b0 as usize * 128 + s) * NET_H;
-                            let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
-                            for j in 0..NET_H {
-                                self.np_acc0[j] += nw.w1c[o0 + j];
-                                self.np_acc1[j] += nw.w1c[o1 + j];
-                            }
+                    let mut bits = cur_h;
+                    while bits != 0 {
+                        let s = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let o0 = (b0 as usize * 128 + s) * NET_H;
+                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += nw.w1c[o0 + j];
+                            self.np_acc1[j] += nw.w1c[o1 + j];
                         }
-                        if self.g.vw[s] != 0 {
-                            let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
-                            let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
-                            for j in 0..NET_H {
-                                self.np_acc0[j] += nw.w1c[o0 + j];
-                                self.np_acc1[j] += nw.w1c[o1 + j];
-                            }
-                        }
-                        self.np_hw[s] = self.g.hw[s];
-                        self.np_vw[s] = self.g.vw[s];
                     }
+                    let mut bits = cur_v;
+                    while bits != 0 {
+                        let s = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
+                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += nw.w1c[o0 + j];
+                            self.np_acc1[j] += nw.w1c[o1 + j];
+                        }
+                    }
+                    self.np_hbits = cur_h;
+                    self.np_vbits = cur_v;
                     self.np_b0 = b0;
                     self.np_b1v = b1;
                 },
             );
-        } else {
+        } else if cur_h != self.np_hbits || cur_v != self.np_vbits {
             crate::bench_instr::record(
                 |b| &mut b.nnue_incr_update,
                 || {
-                    for s in 0..64 {
-                        if self.g.hw[s] != self.np_hw[s] {
-                            let sg = if self.g.hw[s] != 0 { 1.0 } else { -1.0 };
-                            let o0 = (b0 as usize * 128 + s) * NET_H;
-                            let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
-                            for j in 0..NET_H {
-                                self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                                self.np_acc1[j] += sg * nw.w1c[o1 + j];
-                            }
-                            self.np_hw[s] = self.g.hw[s];
-                        }
-                        if self.g.vw[s] != self.np_vw[s] {
-                            let sg = if self.g.vw[s] != 0 { 1.0 } else { -1.0 };
-                            let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
-                            let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
-                            for j in 0..NET_H {
-                                self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                                self.np_acc1[j] += sg * nw.w1c[o1 + j];
-                            }
-                            self.np_vw[s] = self.g.vw[s];
+                    let mut bits = cur_h ^ self.np_hbits;
+                    while bits != 0 {
+                        let s = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let sg = if cur_h >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let o0 = (b0 as usize * 128 + s) * NET_H;
+                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
+                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
                         }
                     }
+                    let mut bits = cur_v ^ self.np_vbits;
+                    while bits != 0 {
+                        let s = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let sg = if cur_v >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
+                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
+                        for j in 0..NET_H {
+                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
+                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                        }
+                    }
+                    self.np_hbits = cur_h;
+                    self.np_vbits = cur_v;
                 },
             );
         }
@@ -2941,6 +3150,28 @@ impl TitaniumSearch {
             }
         }
 
+        let hash64 = (self.g.hash_hi as u64) << 32 | self.g.hash_lo as u64;
+        let ec_idx = (hash64.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - EVAL_CACHE_BITS)) as usize;
+        let ec_meta = ((self.g.wl[0] as u16) << 8) | (self.g.wl[1] as u16);
+        {
+            let e = &self.eval_cache[ec_idx];
+            if e.key == hash64 && e.meta == ec_meta {
+                let out = e.val;
+                crate::bench_instr::bump(|b| &mut b.eval_cache_hit);
+                return self.evaluate_tail(
+                    out,
+                    depth,
+                    me,
+                    d_me_i,
+                    d_opp_i,
+                    w_me_i,
+                    w_opp_i,
+                    hands_empty_loss_floor,
+                );
+            }
+        }
+        crate::bench_instr::bump(|b| &mut b.eval_cache_miss);
+
         let d_me = d_me_i as f64;
         let d_opp = d_opp_i as f64;
         let w_me = w_me_i as f64;
@@ -3069,6 +3300,29 @@ impl TitaniumSearch {
                 }
             },
         );
+        self.eval_cache[ec_idx] = EvalCacheEntry {
+            key: hash64,
+            val: out,
+            meta: ec_meta,
+        };
+        self.evaluate_tail(out, depth, me, d_me_i, d_opp_i, w_me_i, w_opp_i, hands_empty_loss_floor)
+    }
+
+    /// Cert/race floors applied on top of the cached pure static eval `out`.
+    /// Budgeted + memoized state lives here, OUTSIDE the eval cache, so caching
+    /// `out` cannot change cert behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_tail(
+        &mut self,
+        out: f64,
+        depth: i32,
+        me: usize,
+        d_me_i: i32,
+        d_opp_i: i32,
+        w_me_i: i32,
+        w_opp_i: i32,
+        hands_empty_loss_floor: bool,
+    ) -> i32 {
         // Integer centipawns (JS `out | 0` / halfpw `int(out)`).
         let mut ret = out as i32;
         // pathfix/RaceProof(c): certified-win floor (sound; lazy; memoized;

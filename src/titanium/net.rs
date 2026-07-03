@@ -48,6 +48,11 @@ pub struct Net {
     pub route_near_opp: Vec<f64>,
     pub route_contested: Vec<f64>,
     pub route_active: bool,
+    /// Route plane weights re-indexed by centered flood bit, per side to move
+    /// (`[turn][plane][flood_bit]`, planes: me/opp/near_me/near_opp/contested;
+    /// turn 1 pre-applies NET_MIRC). Leaf route scoring then reads `tbl[bit]`
+    /// per set bit instead of bit→square→canonical translation each time.
+    pub route_bybit: Box<[[[f64; 128]; 5]; 2]>,
     /// Combined CAT impact heatmap as a direct input plane (81, side-to-move
     /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
     /// not even computed, so the live net is unaffected. A retrained blob carries
@@ -97,6 +102,18 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         vec![0.0; FIELD_PLANE_LEN]
     };
     let cat_active = cat_heat.iter().any(|&w| w != 0.0);
+    let mut route_bybit = Box::new([[[0.0f64; 128]; 5]; 2]);
+    for turn in 0..2usize {
+        for sq in 0..FIELD_PLANE_LEN {
+            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
+            let bit = crate::util::grid::FLOOD_BIT_BY_SQ[sq].trailing_zeros() as usize;
+            route_bybit[turn][0][bit] = route_me[canon];
+            route_bybit[turn][1][bit] = route_opp[canon];
+            route_bybit[turn][2][bit] = route_near_me[canon];
+            route_bybit[turn][3][bit] = route_near_opp[canon];
+            route_bybit[turn][4][bit] = route_contested[canon];
+        }
+    }
     Net {
         ws: ws_v.try_into().unwrap(),
         b1: b1_v.try_into().unwrap(),
@@ -110,6 +127,7 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         route_near_opp,
         route_contested,
         route_active,
+        route_bybit,
         cat_heat,
         cat_active,
     }
