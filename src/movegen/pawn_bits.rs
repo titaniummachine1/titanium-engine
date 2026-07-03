@@ -5,7 +5,7 @@
 use crate::core::board::{Board, Move};
 use crate::path::masks::DirMasks;
 use crate::util::grid::{
-    can_step, flood_bit_sq, flood_sq_from_bit, square_index, unpack_square, FLOOD_STRIDE,
+    can_step, flood_bit_sq, square_index, unpack_square, FLOOD_SQ_BY_BIT, FLOOD_STRIDE,
 };
 
 type StepFn = fn(u128, &DirMasks) -> u128;
@@ -36,7 +36,8 @@ fn push_flood_target(bit: u128, out: &mut [Move], n: &mut usize) {
         return;
     }
     let fb = bit.trailing_zeros();
-    if let Some(sq) = flood_sq_from_bit(fb) {
+    let sq = FLOOD_SQ_BY_BIT[fb as usize];
+    if sq != u8::MAX {
         let (r, c) = unpack_square(sq);
         out[*n] = Move::Pawn { row: r, col: c };
         *n += 1;

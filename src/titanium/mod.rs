@@ -56,11 +56,11 @@ pub use perft::{
     default_timeout, oracle_nodes, perft_engine_timed, perft_titanium_native_timed,
     perft_titanium_ti_timed, perft_titanium_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
 };
-pub use search::{
-    board_move_to_move_id, format_root_defense_diag_json, ReductionProbeEvent, ReductionShadowStats,
-    RootDefenseDiag, ThinkResult, TitaniumSearch,
-};
 pub use race::RaceOutcomeStats;
+pub use search::{
+    board_move_to_move_id, format_root_defense_diag_json, ReductionProbeEvent,
+    ReductionShadowStats, RootDefenseDiag, ThinkResult, TitaniumSearch,
+};
 pub use session::run_titanium_session_stdio;
 pub use session_v15::run_v15_session_stdio;
 

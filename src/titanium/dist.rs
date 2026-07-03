@@ -125,6 +125,13 @@ pub fn fill_ace_dist_layers_to_goal_p1(masks: DirMasks, layers: &mut [u128; 81])
 }
 
 pub fn materialize_distance_layers(layers: &[u128; 81], depth: usize, out: &mut [u8; 81]) {
+    crate::bench_instr::record(
+        |b| &mut b.mat_layers,
+        || materialize_distance_layers_inner(layers, depth, out),
+    )
+}
+
+fn materialize_distance_layers_inner(layers: &[u128; 81], depth: usize, out: &mut [u8; 81]) {
     out.fill(255);
     for (d, mut bits) in layers.iter().copied().take(depth).enumerate() {
         while bits != 0 {

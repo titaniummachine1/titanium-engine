@@ -65,6 +65,15 @@ const DENIED_WHITE_BOOK_MOVES: &[(&[&str], &str)] = &[
     ),
 ];
 
+/// Refuted continuation for **Black** — strip from DAG order/play after exact prefix.
+/// Line: e2 e8 e3 e7 e4 e6 e3h f6h c3h d6h g3h f6 — f6 is a losing tempo.
+const DENIED_BLACK_BOOK_MOVES: &[(&[&str], &str)] = &[(
+    &[
+        "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "f6h", "c3h", "d6h", "g3h",
+    ],
+    "f6",
+)];
+
 fn history_matches_prefix(g: &GameState, prefix: &[&str]) -> bool {
     g.hist_len == prefix.len()
         && prefix
@@ -83,9 +92,33 @@ pub fn opening_white_book_move_denied(g: &GameState, next: &str) -> bool {
         .any(|(prefix, denied)| history_matches_prefix(g, prefix) && next == *denied)
 }
 
-/// Root search: same deny list — only when White is on move.
+/// Black must not take this book move at this exact prefix (refuted continuation).
+pub fn opening_black_book_move_denied(g: &GameState, next: &str) -> bool {
+    if g.turn != 1 {
+        return false;
+    }
+    DENIED_BLACK_BOOK_MOVES
+        .iter()
+        .any(|(prefix, denied)| history_matches_prefix(g, prefix) && next == *denied)
+}
+
+/// Root search / book consult: side-aware deny list.
 pub fn opening_move_would_be_denied(g: &GameState, next: &str) -> bool {
-    opening_white_book_move_denied(g, next)
+    opening_white_book_move_denied(g, next) || opening_black_book_move_denied(g, next)
+}
+
+/// Remove denied opening moves from a legal-move slice (root search / book consult).
+pub fn filter_denied_opening_legal_moves(g: &GameState, moves: &mut [i16], n: usize) -> usize {
+    let mut write = 0usize;
+    for i in 0..n {
+        let alg = move_id_to_algebraic(moves[i]);
+        if opening_move_would_be_denied(g, &alg) {
+            continue;
+        }
+        moves[write] = moves[i];
+        write += 1;
+    }
+    write
 }
 
 fn history_algebraic(g: &GameState) -> Vec<String> {
@@ -432,7 +465,7 @@ pub fn consult_from_edge_rows(
         if !legal_set.contains(&mv) {
             continue;
         }
-        if opening_white_book_move_denied(g, &alg) {
+        if opening_white_book_move_denied(g, &alg) || opening_black_book_move_denied(g, &alg) {
             continue;
         }
         let raw_wr = raw_win_rate(row.wins, row.losses);
@@ -878,6 +911,33 @@ mod tests {
         assert!(
             consult.direct_play != Some(algebraic_to_move_id("h3h")),
             "h3h must never be direct-play"
+        );
+    }
+
+    #[test]
+    fn black_f6_blocked_after_e3h_g3h_line() {
+        let book = OpeningBook::open(None).expect("embedded book");
+        let mut g = GameState::new();
+        for mv in [
+            "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "f6h", "c3h", "d6h", "g3h",
+        ] {
+            g.make_move(algebraic_to_move_id(mv));
+        }
+        assert_eq!(g.turn, 1, "Black to move");
+        let mut buf = [0i16; 160];
+        let n = g.gen_legal_moves(&mut buf);
+        let consult = book.consult(&g, OpeningBookMode::Play, &buf[..n]);
+        assert_ne!(
+            consult.direct_play,
+            Some(algebraic_to_move_id("f6")),
+            "f6 must not be forced from book after g3h"
+        );
+        assert!(
+            !consult
+                .order
+                .iter()
+                .any(|&m| m == algebraic_to_move_id("f6")),
+            "f6 must not appear in opening book order on refuted e3h line"
         );
     }
 

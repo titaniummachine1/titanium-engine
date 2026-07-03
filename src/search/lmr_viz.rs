@@ -10,10 +10,10 @@ use crate::cat::CorridorAttention;
 use crate::core::board::{Board, Move};
 use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::path::BfsScratch;
-use crate::search::v16_lmr::{
-    plan_v16_pawn_lmr, plan_v16_wall_lmr, ACE_LMR_AFTER_MOVE, ACE_LMR_MIN_DEPTH, V16HardOverride,
-};
 use crate::search::lmr_profile::{compute_stage_t, LmrProfile};
+use crate::search::v16_lmr::{
+    plan_v16_pawn_lmr, plan_v16_wall_lmr, V16HardOverride, ACE_LMR_AFTER_MOVE, ACE_LMR_MIN_DEPTH,
+};
 use crate::util::perft::format_move;
 
 const LMR_MIN_DEPTH: u32 = 2;
@@ -88,12 +88,9 @@ fn plan_v16_root_move(
     }
     if !is_wall && move_index > 0 && depth >= ACE_LMR_MIN_DEPTH as u32 && child_depth_full > 1 {
         if let Some(gain) = pawn_self_gain {
-            if let Some(p) = plan_v16_pawn_lmr(
-                move_index,
-                depth as i32,
-                child_depth_full as i32,
-                gain,
-            ) {
+            if let Some(p) =
+                plan_v16_pawn_lmr(move_index, depth as i32, child_depth_full as i32, gain)
+            {
                 return (
                     p.ace_base_reduction as u32,
                     p.hard_override.as_str(),
@@ -103,12 +100,7 @@ fn plan_v16_root_move(
             }
         }
     }
-    (
-        0,
-        V16HardOverride::None.as_str(),
-        0,
-        child_depth_full,
-    )
+    (0, V16HardOverride::None.as_str(), 0, child_depth_full)
 }
 
 fn root_cat_heat_stats(moves: &[Move], n: usize, cat: &CorridorAttention) -> (u16, u16) {
@@ -240,8 +232,7 @@ pub fn plan_root_lmr(
         let is_wall = matches!(mv, Move::Wall { .. });
         let is_tactical = if i == 0 || depth < LMR_MIN_DEPTH {
             true
-        } else if is_wall && !crate::cat::prune::wall_intersects_path(mv, &opp_path, opp_path_len)
-        {
+        } else if is_wall && !crate::cat::prune::wall_intersects_path(mv, &opp_path, opp_path_len) {
             false
         } else {
             is_tactical_move(board, mv, our_dist, opp_dist_path, bfs)
@@ -567,14 +558,7 @@ mod tests {
         board.apply_algebraic("e3");
         board.apply_algebraic("e8");
         let mut bfs = BfsScratch::new();
-        let (_, plans) = plan_root_lmr(
-            &mut board,
-            &mut bfs,
-            11,
-            TIME_REFERENCE_MS,
-            0.0,
-            100,
-        );
+        let (_, plans) = plan_root_lmr(&mut board, &mut bfs, 11, TIME_REFERENCE_MS, 0.0, 100);
         assert!(
             plans
                 .iter()
@@ -582,10 +566,10 @@ mod tests {
             "hot/PV moves should still keep full depth"
         );
         assert!(
-            plans
-                .iter()
-                .any(|p| p.hard_override == V16HardOverride::BackwardMove.as_str()
-                    && p.child_depth_used <= 1),
+            plans.iter().any(
+                |p| p.hard_override == V16HardOverride::BackwardMove.as_str()
+                    && p.child_depth_used <= 1
+            ),
             "backward/useless walls should be visibly reduced to child depth 1"
         );
     }

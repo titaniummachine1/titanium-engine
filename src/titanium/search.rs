@@ -1234,6 +1234,15 @@ pub struct TitaniumSearch {
     cert_eval_leaves_only: bool,
     /// Override for experimental wall-ignorance certificate (`None` = env only).
     wall_ignore_cert_override: Option<bool>,
+    /// Lazy per-instance cache of the resolved override-or-env decision (`None`
+    /// = not yet resolved). `std::env::var` is a heap-allocating, lock-adjacent
+    /// syscall — reading it on every `evaluate_tail` call (once per node where
+    /// walls remain) measured as a flat ~400ns/call tax, independent of
+    /// position. Env vars don't change mid-process for this flag in any real
+    /// caller, so resolving once per instance is safe; `wall_ignore_loss_cert_enabled()`
+    /// itself is left untouched (other callers, e.g. the alphabeta.rs test that
+    /// toggles this env var at runtime, keep reading it fresh).
+    wall_ignore_cert_resolved: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     eme: bool,
     pub nodes: u64,
@@ -1424,6 +1433,7 @@ impl TitaniumSearch {
             cheap_cert: false,
             cert_eval_leaves_only: false,
             wall_ignore_cert_override: None,
+            wall_ignore_cert_resolved: None,
             eme: false,
             nodes: 0,
             deadline: Instant::now(),
@@ -1547,6 +1557,9 @@ impl TitaniumSearch {
         };
         let mut legal = [0i16; 160];
         let n = self.gen_moves(0, 1, 0, &mut legal);
+        let n = crate::titanium::opening_book::filter_denied_opening_legal_moves(
+            &self.g, &mut legal, n,
+        );
         let consult = book.consult(&self.g, self.opening_book_mode, &legal[..n]);
         self.pending_opening_book_diag = Some(consult.diagnostics);
         if !consult.order.is_empty() {
@@ -1971,6 +1984,9 @@ impl TitaniumSearch {
             });
         let n = self.gen_moves(0, depth.max(1), tt_move, &mut moves);
         self.order_moves(0, &mut moves[..n], tt_move, 0);
+        let n = crate::titanium::opening_book::filter_denied_opening_legal_moves(
+            &self.g, &mut moves, n,
+        );
         moves[..n].to_vec()
     }
 
@@ -3512,8 +3528,15 @@ impl TitaniumSearch {
                 cert_score_from_stm, try_wall_ignorance_loss_cert, wall_ignore_loss_cert_enabled,
                 CertScratch,
             };
-            let force =
-                self.wall_ignore_cert_override.unwrap_or(false) || wall_ignore_loss_cert_enabled();
+            let force = match self.wall_ignore_cert_resolved {
+                Some(v) => v,
+                None => {
+                    let v = self.wall_ignore_cert_override.unwrap_or(false)
+                        || wall_ignore_loss_cert_enabled();
+                    self.wall_ignore_cert_resolved = Some(v);
+                    v
+                }
+            };
             if force {
                 let mut wi_scratch = CertScratch::new();
                 if let Some(verdict) =
@@ -4256,31 +4279,18 @@ impl TitaniumSearch {
                 && m >= 100
                 && m != tt_move
             {
-                self.refresh_dist(ply + 1);
                 let attention_ratio = if cat_lmr_active && max_move_impact > 0 {
                     cat_heats[i].max(0) as f64 / max_move_impact as f64
                 } else {
                     1.0
                 };
-                let mut wall_opponent_delay = 0;
+                let wall_opponent_delay = 0;
                 let v16_plan = if cat_lmr_active {
-                    let post_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
-                    let post_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
-                    let (pre_opp, post_opp, pre_our, post_our) = if mover == 0 {
-                        (pre_d1, post_d1, pre_d0, post_d0)
-                    } else {
-                        (pre_d0, post_d0, pre_d1, post_d1)
-                    };
-                    wall_opponent_delay = i32::from(post_opp) - i32::from(pre_opp);
-                    let wall_self_delay = i32::from(post_our) - i32::from(pre_our);
-                    plan_v16_wall_lmr(
-                        i,
-                        depth,
-                        new_depth,
-                        attention_ratio,
-                        wall_opponent_delay,
-                        wall_self_delay,
-                    )
+                    // CAT attention alone determines the v16 search depth. Path
+                    // delay was only used to choose a diagnostic tail label, and
+                    // refreshing child wall distances here made search pay an
+                    // extra flood before the child node needed distances.
+                    plan_v16_wall_lmr(i, depth, new_depth, attention_ratio, 0, 0)
                 } else {
                     let ace_base = ace_graduated_lmr_reduction(i, depth);
                     let final_reduction = ace_base.min((new_depth - 1).max(0));
@@ -4385,9 +4395,10 @@ impl TitaniumSearch {
                 && depth >= ACE_LMR_MIN_DEPTH
                 && m != tt_move
             {
-                self.refresh_dist(ply + 1);
-                let post_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
-                let post_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
+                // Pawn moves do not change wall topology, so the parent distance
+                // fields remain valid after the pawn coordinate changes.
+                let post_d0 = self.d0[nd0][self.g.pawn[0]];
+                let post_d1 = self.d1[nd1][self.g.pawn[1]];
                 let (pre_our, post_our) = if mover == 0 {
                     (pre_d0, post_d0)
                 } else {
@@ -4674,6 +4685,12 @@ impl TitaniumSearch {
             return Ok(self.root_score);
         }
         self.order_moves(0, &mut moves[..n], tt_hint, 0);
+        let n = crate::titanium::opening_book::filter_denied_opening_legal_moves(
+            &self.g, &mut moves, n,
+        );
+        if n == 0 {
+            return Ok(self.root_score);
+        }
 
         let child_depth = depth - 1;
         let mut best_move = moves[0];

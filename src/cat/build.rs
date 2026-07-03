@@ -14,7 +14,7 @@ use crate::path::distance::{
 };
 use crate::path::masks::DirMasks;
 use crate::path::BfsScratch;
-use crate::util::grid::{flood_bit_sq, flood_sq_from_bit, square_index, FLOOD_PLAYABLE};
+use crate::util::grid::{flood_bit_sq, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT};
 
 fn corridor_heat(delta: u16) -> u16 {
     if delta > MAX_RELEVANT_CORRIDOR_DELTA {
@@ -327,7 +327,8 @@ fn scatter_add(heat: &mut [u16; 81], mask: u128, w: u16) {
     while bits != 0 {
         let fb = bits.trailing_zeros();
         bits &= bits - 1;
-        if let Some(sq) = flood_sq_from_bit(fb) {
+        let sq = FLOOD_SQ_BY_BIT[fb as usize];
+        if sq != u8::MAX {
             let slot = &mut heat[sq as usize];
             *slot = slot.saturating_add(w);
         }

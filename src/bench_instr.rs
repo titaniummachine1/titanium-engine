@@ -70,6 +70,7 @@ pub struct BenchInstr {
     pub eval_width_opp: OpStat,
     pub eval_cat_heat: OpStat,
     pub eval_tail: OpStat,
+    pub mat_layers: OpStat,
     search_t0: Option<Instant>,
     measured_ns: u128,
 }
@@ -117,7 +118,7 @@ impl BenchInstr {
         }
         let nodes = self.search_nodes;
         let total_ns = self.measured_ns;
-        let ops: [(&str, &OpStat); 42] = [
+        let ops: [(&str, &OpStat); 43] = [
             ("evaluate", &self.evaluate),
             ("eval_race_bound", &self.eval_race_bound),
             ("race_gate_cached", &self.race_gate_cached),
@@ -160,6 +161,7 @@ impl BenchInstr {
             ("eval_width_opp", &self.eval_width_opp),
             ("eval_cat_heat", &self.eval_cat_heat),
             ("eval_tail", &self.eval_tail),
+            ("mat_layers", &self.mat_layers),
         ];
         let parts: Vec<String> = ops
             .iter()

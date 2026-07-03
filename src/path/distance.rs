@@ -3,7 +3,7 @@
 use crate::core::board::Player;
 use crate::path::flood::expand_frontier;
 use crate::path::masks::DirMasks;
-use crate::util::grid::{flood_bit_sq, flood_sq_from_bit, goal_row, square_index, FLOOD_PLAYABLE};
+use crate::util::grid::{flood_bit_sq, goal_row, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT};
 
 /// Max BFS layers we record — board diameter is bounded by the 81 playable cells.
 pub const MAX_DIST_LAYERS: usize = 81;
@@ -40,7 +40,7 @@ impl DistLayers {
             while bits != 0 {
                 let fb = bits.trailing_zeros();
                 bits &= bits - 1;
-                let sq = flood_sq_from_bit(fb).expect("playable flood bit");
+                let sq = FLOOD_SQ_BY_BIT[fb as usize];
                 out[sq as usize] = d as u8;
             }
         }
@@ -100,7 +100,7 @@ pub fn fill_dist_from_sq(start: u8, masks: DirMasks, dist_from: &mut [u8; 81]) {
         while bits != 0 {
             let fb = bits.trailing_zeros();
             bits &= bits - 1;
-            let sq = flood_sq_from_bit(fb).expect("playable flood bit");
+            let sq = FLOOD_SQ_BY_BIT[fb as usize];
             dist_from[sq as usize] = layer;
         }
         reached |= new;
@@ -132,7 +132,7 @@ pub fn fill_dist_to_goal_row(player: Player, masks: DirMasks, dist_to: &mut [u8;
         while bits != 0 {
             let fb = bits.trailing_zeros();
             bits &= bits - 1;
-            let sq = flood_sq_from_bit(fb).expect("playable flood bit");
+            let sq = FLOOD_SQ_BY_BIT[fb as usize];
             dist_to[sq as usize] = layer;
         }
         reached |= new;

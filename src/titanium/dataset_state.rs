@@ -167,10 +167,12 @@ fn pawn_can_move(state: &DatasetState, cell: u8, dr: i8, dc: i8) -> bool {
                 && (col_u == 0 || !horizontal_wall_present(state, js_to, col_u - 1))
         }
         (0, 1) => {
-            !vertical_wall_present(state, js_from, col_u) && !vertical_wall_present(state, row, col_u)
+            !vertical_wall_present(state, js_from, col_u)
+                && !vertical_wall_present(state, row, col_u)
         }
         (0, -1) => {
-            !vertical_wall_present(state, js_to, nc_u) && !vertical_wall_present(state, nr as u8, nc_u)
+            !vertical_wall_present(state, js_to, nc_u)
+                && !vertical_wall_present(state, nr as u8, nc_u)
         }
         _ => false,
     }
@@ -216,8 +218,7 @@ fn valid_pawn_destinations(state: &DatasetState) -> Vec<u8> {
                 let Ok((orow, ocol)) = cell_to_coords(opponent) else {
                     continue;
                 };
-                let diag =
-                    (orow as i8 + sdr) as u8 * BOARD_SIZE + (ocol as i8 + sdc) as u8;
+                let diag = (orow as i8 + sdr) as u8 * BOARD_SIZE + (ocol as i8 + sdc) as u8;
                 if diag != current {
                     moves.push(diag);
                 }
