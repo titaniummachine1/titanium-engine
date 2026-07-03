@@ -7,17 +7,30 @@
 use crate::path::flood::expand_frontier;
 use crate::path::masks::DirMasks;
 use crate::titanium::game::GameState;
-use crate::util::grid::{flood_bit_sq, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT};
+use crate::util::grid::{flood_bit_sq, FLOOD_BIT_BY_SQ, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT};
 
 /// Corridor cells considered for choke detection (matches CAT bottleneck band).
 pub const CHOKE_DELTA_MAX: u8 = 2;
 
+const fn ace_goal_bits(row: usize) -> u128 {
+    let mut bits = 0u128;
+    let mut c = 0usize;
+    while c < 9 {
+        bits |= FLOOD_BIT_BY_SQ[row * 9 + c];
+        c += 1;
+    }
+    bits
+}
+
+const ACE_P0_GOAL_BITS: u128 = ace_goal_bits(0);
+const ACE_P1_GOAL_BITS: u128 = ace_goal_bits(8);
+
 #[inline]
-fn ace_goal_row(player: usize) -> u8 {
+fn ace_goal_bits_for_player(player: usize) -> u128 {
     if player == 0 {
-        0
+        ACE_P0_GOAL_BITS
     } else {
-        8
+        ACE_P1_GOAL_BITS
     }
 }
 
@@ -98,12 +111,17 @@ pub fn fill_ace_dist_layers_to_goal(
     masks: DirMasks,
     layers: &mut [u128; 81],
 ) -> usize {
-    let grow = ace_goal_row(player);
-    let mut seed = 0u128;
-    for c in 0..9u8 {
-        seed |= flood_bit_sq(square_index(grow, c));
-    }
-    flood_into_layers(seed, masks, layers)
+    flood_into_layers(ace_goal_bits_for_player(player), masks, layers)
+}
+
+#[inline]
+pub fn fill_ace_dist_layers_to_goal_p0(masks: DirMasks, layers: &mut [u128; 81]) -> usize {
+    flood_into_layers(ACE_P0_GOAL_BITS, masks, layers)
+}
+
+#[inline]
+pub fn fill_ace_dist_layers_to_goal_p1(masks: DirMasks, layers: &mut [u128; 81]) -> usize {
+    flood_into_layers(ACE_P1_GOAL_BITS, masks, layers)
 }
 
 pub fn materialize_distance_layers(layers: &[u128; 81], depth: usize, out: &mut [u8; 81]) {
@@ -154,17 +172,35 @@ pub fn fill_ace_dist_to_goal(g: &GameState, player: usize, ace_dist: &mut [u8; 8
 /// players on the same wall geometry, so constructing the masks once avoids a
 /// duplicate 81-cell topology scan.
 pub fn fill_ace_dist_to_goal_with_masks(player: usize, masks: DirMasks, ace_dist: &mut [u8; 81]) {
-    let grow = ace_goal_row(player);
-    let mut seed = 0u128;
-    for c in 0..9u8 {
-        seed |= flood_bit_sq(square_index(grow, c));
-    }
-    flood_scatter(seed, masks, ace_dist);
+    flood_scatter(ace_goal_bits_for_player(player), masks, ace_dist);
+}
+
+#[inline]
+pub fn fill_ace_dist_to_goal_with_masks_p0(masks: DirMasks, ace_dist: &mut [u8; 81]) {
+    flood_scatter(ACE_P0_GOAL_BITS, masks, ace_dist);
+}
+
+#[inline]
+pub fn fill_ace_dist_to_goal_with_masks_p1(masks: DirMasks, ace_dist: &mut [u8; 81]) {
+    flood_scatter(ACE_P1_GOAL_BITS, masks, ace_dist);
 }
 
 /// Forward flood: steps from `ace_start` pawn square (ACE index).
 pub fn fill_ace_dist_from_pawn(g: &GameState, ace_start: usize, ace_dist: &mut [u8; 81]) {
     let masks = DirMasks::from_ace_game(g);
+    fill_ace_dist_from_pawn_with_masks(ace_start, masks, ace_dist);
+}
+
+#[inline]
+pub fn fill_ace_dist_from_pawn_with_masks(
+    ace_start: usize,
+    masks: DirMasks,
+    ace_dist: &mut [u8; 81],
+) {
+    if ace_start >= 81 {
+        ace_dist.fill(255);
+        return;
+    }
     flood_scatter(flood_bit_sq(ace_start as u8), masks, ace_dist);
 }
 
