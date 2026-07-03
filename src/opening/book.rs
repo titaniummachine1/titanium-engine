@@ -357,6 +357,34 @@ const BOOK_LINES: &[BookLine] = &[
         priority: 118,
         stm_bias: 0,
     },
+    // Ishtar-vs-Ka recalled game: a3h e6h — a third Black reply to a3h (alongside
+    // h6h/c6h/d4v above). White's follow-up c3h then e3v is reported as a good
+    // line for White here (Ka reportedly weak in this branch). Priority kept
+    // below the stat-backed Ka lines above (which have measured P1 win rates)
+    // since this is a single recalled game, not aggregate self-play data — the
+    // full 24-ply line extends well past BOOK_MAX_PLY (10) and is out of scope
+    // for this hand-maintained book beyond ply 10.
+    BookLine {
+        name: "ishtar-vs-ka-a3h-e6h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h"],
+        reply: "e6h",
+        priority: 90,
+        stm_bias: 0,
+    },
+    BookLine {
+        name: "ishtar-vs-ka-a3h-e6h-c3h",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "e6h"],
+        reply: "c3h",
+        priority: 90,
+        stm_bias: 0,
+    },
+    BookLine {
+        name: "ishtar-vs-ka-a3h-e6h-c3h-e3v",
+        prefix: &["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "e6h", "c3h"],
+        reply: "e3v",
+        priority: 90,
+        stm_bias: 0,
+    },
     // After d3h, Black mirrors with c6h — Ka line 2: e6v continuation.
     BookLine {
         name: "ka-d3h-c6h-e6v",
@@ -793,6 +821,30 @@ mod tests {
             Some("e5"),
             "must avoid c3h trap; got {reply:?}"
         );
+    }
+
+    #[test]
+    fn ishtar_vs_ka_a3h_e6h_full_line_is_legal() {
+        // Full recalled game (Ishtar vs Ka, a3h e6h branch) replayed move-by-move;
+        // apply_algebraic panics on an illegal/malformed move, so this is a
+        // transcription check for the whole 24-ply line, not just the first 3
+        // plies the hand book can actually see (BOOK_MAX_PLY = 10).
+        replay(&[
+            "e2", "e8", "e3", "e7", "e4", "e6", "a3h", "e6h", "c3h", "e3v", "e5v", "d4v", "d5h",
+            "d2h", "c6h", "b2h", "b5v", "d6", "b4h", "c6", "e3", "c5", "d3", "d5",
+        ]);
+    }
+
+    #[test]
+    fn ishtar_vs_ka_a3h_e6h_continues_c3h() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "e6h"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("c3h"));
+    }
+
+    #[test]
+    fn ishtar_vs_ka_a3h_e6h_c3h_continues_e3v() {
+        let mut board = replay(&["e2", "e8", "e3", "e7", "e4", "e6", "a3h", "e6h", "c3h"]);
+        assert_eq!(lookup_text(&mut board).as_deref(), Some("e3v"));
     }
 
     #[test]

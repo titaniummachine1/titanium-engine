@@ -401,6 +401,60 @@ fn dist_lru_slot(wkey: u64, bits: usize) -> usize {
     (wkey.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - bits)) as usize
 }
 
+/// FxHash (the algorithm rustc itself uses for its internal maps): a
+/// non-cryptographic hasher for small POD keys. `std::collections::HashMap`
+/// defaults to SipHash-1-3, which costs ~100-300ns/lookup on a heterogeneous
+/// tuple — measured as a flat ~390ns/node floor in `evaluate_tail` regardless
+/// of position (wall count, search depth), the signature of hash overhead
+/// rather than real work. `cw_cache` keys are internal-only (never attacker
+/// controlled), so DoS-resistance buys nothing here.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline(always)]
+    fn add(&mut self, w: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ w).wrapping_mul(Self::SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.add(u64::from_ne_bytes(buf));
+        }
+    }
+    #[inline(always)]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline(always)]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline(always)]
+    fn write_i32(&mut self, i: i32) {
+        self.add(i as u64);
+    }
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+type FxBuildHasher = std::hash::BuildHasherDefault<FxHasher>;
+
 const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
@@ -1242,7 +1296,7 @@ pub struct TitaniumSearch {
     // certifier exists in node AND browser). Key = (lo, hi, side, wl0, wl1);
     // value = 1 proven (permanent, sound) / -work for a failure (richer retries
     // re-run; weaker-or-equal retries inherit the false).
-    cw_cache: std::collections::HashMap<(u32, u32, usize, i32, i32), i32>,
+    cw_cache: std::collections::HashMap<(u32, u32, usize, i32, i32), i32, FxBuildHasher>,
     cw_proven: u64,
     cw_calls: u64,
     cw_think_calls: u32,
@@ -1411,7 +1465,7 @@ impl TitaniumSearch {
             root_defense_diag: Vec::new(),
             race_scratch: None,
             race_outcome_stats: RaceOutcomeStats::default(),
-            cw_cache: std::collections::HashMap::new(),
+            cw_cache: std::collections::HashMap::default(),
             cw_proven: 0,
             cw_calls: 0,
             cw_think_calls: 0,
@@ -3325,6 +3379,7 @@ impl TitaniumSearch {
         // weights activates it, giving the net the combined CAT signal alongside the
         // atomic route/near/contested planes (so it needn't reconstruct CAT itself).
         if nw.cat_active {
+            let _cat_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_cat_heat);
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_impact_heatmap(&bridge.board);
                 let canonical = |sq: usize| if me == 0 { sq } else { NET_MIRC[sq] };
@@ -3341,30 +3396,33 @@ impl TitaniumSearch {
         // ws[14] legal-wall-count input is retired from live search. The cheap
         // remaining-wall counts are already present as scalar features.
         // ws[15]: opponent corridor width on their goal field (matches halfpw.py).
-        let width_opp = if self.net.route_active {
-            (if me == 0 {
-                width_in_layers(
-                    &self.d1_layers[self.dist1_idx],
-                    self.d1_layer_depth[self.dist1_idx],
-                    d_opp_u,
-                )
+        let width_opp = {
+            let _width_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_width_opp);
+            if self.net.route_active {
+                (if me == 0 {
+                    width_in_layers(
+                        &self.d1_layers[self.dist1_idx],
+                        self.d1_layer_depth[self.dist1_idx],
+                        d_opp_u,
+                    )
+                } else {
+                    width_in_layers(
+                        &self.d0_layers[self.dist0_idx],
+                        self.d0_layer_depth[self.dist0_idx],
+                        d_opp_u,
+                    )
+                }) as usize
+            } else if me == 0 {
+                self.d1[self.dist1_idx]
+                    .iter()
+                    .filter(|&&d| d as i32 == d_opp_i)
+                    .count()
             } else {
-                width_in_layers(
-                    &self.d0_layers[self.dist0_idx],
-                    self.d0_layer_depth[self.dist0_idx],
-                    d_opp_u,
-                )
-            }) as usize
-        } else if me == 0 {
-            self.d1[self.dist1_idx]
-                .iter()
-                .filter(|&&d| d as i32 == d_opp_i)
-                .count()
-        } else {
-            self.d0[self.dist0_idx]
-                .iter()
-                .filter(|&&d| d as i32 == d_opp_i)
-                .count()
+                self.d0[self.dist0_idx]
+                    .iter()
+                    .filter(|&&d| d as i32 == d_opp_i)
+                    .count()
+            }
         } as f64;
         out += ws[15] * width_opp;
         // ws[16]/ws[17] path-cross inputs are retired from live search. They
@@ -3437,6 +3495,7 @@ impl TitaniumSearch {
         w_opp_i: i32,
         hands_empty_loss_floor: bool,
     ) -> i32 {
+        let _tail_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_tail);
         // Integer centipawns (JS `out | 0` / halfpw `int(out)`).
         let mut ret = out as i32;
         // pathfix/RaceProof(c): certified-win floor (sound; lazy; memoized;
