@@ -1144,6 +1144,7 @@ fn emit_ace_progress(
     black_dist: u8,
     elapsed_ms: u64,
     #[cfg(feature = "wasm")] wasm_progress: Option<&mut Vec<String>>,
+    #[cfg(feature = "wasm")] wasm_cb: Option<&js_sys::Function>,
 ) {
     let json = ace_progress_json(
         engine_label,
@@ -1159,8 +1160,22 @@ fn emit_ace_progress(
         elapsed_ms,
     );
     #[cfg(feature = "wasm")]
-    if let Some(events) = wasm_progress {
-        events.push(json);
+    {
+        // Real live streaming: call straight into JS the moment this depth's
+        // progress is ready (same as ace::search::emit_ace_progress's f.call1
+        // -- this is what actually makes a card update mid-think instead of
+        // only at the end).
+        if let Some(f) = wasm_cb {
+            let _ = f.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str(&json),
+            );
+        }
+        // Kept as a fallback/replay source for go_threads_json's JS wrapper;
+        // harmless if the direct call above already delivered it live.
+        if let Some(events) = wasm_progress {
+            events.push(json);
+        }
     }
     #[cfg(not(feature = "wasm"))]
     {
@@ -1416,9 +1431,22 @@ pub struct TitaniumSearch {
     opening_book_attention: Option<Vec<i32>>,
     pending_opening_book_diag: Option<crate::titanium::opening_book::OpeningBookDiagnostics>,
     /// GitHub Pages: progress payloads buffered until wasm-bindgen releases the
-    /// exported `&mut self` borrow.
+    /// exported `&mut self` borrow. Retained as a fallback/replay path; real
+    /// live streaming now goes through `wasm_progress_cb` below (see it for
+    /// why the buffer-then-replay-after-think() approach alone left the site's
+    /// info cards frozen for the whole think, updating only once at the end).
     #[cfg(feature = "wasm")]
     wasm_progress: Vec<String>,
+    /// Direct JS callback invoked from `emit_stream_progress` during the
+    /// search itself (same pattern as `ace::search::AceSearch::wasm_progress`,
+    /// which is what makes ACE v13's card update live while Titanium's sat
+    /// frozen on "Thinking..." for the entire think -- Titanium had the
+    /// periodic emit hook (`check_time` -> `emit_stream_progress`, every
+    /// ~64K nodes / 100ms) but never actually invoked a JS function from it,
+    /// only buffered JSON strings for the `go_threads_json` JS wrapper to
+    /// replay in a burst after the whole blocking search call returned.
+    #[cfg(feature = "wasm")]
+    wasm_progress_cb: Option<js_sys::Function>,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -1588,7 +1616,14 @@ impl TitaniumSearch {
             pending_opening_book_diag: None,
             #[cfg(feature = "wasm")]
             wasm_progress: Vec::new(),
+            #[cfg(feature = "wasm")]
+            wasm_progress_cb: None,
         })
+    }
+
+    #[cfg(feature = "wasm")]
+    pub fn set_wasm_progress(&mut self, cb: Option<js_sys::Function>) {
+        self.wasm_progress_cb = cb;
     }
 
     /// Clear browser progress events before a new exported WASM search starts.
@@ -2600,6 +2635,8 @@ impl TitaniumSearch {
             elapsed_ms,
             #[cfg(feature = "wasm")]
             Some(&mut self.wasm_progress),
+            #[cfg(feature = "wasm")]
+            self.wasm_progress_cb.as_ref(),
         );
     }
 
@@ -2611,7 +2648,14 @@ impl TitaniumSearch {
                 return Err(TimeUp);
             }
         }
-        if (self.nodes & 1023) == 0 {
+        // Sampling the wall clock every 1024 nodes assumes nodes are cheap and
+        // roughly uniform cost. Under single-threaded browser WASM (no SIMD,
+        // heavier NNUE/CAT eval per node than native), a 1024-node batch can
+        // itself take multiple seconds — so a requested 1s/depth-N budget
+        // could overrun by however long that whole batch takes before the
+        // next check. Checking every 63 nodes instead keeps the worst-case
+        // overrun small regardless of per-node cost.
+        if (self.nodes & 63) == 0 {
             if Instant::now() > self.deadline {
                 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
                 if let Some(runtime) = self.lazy_runtime.as_ref() {
@@ -5030,6 +5074,8 @@ impl TitaniumSearch {
                         rt0.elapsed().as_millis() as u64,
                         #[cfg(feature = "wasm")]
                         Some(&mut self.wasm_progress),
+                        #[cfg(feature = "wasm")]
+                        self.wasm_progress_cb.as_ref(),
                     );
                 }
                 return ThinkResult {

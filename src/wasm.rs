@@ -405,6 +405,11 @@ impl WasmEngine {
     ) -> String {
         let stream = on_progress.is_some();
         self.search.clear_wasm_progress();
+        // Register the JS callback so the periodic in-search emit hook
+        // (check_time -> emit_stream_progress, every ~64K nodes/100ms) can
+        // call straight back into JS while thinking, instead of only
+        // buffering strings for a post-hoc replay once think() returns.
+        self.search.set_wasm_progress(on_progress);
         if self.search.g.winner() >= 0 {
             self.last_depth = 0;
             self.last_nodes = 0;
