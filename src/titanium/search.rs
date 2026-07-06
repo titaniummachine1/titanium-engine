@@ -465,9 +465,17 @@ const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 
-// Root-move width percent per worker: narrow-first for deepest lookahead.
-// Worker 0 = 10%, then 20%, 40%, and 60% for every subsequent worker.
-const LAZY_SMP_WIDTHS: [usize; 4] = [10, 20, 40, 60];
+// Root-move width percent per worker. Reverted from the "narrow-first"
+// schedule (worker 0 at just 10%, commit 3daf94c) -- that left main's
+// iterative deepening authoritative over only its top ~10% of root moves by
+// initial move-ordering guess, so a deep, confident-looking main search could
+// be completely blind to the true best move whenever ordering ranked it
+// outside that slice. Main now keeps almost the full root (95%, leaving a
+// small margin to skip only moves ordering is very confident are losing);
+// helpers narrow progressively for deeper per-move lookahead, floored at 40%
+// (not 20%) since helper results only ever matter as an emergency fallback
+// when main produces nothing (see lazy_smp_helper_partial).
+const LAZY_SMP_WIDTHS: [usize; 4] = [95, 80, 60, 40];
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 pub const LAZY_SMP_MAX_THREADS: usize = 16;
