@@ -225,11 +225,12 @@ fn emit_result(
         .iter()
         .map(|p| {
             format!(
-                "{{\"worker_id\":{},\"percent\":{},\"allowed\":{},\"root_moves\":{}}}",
+                "{{\"worker_id\":{},\"root_value_threshold_pct\":{},\"root_moves_before_filter\":{},\"root_moves_retained\":{},\"root_moves_retained_pct\":{:.1}}}",
                 p.worker_id,
-                p.root_width_percent,
-                p.allowed_root_moves(),
-                p.root_move_count
+                p.root_value_threshold_pct,
+                p.root_moves_before_filter,
+                p.root_move_count,
+                p.root_moves_retained_pct(),
             )
         })
         .collect::<Vec<_>>()

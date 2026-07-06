@@ -131,29 +131,175 @@ mod lazy_smp_tests {
         }
     }
 
+    /// `allowed_root_moves()` used to re-apply the CAT-heat threshold as a
+    /// move-count percentage on top of the already-filtered `root_move_count`,
+    /// so `unique.len() <= allowed` could fail even though the real search
+    /// (which uses `root_move_count` directly, not `allowed_root_moves()`)
+    /// never visited outside its actual retained set. This test now checks
+    /// the real invariants: visits resolve to real retained move IDs, unique
+    /// visit count never exceeds the real retained count, and retained sets
+    /// are monotonic by threshold (a stricter worker never keeps a move a
+    /// looser one dropped).
     #[test]
     fn root_filtering_limits_each_worker_to_its_width() {
         let mut search = fresh();
         let result = search.think_with_threads(1_000, 1, true, false, "titanium-v15", 5);
         assert_eq!(result.root_widths.len(), 5);
+        assert_eq!(result.root_move_ids.len(), 5);
+
+        let retained_sets: Vec<std::collections::HashSet<i16>> = result
+            .root_move_ids
+            .iter()
+            .map(|ids| ids.iter().copied().collect())
+            .collect();
+
         for plan in &result.root_widths {
             let visits = &result.root_visits[plan.worker_id];
-            let allowed = plan.allowed_root_moves();
-            assert!(
-                visits.iter().all(|&idx| idx < plan.root_move_count),
-                "worker {} visited outside root list of {}: {:?}",
-                plan.worker_id,
-                plan.root_move_count,
-                visits
-            );
+            let retained = &result.root_move_ids[plan.worker_id];
+            assert_eq!(retained.len(), plan.root_move_count);
+
+            for &idx in visits {
+                assert!(
+                    idx < retained.len(),
+                    "worker {} visited index {} outside its retained list of {}",
+                    plan.worker_id,
+                    idx,
+                    retained.len()
+                );
+            }
+
             let unique = visits
                 .iter()
                 .copied()
                 .collect::<std::collections::HashSet<_>>();
-            assert!(unique.len() <= allowed);
+            assert!(
+                unique.len() <= plan.root_move_count,
+                "worker {} visited {} unique root moves but only retained {}",
+                plan.worker_id,
+                unique.len(),
+                plan.root_move_count
+            );
+
+            // Real percentage, derived from real counts -- not re-derived
+            // from a move-count formula applied to the heat threshold.
+            let expected_pct = if plan.root_moves_before_filter == 0 {
+                0.0
+            } else {
+                100.0 * plan.root_move_count as f64 / plan.root_moves_before_filter as f64
+            };
+            assert!((plan.root_moves_retained_pct() - expected_pct).abs() < 1e-9);
+
             if plan.worker_id == 0 {
-                assert_eq!(plan.root_width_percent, 10);
+                assert_eq!(plan.root_value_threshold_pct, 20);
             }
+        }
+
+        // Monotonic superset across the whole pool: worker 0 (20%) retains a
+        // superset of worker 1 (30%), which retains a superset of every
+        // worker on the 40% floor (workers 2-4 here) -- chained pairwise
+        // since threshold is non-decreasing by worker_id in this schedule.
+        for pair in result.root_widths.windows(2) {
+            let looser = &retained_sets[pair[0].worker_id];
+            let stricter = &retained_sets[pair[1].worker_id];
+            if pair[0].root_value_threshold_pct <= pair[1].root_value_threshold_pct {
+                assert!(
+                    stricter.is_subset(looser),
+                    "worker {} (threshold {}) retained a move worker {} (threshold {}) dropped",
+                    pair[1].worker_id,
+                    pair[1].root_value_threshold_pct,
+                    pair[0].worker_id,
+                    pair[0].root_value_threshold_pct
+                );
+            }
+        }
+    }
+
+    /// Regression guard for the diagnostics-only cleanup: retained counts for
+    /// this exact 20-ply position were captured via CLI trace (`titanium
+    /// genmove --engine titanium-v16 --time 10 --threads 8`) as
+    /// [16,14,9,9,9,9,9,9]. `root_moves_before_filter` is 79 here -- that is
+    /// `root_moves_raw.len()` from `ordered_root_moves_snapshot` (already
+    /// past dead-zone/CAT-corridor root pruning upstream), NOT the naive
+    /// full-legal-move count (132, from plain `titanium moves`) which
+    /// includes moves this cleanup never had visibility into. This cleanup
+    /// touches naming, `allowed_root_moves()`, and diagnostics JSON only --
+    /// `lazy_smp_value_threshold_pct` and `lazy_smp_value_filtered_moves`
+    /// (the actual filtering logic) are untouched, so these counts must be
+    /// identical after the cleanup.
+    #[test]
+    fn root_filter_retained_counts_match_pre_cleanup_baseline_on_20ply_position() {
+        let moves = [
+            "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "e6h", "c3h", "g6h", "g3h", "c6h", "a3h",
+            "e5", "h4v", "h7h", "f5v", "a6h", "e4h", "c4v",
+        ];
+        let mut g = GameState::new();
+        for mv in moves {
+            g.make_move(crate::titanium::algebraic_to_move_id(mv));
+        }
+        let mut search = TitaniumSearch::grafted(g, Some(18));
+        let result = search.think_with_threads(1_000, 1, true, false, "titanium-v16", 8);
+
+        assert_eq!(result.root_widths.len(), 8);
+        let counts: Vec<usize> = result
+            .root_widths
+            .iter()
+            .map(|p| p.root_move_count)
+            .collect();
+        assert_eq!(
+            counts,
+            vec![16, 14, 9, 9, 9, 9, 9, 9],
+            "retained root move counts drifted from the pre-cleanup baseline"
+        );
+        for plan in &result.root_widths {
+            assert_eq!(
+                plan.root_moves_before_filter, 79,
+                "root_moves_raw count at this position drifted"
+            );
+        }
+    }
+
+    /// Every worker's threshold (from `lazy_smp_value_threshold_pct`) filters
+    /// from the SAME (root_moves, heat_by_id, max_heat) inputs, only
+    /// `threshold_pct` differs -- so a stricter threshold's kept set must be
+    /// a subset of a looser one's, UNLESS the stricter one hit the
+    /// "kept.is_empty() -> keep all" fallback (which can make it a superset
+    /// instead). This guards against the value-filter schedule silently
+    /// stopping being monotonic in width.
+    #[test]
+    fn value_filtered_moves_are_monotonic_by_threshold() {
+        let root_moves: Vec<i16> = (0..40).collect();
+        let mut heat_by_id = [0i32; 264];
+        // Deliberately non-uniform, non-monotonic-by-id heat so the test
+        // isn't accidentally satisfied by move ordering alone.
+        for (i, &mv) in root_moves.iter().enumerate() {
+            heat_by_id[mv as usize] = ((i * 37) % 200) as i32;
+        }
+        let max_heat = heat_by_id.iter().copied().max().unwrap();
+
+        let mut thresholds: Vec<i32> = (0..8).map(lazy_smp_value_threshold_pct).collect();
+        thresholds.sort_unstable();
+        thresholds.dedup();
+
+        let kept_sets: Vec<std::collections::HashSet<i16>> = thresholds
+            .iter()
+            .map(|&pct| {
+                lazy_smp_value_filtered_moves(&root_moves, &heat_by_id, max_heat, pct)
+                    .into_iter()
+                    .collect()
+            })
+            .collect();
+
+        for w in kept_sets.windows(2) {
+            let (looser, stricter) = (&w[0], &w[1]);
+            // The empty-kept-set fallback (`lazy_smp_value_filtered_moves`
+            // returning everything) is the only case allowed to break strict
+            // subset-ness; with this heat distribution no threshold empties
+            // out, so the invariant must hold exactly.
+            assert!(
+                stricter.is_subset(looser),
+                "a stricter threshold retained a move the looser one dropped: \
+                 looser={looser:?} stricter={stricter:?}"
+            );
         }
     }
 
@@ -161,9 +307,9 @@ mod lazy_smp_tests {
     fn helper_root_profiles_are_diversified() {
         let root_moves = (0..20).collect::<Vec<i16>>();
         let (main_moves, main_idx) =
-            TitaniumSearch::lazy_smp_profile_root_moves(&root_moves, 0, 20);
+            TitaniumSearch::lazy_smp_profile_root_moves(&root_moves, 0, 20, false);
         let (helper_moves, helper_idx) =
-            TitaniumSearch::lazy_smp_profile_root_moves(&root_moves, 1, 12);
+            TitaniumSearch::lazy_smp_profile_root_moves(&root_moves, 1, 12, false);
         assert_eq!(main_moves, root_moves);
         assert_eq!(main_idx, (0..20).collect::<Vec<_>>());
         assert_eq!(helper_moves.len(), 12);
@@ -268,6 +414,7 @@ mod lazy_smp_tests {
                 helper_completed_depths: Vec::new(),
                 root_widths: Vec::new(),
                 root_visits: Vec::new(),
+                root_move_ids: Vec::new(),
                 ms: 0,
                 white_dist: 0,
                 black_dist: 0,
@@ -475,7 +622,15 @@ const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 // helpers narrow progressively for deeper per-move lookahead, floored at 40%
 // (not 20%) since helper results only ever matter as an emergency fallback
 // when main produces nothing (see lazy_smp_helper_partial).
-const LAZY_SMP_WIDTHS: [usize; 4] = [95, 80, 60, 40];
+const LAZY_SMP_WIDTHS: [usize; 4] = [95, 80, 80, 80];
+
+// The very last worker (worker_id == threads - 1, when there are at least 3
+// threads so it's a distinct role from main and the uniform-80% helpers)
+// skips the percentage schedule entirely and searches only this many
+// root moves -- the top-N by move ordering. Its job isn't breadth, it's
+// squeezing maximum depth out of whatever the rest of the pool already
+// agrees are the most promising candidates.
+const LAZY_SMP_LAST_WORKER_TOP_N: usize = 3;
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 pub const LAZY_SMP_MAX_THREADS: usize = 16;
@@ -483,13 +638,85 @@ pub const LAZY_SMP_MAX_THREADS: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerPlan {
     pub worker_id: usize,
+    /// Root moves actually retained for this worker AFTER CAT-value filtering
+    /// (i.e. `filtered_by_worker[worker_id].len()`) -- this is the real count
+    /// the search runs with, not a count to be further percentage-cut.
     pub root_move_count: usize,
-    pub root_width_percent: usize,
+    /// Total legal root moves at this position BEFORE any per-worker filtering.
+    pub root_moves_before_filter: usize,
+    /// The CAT impact-heat cutoff (percent of the position's max root-move
+    /// heat) used to build `root_move_count` -- NOT a percent of move COUNT.
+    /// Renamed from `root_width_percent`, which the diagnostics printer and
+    /// `allowed_root_moves()` used to misread as a move-count percentage and
+    /// re-apply on top of the already-filtered count (main.rs's old `"allowed"`
+    /// JSON field, and the now-rewritten `root_filtering_limits_each_worker_to_its_width`
+    /// test, both computed a second, bogus cut this way).
+    pub root_value_threshold_pct: usize,
+    pub top_n_override: Option<usize>,
 }
 
 impl WorkerPlan {
+    /// Real number of root moves this worker searches. The CAT-value threshold
+    /// has already been applied when `root_move_count` was computed (see
+    /// `filtered_by_worker` in `think_lazy_smp`) -- this must NOT re-apply it
+    /// as a move-count percentage on top.
     pub fn allowed_root_moves(&self) -> usize {
-        lazy_smp_allowed_root_moves(self.root_move_count, self.root_width_percent)
+        if let Some(top_n) = self.top_n_override {
+            return top_n.max(1).min(self.root_move_count.max(1));
+        }
+        self.root_move_count
+    }
+
+    pub fn root_moves_retained_pct(&self) -> f64 {
+        if self.root_moves_before_filter == 0 {
+            return 0.0;
+        }
+        100.0 * self.root_move_count as f64 / self.root_moves_before_filter as f64
+    }
+}
+
+// EXPERIMENT (not the shipped schedule): per-worker root-move cutoff by CAT
+// impact-heat VALUE relative to the best root move's heat, not by move count.
+// A move survives worker `w` iff heat(move) >= pct[w]% * max(heat(any root
+// move)). This is a genuinely different criterion than LAZY_SMP_WIDTHS: in a
+// position with one dominant move it collapses hard (real tail-cut); in a
+// flat position where many moves are nearly as good it keeps most of them,
+// regardless of raw count. main=20% (only drop clearly-useless tail moves),
+// then progressively stricter per worker, floored at 40%.
+const LAZY_SMP_VALUE_THRESHOLD_PCTS: [i32; 4] = [20, 30, 40, 40];
+
+fn lazy_smp_value_threshold_pct(worker_id: usize) -> i32 {
+    LAZY_SMP_VALUE_THRESHOLD_PCTS
+        .get(worker_id)
+        .copied()
+        .unwrap_or(*LAZY_SMP_VALUE_THRESHOLD_PCTS.last().expect("non-empty"))
+}
+
+/// Keep only root moves whose CAT impact heat clears `threshold_pct`% of the
+/// best root move's heat. Falls back to keeping everything when there's no
+/// CAT signal at all (max_heat <= 0) -- absence of signal is not evidence a
+/// move is useless.
+fn lazy_smp_value_filtered_moves(
+    root_moves: &[i16],
+    heat_by_id: &[i32; 264],
+    max_heat: i32,
+    threshold_pct: i32,
+) -> Vec<i16> {
+    if max_heat <= 0 {
+        return root_moves.to_vec();
+    }
+    let kept: Vec<i16> = root_moves
+        .iter()
+        .copied()
+        .filter(|&m| {
+            let h = heat_by_id[m as usize].max(0);
+            h.saturating_mul(100) >= threshold_pct.saturating_mul(max_heat)
+        })
+        .collect();
+    if kept.is_empty() {
+        root_moves.to_vec()
+    } else {
+        kept
     }
 }
 
@@ -693,6 +920,10 @@ pub struct ThinkResult {
     pub helper_completed_depths: Vec<i32>,
     pub root_widths: Vec<WorkerPlan>,
     pub root_visits: Vec<Vec<usize>>,
+    /// Retained root move IDs per worker (index-parallel to `root_widths` /
+    /// `root_visits`) AFTER CAT-value filtering -- empty except from
+    /// `think_lazy_smp`, which is the only path that filters per worker.
+    pub root_move_ids: Vec<Vec<i16>>,
     pub ms: u64,
     pub white_dist: u8,
     pub black_dist: u8,
@@ -2187,13 +2418,20 @@ impl TitaniumSearch {
         root_moves: &[i16],
         worker_id: usize,
         allowed: usize,
+        force_top_k: bool,
     ) -> (Vec<i16>, Vec<usize>) {
         let len = root_moves.len();
         let allowed = allowed.min(len);
         if allowed == 0 {
             return (Vec::new(), Vec::new());
         }
-        if worker_id == 0 || len <= 1 {
+        // Main (worker 0) always gets the clean best-ordered slice. A worker
+        // pinned to `top_n_override` (e.g. the top-3 depth specialist) also
+        // needs the true top-K by move ordering, not the strided/offset
+        // diversification sample below -- diversifying a 3-move slice would
+        // silently swap out the actual best candidates for scattered ones,
+        // defeating the entire point of a "go deep on the best moves" worker.
+        if worker_id == 0 || force_top_k || len <= 1 {
             return (
                 root_moves[..allowed].to_vec(),
                 (0..allowed).collect::<Vec<_>>(),
@@ -5173,6 +5411,7 @@ impl TitaniumSearch {
                 helper_completed_depths: Vec::new(),
                 root_widths: Vec::new(),
                 root_visits: Vec::new(),
+                root_move_ids: Vec::new(),
                 ms: t0.elapsed().as_millis() as u64,
                 white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
                 black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
@@ -5287,6 +5526,7 @@ impl TitaniumSearch {
                     helper_completed_depths: Vec::new(),
                     root_widths: Vec::new(),
                     root_visits: Vec::new(),
+                    root_move_ids: Vec::new(),
                     ms: rt0.elapsed().as_millis() as u64,
                     white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
                     black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
@@ -5331,6 +5571,7 @@ impl TitaniumSearch {
                         helper_completed_depths: Vec::new(),
                         root_widths: Vec::new(),
                         root_visits: Vec::new(),
+                        root_move_ids: Vec::new(),
                         ms: rt0.elapsed().as_millis() as u64,
                         white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
                         black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
@@ -5423,6 +5664,7 @@ impl TitaniumSearch {
                 helper_completed_depths: Vec::new(),
                 root_widths: Vec::new(),
                 root_visits: Vec::new(),
+                root_move_ids: Vec::new(),
                 ms: t0.elapsed().as_millis() as u64,
                 white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
                 black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
@@ -5448,6 +5690,28 @@ impl TitaniumSearch {
         if root_moves_raw.is_empty() {
             return self.think(time_ms, max_depth, full, log, engine_label);
         }
+
+        // EXPERIMENT: CAT impact-heat per root move, computed once against
+        // the root position, used below to VALUE-filter (not count-filter)
+        // each worker's root move list.
+        let mut heat_by_id = [0i32; 264];
+        let mut max_heat = 0i32;
+        if let Some(bridge) = self.bridge.as_ref() {
+            let cat = crate::cat::build::build_impact_heatmap(&bridge.board);
+            for &mv_id in &root_moves_raw {
+                let mv = move_id_to_board(mv_id);
+                let h = move_impact_heat(mv, &cat);
+                heat_by_id[mv_id as usize] = h;
+                max_heat = max_heat.max(h);
+            }
+        }
+        let filtered_by_worker: Vec<Vec<i16>> = (0..threads)
+            .map(|worker_id| {
+                let pct = lazy_smp_value_threshold_pct(worker_id);
+                lazy_smp_value_filtered_moves(&root_moves_raw, &heat_by_id, max_heat, pct)
+            })
+            .collect();
+
         let root_position = self.g.clone();
         let shared_tt = self
             .shared_tt
@@ -5458,16 +5722,22 @@ impl TitaniumSearch {
         let plans: Vec<WorkerPlan> = (0..threads)
             .map(|worker_id| WorkerPlan {
                 worker_id,
-                root_move_count: root_moves_raw.len(),
-                root_width_percent: Self::lazy_smp_width_percent(worker_id),
+                root_move_count: filtered_by_worker[worker_id].len(),
+                root_moves_before_filter: root_moves_raw.len(),
+                root_value_threshold_pct: lazy_smp_value_threshold_pct(worker_id) as usize,
+                top_n_override: None,
             })
             .collect();
 
         #[cfg(not(target_arch = "wasm32"))]
         let mut helper_results: Vec<(usize, ThinkResult, Vec<usize>)> = Vec::new();
-        let main_allowed = plans[0].allowed_root_moves();
-        let (main_root_moves, main_visit_map) =
-            Self::lazy_smp_profile_root_moves(&root_moves_raw, 0, main_allowed);
+        let main_allowed = filtered_by_worker[0].len();
+        let (main_root_moves, main_visit_map) = Self::lazy_smp_profile_root_moves(
+            &filtered_by_worker[0],
+            0,
+            main_allowed,
+            true,
+        );
         self.install_lazy_smp_context(
             0,
             shared_tt.clone(),
@@ -5483,9 +5753,13 @@ impl TitaniumSearch {
             .skip(1)
             .map(|plan| {
                 let mut worker = self.fork_lazy_worker(&root_position);
-                let allowed = plan.allowed_root_moves();
-                let (profiled_root_moves, visit_map) =
-                    Self::lazy_smp_profile_root_moves(&root_moves_raw, plan.worker_id, allowed);
+                let allowed = filtered_by_worker[plan.worker_id].len();
+                let (profiled_root_moves, visit_map) = Self::lazy_smp_profile_root_moves(
+                    &filtered_by_worker[plan.worker_id],
+                    plan.worker_id,
+                    allowed,
+                    true,
+                );
                 worker.install_lazy_smp_context(
                     plan.worker_id,
                     shared_tt.clone(),
@@ -5638,6 +5912,7 @@ impl TitaniumSearch {
         main_result.helper_completed_depths = helper_depths;
         main_result.root_widths = plans;
         main_result.root_visits = root_visits;
+        main_result.root_move_ids = filtered_by_worker;
         main_result
     }
 
@@ -6096,6 +6371,7 @@ impl TitaniumSearch {
             helper_completed_depths: Vec::new(),
             root_widths: Vec::new(),
             root_visits: Vec::new(),
+            root_move_ids: Vec::new(),
             ms,
             white_dist,
             black_dist,

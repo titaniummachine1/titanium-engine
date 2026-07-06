@@ -1842,12 +1842,47 @@ fn run_genmove_ace(args: &[String]) {
                     .root_widths
                     .iter()
                     .map(|p| {
+                        let retained_ids = info
+                            .root_move_ids
+                            .get(p.worker_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let visited_idx = info
+                            .root_visits
+                            .get(p.worker_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let visited_unique = visited_idx
+                            .iter()
+                            .copied()
+                            .collect::<std::collections::HashSet<_>>()
+                            .len();
+                        let retained_json = retained_ids
+                            .iter()
+                            .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let visited_json = visited_idx
+                            .iter()
+                            .filter_map(|&i| retained_ids.get(i))
+                            .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
+                            .collect::<Vec<_>>()
+                            .join(",");
                         format!(
-                            "{{\"workerId\":{},\"percent\":{},\"allowed\":{},\"rootMoves\":{}}}",
+                            "{{\"workerId\":{},\"rootValueThresholdPct\":{},\"rootMovesBeforeFilter\":{},\"rootMovesRetained\":{},\"rootMovesRetainedPct\":{:.1},\"rootMovesVisitedUnique\":{},\"retainedMoveIds\":[{}],\"visitedMoveIds\":[{}],\"allowed\":{}}}",
                             p.worker_id,
-                            p.root_width_percent,
+                            p.root_value_threshold_pct,
+                            p.root_moves_before_filter,
+                            p.root_move_count,
+                            p.root_moves_retained_pct(),
+                            visited_unique,
+                            retained_json,
+                            visited_json,
+                            // Deprecated: kept only for backward compatibility with any
+                            // existing consumer of this field. Now always equals
+                            // rootMovesRetained -- it no longer re-applies the heat
+                            // threshold as a bogus move-count percentage.
                             p.allowed_root_moves(),
-                            p.root_move_count
                         )
                     })
                     .collect::<Vec<_>>()
