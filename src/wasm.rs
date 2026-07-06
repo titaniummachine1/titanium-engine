@@ -105,7 +105,7 @@ fn ace_params_from_mode(
     let eme = engine_mode.contains("pmc");
     crate::ace::AceParams {
         time_ms: (movetime_ms as u64).max(1),
-        max_depth: if max_depth > 0 { max_depth } else { 30 },
+        max_depth: if max_depth > 0 { max_depth } else { 128 },
         full: false,
         cat: false,
         ti_movegen,
@@ -389,31 +389,37 @@ impl WasmEngine {
         &mut self,
         movetime_ms: u32,
         _max_nodes: u32,
+        max_depth: i32,
         on_progress: Option<js_sys::Function>,
     ) -> String {
-        self.go_threads(movetime_ms, _max_nodes, 1, on_progress)
+        self.go_threads(movetime_ms, _max_nodes, max_depth, 1, on_progress)
     }
 
     pub fn go_threads(
         &mut self,
         movetime_ms: u32,
         _max_nodes: u32,
+        max_depth: i32,
         threads: u32,
         on_progress: Option<js_sys::Function>,
     ) -> String {
         let stream = on_progress.is_some();
-        self.search.set_wasm_progress(on_progress.clone());
+        self.search.clear_wasm_progress();
         if self.search.g.winner() >= 0 {
             self.last_depth = 0;
             self.last_nodes = 0;
             self.last_stop_reason = "terminal";
             return "(none)".to_string();
         }
+        // <=0 means "no explicit cap" — 128 is effectively unbounded (the
+        // search's real ceiling is MAX_PLY=64 recursion depth regardless);
+        // an explicit positive value is honored up to that same hard ceiling.
+        let effective_depth = if max_depth > 0 { max_depth.min(64) } else { 128 };
         let thread_count = usize::try_from(threads.max(1)).unwrap_or(1);
         #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         let result = self.search.think_with_threads(
             (movetime_ms as u64).max(1),
-            30,
+            effective_depth,
             true,
             stream,
             &self.engine_label,
@@ -428,21 +434,18 @@ impl WasmEngine {
             self.search.set_cat_lmr_worker_profile(0);
             self.search.think(
                 (movetime_ms as u64).max(1),
-                30,
+                effective_depth,
                 true,
                 stream,
                 &self.engine_label,
             )
         };
-        self.search.set_wasm_progress(None);
         self.last_depth = result.depth;
         self.last_nodes = result.nodes;
         self.last_stop_reason = result.stop_reason;
         if stream {
-            if let Some(f) = on_progress.as_ref() {
-                let json = think_result_progress_json(&self.engine_label, &result);
-                let _ = f.call1(&JsValue::NULL, &JsValue::from_str(&json));
-            }
+            let json = think_result_progress_json(&self.engine_label, &result);
+            self.search.queue_wasm_progress(json);
         }
         if result.mv == TITANIUM_NO_MOVE {
             "(none)".to_string()
@@ -455,16 +458,26 @@ impl WasmEngine {
         &mut self,
         movetime_ms: u32,
         _max_nodes: u32,
+        max_depth: i32,
         threads: u32,
         on_progress: Option<js_sys::Function>,
     ) -> String {
-        let best = self.go_threads(movetime_ms, _max_nodes, threads, on_progress);
+        let best = self.go_threads(movetime_ms, _max_nodes, max_depth, threads, on_progress);
+        let progress_events = self.search.take_wasm_progress();
+        let mut progress_json = String::new();
+        for (i, event) in progress_events.iter().enumerate() {
+            if i > 0 {
+                progress_json.push(',');
+            }
+            progress_json.push_str(event);
+        }
         format!(
-            "{{\"move\":{},\"depth\":{},\"nodes\":{},\"stopReason\":{}}}",
+            "{{\"move\":{},\"depth\":{},\"nodes\":{},\"stopReason\":{},\"progress\":[{}]}}",
             json_string(&best),
             self.last_depth,
             self.last_nodes,
-            json_string(self.last_stop_reason)
+            json_string(self.last_stop_reason),
+            progress_json
         )
     }
 

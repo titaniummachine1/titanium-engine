@@ -134,9 +134,9 @@ pub fn run_titanium_session_stdio(engine_flag: &str, threads: usize) {
                 let time_ms = (time_sec * 1000.0).max(1.0) as u64;
                 #[cfg(not(target_arch = "wasm32"))]
                 let result =
-                    search.think_with_threads(time_ms, 30, false, true, engine_flag, threads);
+                    search.think_with_threads(time_ms, 128, false, true, engine_flag, threads);
                 #[cfg(target_arch = "wasm32")]
-                let result = search.think(time_ms, 30, false, true, engine_flag);
+                let result = search.think(time_ms, 128, false, true, engine_flag);
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     let helper_nodes = result

@@ -89,7 +89,7 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                 search.set_position(g);
             }
             Cmd::GoTimed(time_ms) => {
-                let r = search.think(time_ms, 30, false, true, label);
+                let r = search.think(time_ms, 128, false, true, label);
                 last_score = r.score;
                 let _ = tx.send(Reply::BestMove(r.mv));
             }
@@ -103,7 +103,7 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                 search.set_pondering(true);
                 let mut last_mv = TITANIUM_NO_MOVE;
                 loop {
-                    let r = search.think(100, 30, false, false, label);
+                    let r = search.think(100, 128, false, false, label);
                     if r.mv != TITANIUM_NO_MOVE {
                         last_mv = r.mv;
                         last_score = r.score;
@@ -119,7 +119,7 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                             // Exit ponder mode so the real think does one normal
                             // tt_gen advance + history halving and then runs.
                             search.set_pondering(false);
-                            let r2 = search.think(time_ms, 30, false, true, label);
+                            let r2 = search.think(time_ms, 128, false, true, label);
                             last_score = r2.score;
                             let _ = tx.send(Reply::BestMove(r2.mv));
                             break;
@@ -128,7 +128,7 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                             search.set_pondering(false);
                             search.set_position(new_game);
                             search.decay_history_by_surprise(last_score);
-                            let r2 = search.think(time_ms, 30, false, true, label);
+                            let r2 = search.think(time_ms, 128, false, true, label);
                             last_score = r2.score;
                             let _ = tx.send(Reply::BestMove(r2.mv));
                             break;
@@ -148,13 +148,13 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                 let _ = tx.send(Reply::BestMove(TITANIUM_NO_MOVE));
             }
             Cmd::PonderHit(time_ms) => {
-                let r = search.think(time_ms, 30, false, true, label);
+                let r = search.think(time_ms, 128, false, true, label);
                 last_score = r.score;
                 let _ = tx.send(Reply::BestMove(r.mv));
             }
             Cmd::MoveMiss { new_game, time_ms } => {
                 search.set_position(new_game);
-                let r = search.think(time_ms, 30, false, true, label);
+                let r = search.think(time_ms, 128, false, true, label);
                 last_score = r.score;
                 let _ = tx.send(Reply::BestMove(r.mv));
             }

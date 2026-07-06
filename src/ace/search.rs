@@ -1491,7 +1491,7 @@ impl AceSearch {
         let mut last_pawn_best: i16 = -1;
         let mut last_pawn_score: i32 = i32::MIN;
         let mut depth_log: Vec<AceDepthLogEntry> = Vec::new();
-        let max_depth = if max_depth > 0 { max_depth } else { 30 };
+        let max_depth = if max_depth > 0 { max_depth } else { 128 };
 
         for d in 1..=max_depth {
             if d > 1 && Self::ace_over_time_budget(t0, time_ms, last_score) {

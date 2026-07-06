@@ -1,4 +1,4 @@
-//! ACE v10 HalfPW net — weights from `net_weights.bin` (H=32 NET_DATA blob).
+//! ACE v10 HalfPW net — weights from `net_weights.bin`.
 //!
 //! Philosophy: NN = geometric prior, search = tactical proof. See `field_planes.rs`.
 //!
@@ -7,37 +7,43 @@
 //!   `net_weights_frozen.bin` — pinned v13 baseline (ti-pure anchor + v15-frozen)
 //!   `net_weights_medium.bin` — browser Medium tier, also used by native proxy
 //!
-//! Blob layout (little-endian f64):
-//!   Wskip[20] B1[32] W2[32] W1C[36864] PO[2592] PX[2592]
+//! Blob layout (little-endian):
+//!   NetH[1 x u64]  Wskip[20] B1[NetH] W2[NetH] W1C[9*128*NetH] PO[81*NetH] PX[81*NetH]
 //!   goal_inv_p0, goal_inv_p1, pawn_fwd_p0, pawn_fwd_p1,
 //!   corridor_delta_p0, corridor_delta_p1, path_cross_p0, path_cross_p1,
-//!   choke_p0, choke_p1, contested  (each 81×32 except contested is shared)
+//!   choke_p0, choke_p1, contested  (each 81, NetH-independent)
+//!
+//! `NetH` is an explicit 8-byte header read ONCE at cold start (see `net()` /
+//! `net_frozen()` / `net_medium()`, all `OnceLock`-backed) -- NOT inferred from
+//! blob length, NOT re-checked per eval call. This lets a differently-sized
+//! HalfPW (produced by e.g. `training/tools/net2net_widen.py`) load and run
+//! with zero source edits or rebuilds, as long as its width fits `MAX_NET_H`.
+//! Hot-path arrays (`b1`, `w2`, and the per-search accumulators in
+//! `search.rs`) are fixed-size `[f64; MAX_NET_H]` for stack allocation and
+//! predictable codegen; only the first `h` slots are ever populated/read.
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
-pub const NET_H: usize = 32;
+
+/// Upper bound on hidden width any loaded net may declare. Bump this (and
+/// rebuild) only if an experiment needs a wider net than this allows --
+/// everything else adapts automatically from the blob's own header.
+pub const MAX_NET_H: usize = 256;
 pub const WSKIP_LEN: usize = 20;
-const W1C_LEN: usize = 9 * 128 * NET_H;
-const PO_LEN: usize = 81 * NET_H;
-const PX_LEN: usize = 81 * NET_H;
 const FIELD_PLANE_LEN: usize = 81;
 const FIELD_PLANE_SETS: usize = 5;
-/// Legacy blob size: the 5 route field planes only.
-pub const NET_WEIGHT_F64S: usize =
-    WSKIP_LEN + NET_H + NET_H + W1C_LEN + PO_LEN + PX_LEN + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
-/// Retraining-ready blob size: adds ONE `cat_heat` plane (the combined CAT impact
-/// heatmap as a direct net input, alongside the atomic route/near/contested planes
-/// so the net needn't reconstruct CAT from its parts). Current weights files are the
-/// legacy size; the loader zero-pads `cat_heat`, so the live net is unaffected until
-/// a retrain ships a blob of this larger size. New planes (raw distance fields,
-/// extra path-set bands) extend here the same way.
-pub const NET_WEIGHT_F64S_CAT: usize = NET_WEIGHT_F64S + FIELD_PLANE_LEN;
+const H_HEADER_LEN: usize = 8;
+
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("net_weights_frozen.bin");
 static NET_MEDIUM_BYTES: &[u8] = include_bytes!("net_weights_medium.bin");
+
 pub struct Net {
+    /// Active hidden width for THIS loaded net (<= MAX_NET_H). Everything
+    /// downstream (search.rs eval) loops `0..h`, never a compile-time NET_H.
+    pub h: usize,
     pub ws: [f64; WSKIP_LEN],
-    pub b1: [f64; NET_H],
-    pub w2: [f64; NET_H],
+    pub b1: [f64; MAX_NET_H],
+    pub w2: [f64; MAX_NET_H],
     pub w1c: Vec<f64>,
     pub po: Vec<f64>,
     pub px: Vec<f64>,
@@ -60,6 +66,7 @@ pub struct Net {
     pub cat_heat: Vec<f64>,
     pub cat_active: bool,
 }
+
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
@@ -69,21 +76,47 @@ fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
     }
     out
 }
+
+fn read_h_header(bytes: &[u8]) -> usize {
+    assert!(
+        bytes.len() >= H_HEADER_LEN,
+        "net_weights blob too short to hold NET_H header"
+    );
+    let chunk: [u8; 8] = bytes[0..H_HEADER_LEN].try_into().unwrap();
+    let h = u64::from_le_bytes(chunk) as usize;
+    assert!(
+        h > 0 && h <= MAX_NET_H,
+        "net_weights NET_H header = {h}, out of range (1..={MAX_NET_H}); \
+         bump titanium::net::MAX_NET_H and rebuild if this is intentional"
+    );
+    h
+}
+
 fn load_net_from_bytes(bytes: &[u8]) -> Net {
+    let h = read_h_header(bytes);
+    let mut offset = H_HEADER_LEN;
+
     // Accept the legacy blob (5 route planes) OR the retraining-ready blob that
     // additionally carries the `cat_heat` plane. Legacy → cat_heat zero-padded.
-    let has_cat = bytes.len() == NET_WEIGHT_F64S_CAT * 8;
+    let payload_f64s_no_cat =
+        WSKIP_LEN + h + h + 9 * 128 * h + 81 * h + 81 * h + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
+    let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
+    let expected_cat = expected_no_cat + FIELD_PLANE_LEN * 8;
+    let has_cat = bytes.len() == expected_cat;
     assert!(
-        bytes.len() == NET_WEIGHT_F64S * 8 || has_cat,
-        "net_weights blob size mismatch — run training/freeze_baseline_weights.py"
+        bytes.len() == expected_no_cat || has_cat,
+        "net_weights blob size mismatch for declared NET_H={h} \
+         (got {} bytes, expected {expected_no_cat} or {expected_cat}) — \
+         run training/freeze_baseline_weights.py",
+        bytes.len()
     );
-    let mut offset = 0;
+
     let ws_v = read_f64s(bytes, &mut offset, WSKIP_LEN);
-    let b1_v = read_f64s(bytes, &mut offset, NET_H);
-    let w2_v = read_f64s(bytes, &mut offset, NET_H);
-    let w1c = read_f64s(bytes, &mut offset, W1C_LEN);
-    let po = read_f64s(bytes, &mut offset, PO_LEN);
-    let px = read_f64s(bytes, &mut offset, PX_LEN);
+    let b1_v = read_f64s(bytes, &mut offset, h);
+    let w2_v = read_f64s(bytes, &mut offset, h);
+    let w1c = read_f64s(bytes, &mut offset, 9 * 128 * h);
+    let po = read_f64s(bytes, &mut offset, 81 * h);
+    let px = read_f64s(bytes, &mut offset, 81 * h);
     let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
     let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
     let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
@@ -114,10 +147,15 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
             route_bybit[turn][4][bit] = route_contested[canon];
         }
     }
+    let mut b1 = [0.0f64; MAX_NET_H];
+    let mut w2 = [0.0f64; MAX_NET_H];
+    b1[..h].copy_from_slice(&b1_v);
+    w2[..h].copy_from_slice(&w2_v);
     Net {
+        h,
         ws: ws_v.try_into().unwrap(),
-        b1: b1_v.try_into().unwrap(),
-        w2: w2_v.try_into().unwrap(),
+        b1,
+        w2,
         w1c,
         po,
         px,
@@ -132,6 +170,7 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         cat_active,
     }
 }
+
 /// Training / deployed weights (`net_weights.bin`, overridable via `TITANIUM_NET_WEIGHTS_PATH`).
 pub fn net() -> &'static Net {
     static NET: OnceLock<Net> = OnceLock::new();
@@ -159,13 +198,22 @@ pub fn frozen_weights_sha256() -> [u8; 32] {
     Sha256::digest(NET_FROZEN_BYTES).into()
 }
 
-pub const NET_WEIGHT_BYTE_LEN: usize = NET_WEIGHT_F64S * 8;
-
 static NET_MEDIUM: OnceLock<Net> = OnceLock::new();
 
 /// Runtime medium-tier weights (fetched by the browser worker).
 pub fn install_medium_weights(bytes: &[u8]) -> Result<(), &'static str> {
-    if bytes.len() != NET_WEIGHT_BYTE_LEN && bytes.len() != NET_WEIGHT_F64S_CAT * 8 {
+    if bytes.len() < H_HEADER_LEN {
+        return Err("medium weights too short for NET_H header");
+    }
+    let h = u64::from_le_bytes(bytes[0..H_HEADER_LEN].try_into().unwrap()) as usize;
+    if h == 0 || h > MAX_NET_H {
+        return Err("medium weights NET_H header out of range");
+    }
+    let payload_f64s_no_cat =
+        WSKIP_LEN + h + h + 9 * 128 * h + 81 * h + 81 * h + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
+    let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
+    let expected_cat = expected_no_cat + FIELD_PLANE_LEN * 8;
+    if bytes.len() != expected_no_cat && bytes.len() != expected_cat {
         return Err("medium weights size mismatch");
     }
     let net = load_net_from_bytes(bytes);

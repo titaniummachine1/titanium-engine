@@ -110,7 +110,7 @@ impl Default for AceParams {
     fn default() -> Self {
         Self {
             time_ms: 4000,
-            max_depth: 30,
+            max_depth: 128,
             full: false,
             cat: false,
             ti_movegen: false,

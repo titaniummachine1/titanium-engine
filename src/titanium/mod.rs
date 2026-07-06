@@ -148,7 +148,7 @@ impl Default for TitaniumParams {
     fn default() -> Self {
         Self {
             time_ms: 4000,
-            max_depth: 30,
+            max_depth: 128,
             threads: 1,
             full: false,
             cat: false,

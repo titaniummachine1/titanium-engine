@@ -124,7 +124,7 @@ pub fn run_ace_session_stdio(engine_flag: &str) {
                 }
                 let time_sec: f64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(4.0);
                 let time_ms = (time_sec * 1000.0).max(1.0) as u64;
-                let result = search.think(time_ms, 30, false, true, engine_flag);
+                let result = search.think(time_ms, 128, false, true, engine_flag);
                 if result.mv == super::ACE_NO_MOVE {
                     let _ = writeln!(stdout, "bestmove (none)");
                 } else {

@@ -46,7 +46,7 @@ use crate::search::v16_lmr::{
 };
 use crate::titanium::certify::{certify, CertifyOpts};
 use crate::titanium::game::{GameState, ZOBRIST};
-use crate::titanium::net::{net, net_frozen, Net, NET_BKT, NET_H, NET_MIRC, NET_MIRS};
+use crate::titanium::net::{net, net_frozen, MAX_NET_H, Net, NET_BKT, NET_MIRC, NET_MIRS};
 use crate::titanium::packed_state::FEATURE_SCHEMA;
 use crate::titanium::race::{
     race_outcome_with_dist, solve_race_config, RaceBound, RaceOutcomeStats, RaceScratch, RACE_MATE,
@@ -722,7 +722,7 @@ pub struct ReductionProbeEvent {
     pub thread_aggression_percent: i32,
     pub score: i32,
     pub nodes: u64,
-    pub hidden: [f64; NET_H],
+    pub hidden: [f64; MAX_NET_H],
     /// Total legal moves generated at this node (enables rank_percentile computation).
     pub total_legal_moves: usize,
     /// Raw history-table score for this wall move (proxy for ordering confidence).
@@ -834,21 +834,60 @@ mod score_label_tests {
             f1.nodes
         );
 
-        let loss_dtms: Vec<i32> = pawn_entries
+        // Stubborn-loser policy (replaces pure DTM-maximization): among proven-loss
+        // root moves, never prefer one that worsens our own distance-to-goal over
+        // one that doesn't; among those tied on that, maximize the opponent's
+        // distance-to-goal; only tie-break by sprinting (minimizing our own
+        // distance) once the opponent's distance can't be improved on further.
+        let loss_entries: Vec<&RootDefenseDiag> = result
+            .root_defense_diag
             .iter()
-            .filter_map(|e| proven_score_dtm(e.search_score))
+            .filter(|e| is_proven_loss_score(e.search_score))
             .collect();
-        let max_dtm = *loss_dtms.iter().max().expect("pawn loss dtms");
-        assert_eq!(
-            proven_score_dtm(result.score),
-            Some(max_dtm),
-            "selected move must maximize survival DTM"
+        assert!(
+            !loss_entries.is_empty(),
+            "expected at least one proven-loss root move"
         );
-        assert_eq!(
-            move_id_to_algebraic(result.mv),
-            "h1",
-            "h1 is the longest proven loss among pawn moves at full depth"
-        );
+
+        let non_worsening: Vec<&RootDefenseDiag> = loss_entries
+            .iter()
+            .copied()
+            .filter(|e| e.own_dist_after <= e.own_dist_before)
+            .collect();
+        let pool: &Vec<&RootDefenseDiag> = if non_worsening.is_empty() {
+            &loss_entries
+        } else {
+            &non_worsening
+        };
+        let best_opp_dist = pool.iter().map(|e| e.opp_dist_after).max().unwrap();
+        let best_own_dist = pool
+            .iter()
+            .filter(|e| e.opp_dist_after == best_opp_dist)
+            .map(|e| e.own_dist_after)
+            .min()
+            .unwrap();
+
+        if is_proven_loss_score(result.score) {
+            let chosen = result
+                .root_defense_diag
+                .iter()
+                .find(|e| e.mv == result.mv)
+                .expect("selected move must be in the defense diag");
+            if !non_worsening.is_empty() {
+                assert!(
+                    chosen.own_dist_after <= chosen.own_dist_before,
+                    "must not select a move that worsens our own distance-to-goal when an alternative avoids it"
+                );
+            }
+            assert_eq!(
+                chosen.opp_dist_after, best_opp_dist,
+                "selected move must maximize the opponent's distance-to-goal among non-worsening moves"
+            );
+            assert_eq!(
+                chosen.own_dist_after, best_own_dist,
+                "tie-break must sprint (minimize our own distance-to-goal)"
+            );
+        }
     }
 }
 
@@ -920,11 +959,23 @@ pub fn score_result_class(score: i32) -> &'static str {
     }
 }
 
-/// Selection key for lost-position root defense (higher = preferred).
+/// Selection key for lost-position root defense (higher = preferred). Loss
+/// candidates rank by the stubborn-loser priorities (see
+/// `better_defense_candidate`): never worsen own distance-to-goal, then
+/// maximize the opponent's distance-to-goal, then sprint (minimize own
+/// distance). This key is display-only (JSON diag); the real tie-break logic
+/// lives in `better_defense_candidate`.
 #[inline]
-pub fn defense_selection_key(score: i32, static_eval: i32) -> i32 {
+pub fn defense_selection_key(
+    score: i32,
+    static_eval: i32,
+    own_worsens: bool,
+    own_dist_after: i32,
+    opp_dist_after: i32,
+) -> i32 {
     if is_proven_loss_score(score) {
-        -1_000_000 + proven_score_dtm(score).unwrap_or(0)
+        let worsen_penalty = if own_worsens { -1_000_000 } else { 0 };
+        -2_000_000 + worsen_penalty + opp_dist_after * 100 - own_dist_after
     } else if is_proven_win_score(score) {
         1_000_000 - proven_score_dtm(score).unwrap_or(0)
     } else {
@@ -932,13 +983,26 @@ pub fn defense_selection_key(score: i32, static_eval: i32) -> i32 {
     }
 }
 
+/// Stubborn-loser root move selection: when the root is a proven loss, never
+/// pick a move that makes our own distance-to-goal worse than the position
+/// already searched (no backward shuffling or wasted walls just because a
+/// jump looks scary) -- among moves that hold our own distance, prefer
+/// whichever maximizes the opponent's distance-to-goal (delay them when we
+/// can), and if the opponent's distance can't be improved on, sprint (pick
+/// whichever leaves us closest to our own goal).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn better_defense_candidate(
     score: i32,
     static_eval: i32,
+    own_dist_before: i32,
+    own_dist_after: i32,
+    opp_dist_after: i32,
     order: usize,
     best_score: i32,
     best_static: i32,
+    best_own_dist_after: i32,
+    best_opp_dist_after: i32,
     best_order: usize,
 ) -> bool {
     if best_score == i32::MIN {
@@ -950,10 +1014,16 @@ fn better_defense_candidate(
         return !loss;
     }
     if loss {
-        let dtm = proven_score_dtm(score).unwrap_or(0);
-        let best_dtm = proven_score_dtm(best_score).unwrap_or(0);
-        if dtm != best_dtm {
-            return dtm > best_dtm;
+        let worsens = own_dist_after > own_dist_before;
+        let best_worsens = best_own_dist_after > own_dist_before;
+        if worsens != best_worsens {
+            return !worsens;
+        }
+        if opp_dist_after != best_opp_dist_after {
+            return opp_dist_after > best_opp_dist_after;
+        }
+        if own_dist_after != best_own_dist_after {
+            return own_dist_after < best_own_dist_after;
         }
     } else if score != best_score {
         return score > best_score;
@@ -975,6 +1045,9 @@ pub struct RootDefenseDiag {
     pub static_eval: i32,
     pub nodes: u64,
     pub selection_key: i32,
+    pub own_dist_before: i32,
+    pub own_dist_after: i32,
+    pub opp_dist_after: i32,
 }
 
 pub fn format_root_defense_diag_json(entries: &[RootDefenseDiag]) -> String {
@@ -989,7 +1062,7 @@ pub fn format_root_defense_diag_json(entries: &[RootDefenseDiag]) -> String {
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string());
         out.push_str(&format!(
-            "{{\"move\":\"{mv}\",\"fullDepthSearched\":{},\"childDepthUsed\":{},\"resultClass\":\"{}\",\"dtm\":{dtm},\"searchScore\":{},\"staticEval\":{},\"nodes\":{},\"finalSelectionKey\":{}}}",
+            "{{\"move\":\"{mv}\",\"fullDepthSearched\":{},\"childDepthUsed\":{},\"resultClass\":\"{}\",\"dtm\":{dtm},\"searchScore\":{},\"staticEval\":{},\"nodes\":{},\"finalSelectionKey\":{},\"ownDistBefore\":{},\"ownDistAfter\":{},\"oppDistAfter\":{}}}",
             e.full_depth_searched,
             e.child_depth_used,
             e.result_class,
@@ -997,6 +1070,9 @@ pub fn format_root_defense_diag_json(entries: &[RootDefenseDiag]) -> String {
             e.static_eval,
             e.nodes,
             e.selection_key,
+            e.own_dist_before,
+            e.own_dist_after,
+            e.opp_dist_after,
         ));
     }
     out.push(']');
@@ -1058,16 +1134,6 @@ fn ace_progress_json(
     )
 }
 
-#[cfg(feature = "wasm")]
-fn emit_ace_progress_wasm(json: &str, wasm_cb: Option<&js_sys::Function>) {
-    if let Some(f) = wasm_cb {
-        let _ = f.call1(
-            &wasm_bindgen::JsValue::NULL,
-            &wasm_bindgen::JsValue::from_str(json),
-        );
-    }
-}
-
 fn emit_ace_progress(
     engine_label: &str,
     depth_log: &[AceDepthLogEntry],
@@ -1077,7 +1143,7 @@ fn emit_ace_progress(
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
-    #[cfg(feature = "wasm")] wasm_cb: Option<&js_sys::Function>,
+    #[cfg(feature = "wasm")] wasm_progress: Option<&mut Vec<String>>,
 ) {
     let json = ace_progress_json(
         engine_label,
@@ -1093,7 +1159,9 @@ fn emit_ace_progress(
         elapsed_ms,
     );
     #[cfg(feature = "wasm")]
-    emit_ace_progress_wasm(&json, wasm_cb);
+    if let Some(events) = wasm_progress {
+        events.push(json);
+    }
     #[cfg(not(feature = "wasm"))]
     {
         eprintln!("info json {json}");
@@ -1118,9 +1186,9 @@ pub struct EvalParityTrace {
     pub route_out: f64,
     pub cat_out: f64,
     pub width_contrib: f64,
-    pub wall_acc: [f64; NET_H],
-    pub hidden_pre: [f64; NET_H],
-    pub hidden_clip: [f64; NET_H],
+    pub wall_acc: [f64; MAX_NET_H],
+    pub hidden_pre: [f64; MAX_NET_H],
+    pub hidden_clip: [f64; MAX_NET_H],
     pub neural_out: f64,
     pub eval: i32,
 }
@@ -1207,8 +1275,8 @@ pub struct TitaniumSearch {
     dir_masks_key_hi: u32,
     dir_masks_cache: DirMasks,
     // HalfPW accumulator cache
-    np_acc0: [f64; NET_H],
-    np_acc1: [f64; NET_H],
+    np_acc0: [f64; MAX_NET_H],
+    np_acc1: [f64; MAX_NET_H],
     np_hbits: u64,
     np_vbits: u64,
     np_b0: i32,
@@ -1347,9 +1415,10 @@ pub struct TitaniumSearch {
     opening_book_order: Option<Vec<i16>>,
     opening_book_attention: Option<Vec<i32>>,
     pending_opening_book_diag: Option<crate::titanium::opening_book::OpeningBookDiagnostics>,
-    /// GitHub Pages: live `info json` payloads forwarded to the browser worker.
+    /// GitHub Pages: progress payloads buffered until wasm-bindgen releases the
+    /// exported `&mut self` borrow.
     #[cfg(feature = "wasm")]
-    wasm_progress: Option<js_sys::Function>,
+    wasm_progress: Vec<String>,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -1422,8 +1491,8 @@ impl TitaniumSearch {
             dir_masks_key_lo: u32::MAX,
             dir_masks_key_hi: u32::MAX,
             dir_masks_cache: DirMasks::default(),
-            np_acc0: [0.0; NET_H],
-            np_acc1: [0.0; NET_H],
+            np_acc0: [0.0; MAX_NET_H],
+            np_acc1: [0.0; MAX_NET_H],
             np_hbits: 0,
             np_vbits: 0,
             np_b0: -1,
@@ -1518,14 +1587,27 @@ impl TitaniumSearch {
             opening_book_attention: None,
             pending_opening_book_diag: None,
             #[cfg(feature = "wasm")]
-            wasm_progress: None,
+            wasm_progress: Vec::new(),
         })
     }
 
-    /// Wire browser progress callback (`go(..., on_progress)` on GitHub Pages).
+    /// Clear browser progress events before a new exported WASM search starts.
     #[cfg(feature = "wasm")]
-    pub fn set_wasm_progress(&mut self, cb: Option<js_sys::Function>) {
-        self.wasm_progress = cb;
+    pub fn clear_wasm_progress(&mut self) {
+        self.wasm_progress.clear();
+    }
+
+    /// Queue one browser progress event while the exported WASM method still
+    /// owns `&mut self`; JS drains the buffer after the method returns.
+    #[cfg(feature = "wasm")]
+    pub fn queue_wasm_progress(&mut self, json: String) {
+        self.wasm_progress.push(json);
+    }
+
+    /// Take buffered browser progress events after a WASM search returns.
+    #[cfg(feature = "wasm")]
+    pub fn take_wasm_progress(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.wasm_progress)
     }
 
     /// Enable Early Move Extensions — same gates/tuning as graduated LMR, early indices.
@@ -2413,15 +2495,15 @@ impl TitaniumSearch {
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
         self.ensure_nnue_wall_accumulators(nw, b0, b1);
-        let mut wall_acc = [0.0f64; NET_H];
-        let mut hidden_pre = [0.0f64; NET_H];
-        let mut hidden_clip = [0.0f64; NET_H];
+        let mut wall_acc = [0.0f64; MAX_NET_H];
+        let mut hidden_pre = [0.0f64; MAX_NET_H];
+        let mut hidden_clip = [0.0f64; MAX_NET_H];
         let mut neural_out = 0.0f64;
         if me == 0 {
             wall_acc = self.np_acc0;
-            let po = self.g.pawn[0] * NET_H;
-            let px = self.g.pawn[1] * NET_H;
-            for j in 0..NET_H {
+            let po = self.g.pawn[0] * nw.h;
+            let px = self.g.pawn[1] * nw.h;
+            for j in 0..nw.h {
                 let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
@@ -2429,9 +2511,9 @@ impl TitaniumSearch {
             }
         } else {
             wall_acc = self.np_acc1;
-            let po = NET_MIRC[self.g.pawn[1]] * NET_H;
-            let px = NET_MIRC[self.g.pawn[0]] * NET_H;
-            for j in 0..NET_H {
+            let po = NET_MIRC[self.g.pawn[1]] * nw.h;
+            let px = NET_MIRC[self.g.pawn[0]] * nw.h;
+            for j in 0..nw.h {
                 let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
@@ -2517,7 +2599,7 @@ impl TitaniumSearch {
             black_dist,
             elapsed_ms,
             #[cfg(feature = "wasm")]
-            self.wasm_progress.as_ref(),
+            Some(&mut self.wasm_progress),
         );
     }
 
@@ -3113,9 +3195,9 @@ impl TitaniumSearch {
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let o0 = (b0 as usize * 128 + s) * NET_H;
-                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
-                        for j in 0..NET_H {
+                        let o0 = (b0 as usize * 128 + s) * nw.h;
+                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
+                        for j in 0..nw.h {
                             self.np_acc0[j] += nw.w1c[o0 + j];
                             self.np_acc1[j] += nw.w1c[o1 + j];
                         }
@@ -3124,9 +3206,9 @@ impl TitaniumSearch {
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
-                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
-                        for j in 0..NET_H {
+                        let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
+                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
+                        for j in 0..nw.h {
                             self.np_acc0[j] += nw.w1c[o0 + j];
                             self.np_acc1[j] += nw.w1c[o1 + j];
                         }
@@ -3146,9 +3228,9 @@ impl TitaniumSearch {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
                         let sg = if cur_h >> s & 1 != 0 { 1.0 } else { -1.0 };
-                        let o0 = (b0 as usize * 128 + s) * NET_H;
-                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * NET_H;
-                        for j in 0..NET_H {
+                        let o0 = (b0 as usize * 128 + s) * nw.h;
+                        let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
+                        for j in 0..nw.h {
                             self.np_acc0[j] += sg * nw.w1c[o0 + j];
                             self.np_acc1[j] += sg * nw.w1c[o1 + j];
                         }
@@ -3158,9 +3240,9 @@ impl TitaniumSearch {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
                         let sg = if cur_v >> s & 1 != 0 { 1.0 } else { -1.0 };
-                        let o0 = (b0 as usize * 128 + 64 + s) * NET_H;
-                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * NET_H;
-                        for j in 0..NET_H {
+                        let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
+                        let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
+                        for j in 0..nw.h {
                             self.np_acc0[j] += sg * nw.w1c[o0 + j];
                             self.np_acc1[j] += sg * nw.w1c[o1 + j];
                         }
@@ -3277,24 +3359,24 @@ impl TitaniumSearch {
 
     /// Materialize the existing HalfPW child representation without computing
     /// route fields, legal-wall count, or the value projection. Probe/shadow only.
-    fn current_hidden_features(&mut self) -> [f64; NET_H] {
+    fn current_hidden_features(&mut self) -> [f64; MAX_NET_H] {
         let nw = self.net;
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
         self.ensure_nnue_wall_accumulators(nw, b0, b1);
 
-        let mut hidden = [0.0; NET_H];
+        let mut hidden = [0.0; MAX_NET_H];
         if self.g.turn == 0 {
-            let po = self.g.pawn[0] * NET_H;
-            let px = self.g.pawn[1] * NET_H;
-            for j in 0..NET_H {
+            let po = self.g.pawn[0] * nw.h;
+            let px = self.g.pawn[1] * nw.h;
+            for j in 0..nw.h {
                 hidden[j] =
                     (nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j]).clamp(0.0, 1.0);
             }
         } else {
-            let po = NET_MIRC[self.g.pawn[1]] * NET_H;
-            let px = NET_MIRC[self.g.pawn[0]] * NET_H;
-            for j in 0..NET_H {
+            let po = NET_MIRC[self.g.pawn[1]] * nw.h;
+            let px = NET_MIRC[self.g.pawn[0]] * nw.h;
+            for j in 0..nw.h {
                 hidden[j] =
                     (nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j]).clamp(0.0, 1.0);
             }
@@ -3475,16 +3557,16 @@ impl TitaniumSearch {
             |b| &mut b.eval_nnue_infer,
             || {
                 if me == 0 {
-                    let po = self.g.pawn[0] * NET_H;
-                    let px = self.g.pawn[1] * NET_H;
-                    for j in 0..NET_H {
+                    let po = self.g.pawn[0] * nw.h;
+                    let px = self.g.pawn[1] * nw.h;
+                    for j in 0..nw.h {
                         let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
                         out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                     }
                 } else {
-                    let po = NET_MIRC[self.g.pawn[1]] * NET_H;
-                    let px = NET_MIRC[self.g.pawn[0]] * NET_H;
-                    for j in 0..NET_H {
+                    let po = NET_MIRC[self.g.pawn[1]] * nw.h;
+                    let px = NET_MIRC[self.g.pawn[0]] * nw.h;
+                    for j in 0..nw.h {
                         let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
                         out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                     }
@@ -4310,7 +4392,11 @@ impl TitaniumSearch {
                 let red = v16_plan.final_reduction;
                 if self.reduction_sidecar.is_some() {
                     let started = Instant::now();
-                    let hidden = self.current_hidden_features();
+                    let hidden_full = self.current_hidden_features();
+                    // reduction_sidecar is a separate, independently-calibrated
+                    // model with a fixed 32-wide input contract -- unrelated to
+                    // the main net's hidden width (which may now be > 32).
+                    let hidden: [f64; 32] = hidden_full[..32].try_into().unwrap();
                     let context = [
                         ((depth - 1).max(0) as f64 / 30.0).clamp(0.0, 1.0),
                         (i as f64 / 128.0).clamp(0.0, 1.0),
@@ -4702,7 +4788,16 @@ impl TitaniumSearch {
         let mut best_move = moves[0];
         let mut best_score = i32::MIN;
         let mut best_static = i32::MIN;
+        let mut best_own_dist_after = i32::MAX;
+        let mut best_opp_dist_after = i32::MIN;
         let mut best_order = 0usize;
+
+        self.refresh_dist(0);
+        let own_dist_before: i32 = if root_side == 0 {
+            self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+        } else {
+            self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+        };
 
         for i in 0..n {
             if Instant::now() >= self.deadline {
@@ -4737,6 +4832,16 @@ impl TitaniumSearch {
                     -ev
                 }
             };
+            let own_dist_after: i32 = if root_side == 0 {
+                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            } else {
+                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            };
+            let opp_dist_after: i32 = if root_side == 0 {
+                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            } else {
+                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            };
             let search_score = match self.ab(child_depth, -INF, INF, 1, true, m) {
                 Ok(s) => -s,
                 Err(e) => {
@@ -4756,20 +4861,36 @@ impl TitaniumSearch {
                 search_score,
                 static_eval,
                 nodes: move_nodes,
-                selection_key: defense_selection_key(search_score, static_eval),
+                selection_key: defense_selection_key(
+                    search_score,
+                    static_eval,
+                    own_dist_after > own_dist_before,
+                    own_dist_after,
+                    opp_dist_after,
+                ),
+                own_dist_before,
+                own_dist_after,
+                opp_dist_after,
             });
 
             if better_defense_candidate(
                 search_score,
                 static_eval,
+                own_dist_before,
+                own_dist_after,
+                opp_dist_after,
                 i,
                 best_score,
                 best_static,
+                best_own_dist_after,
+                best_opp_dist_after,
                 best_order,
             ) {
                 best_move = m;
                 best_score = search_score;
                 best_static = static_eval;
+                best_own_dist_after = own_dist_after;
+                best_opp_dist_after = opp_dist_after;
                 best_order = i;
             }
         }
@@ -4908,7 +5029,7 @@ impl TitaniumSearch {
                         self.d1[self.dist1_idx][self.g.pawn[1]],
                         rt0.elapsed().as_millis() as u64,
                         #[cfg(feature = "wasm")]
-                        self.wasm_progress.as_ref(),
+                        Some(&mut self.wasm_progress),
                     );
                 }
                 return ThinkResult {
@@ -5079,7 +5200,7 @@ impl TitaniumSearch {
         self.tt_adaptive = false;
         self.apply_think_start_state();
 
-        let depth_limit = if max_depth > 0 { max_depth } else { 30 };
+        let depth_limit = if max_depth > 0 { max_depth } else { 128 };
         let root_moves_raw = self.ordered_root_moves_snapshot(depth_limit);
         if root_moves_raw.is_empty() {
             return self.think(time_ms, max_depth, full, log, engine_label);
@@ -5367,7 +5488,7 @@ impl TitaniumSearch {
         let mut last_pawn_best: i16 = -1;
         let mut last_pawn_score: i32 = i32::MIN;
         let mut depth_log: Vec<AceDepthLogEntry> = Vec::new();
-        let max_depth = if max_depth > 0 { max_depth } else { 30 };
+        let max_depth = if max_depth > 0 { max_depth } else { 128 };
 
         // Dynamic iterative-deepening startup: probe the TT for the root position.
         // If the prior think (or pondering) left a deep exact entry, skip the

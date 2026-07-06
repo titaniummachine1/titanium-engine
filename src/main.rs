@@ -1464,7 +1464,7 @@ impl Seat {
                 Some(format_move(report.best_move))
             }
             Seat::Ace { search } => {
-                let r = search.think(time_ms, 30, false, false, "match");
+                let r = search.think(time_ms, 128, false, false, "match");
                 if r.mv == titanium::TITANIUM_NO_MOVE {
                     return None;
                 }
@@ -1667,7 +1667,7 @@ fn run_genmove_ace(args: &[String]) {
     let mut book = titanium::opening_book::OpeningBookMode::Off;
     let mut book_db: Option<String> = None;
     let mut time_ms = 4000u64;
-    let mut max_depth = 30i32;
+    let mut max_depth = 128i32;
     let mut threads = 1usize;
     let mut full = false;
     let mut log = false;
