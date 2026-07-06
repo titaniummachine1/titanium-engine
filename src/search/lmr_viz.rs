@@ -207,11 +207,15 @@ pub fn plan_root_lmr(
 
     let mut cat_values = Vec::with_capacity(n);
     let mut max_move_impact = 0u32;
+    let mut max_wall_impact = 0u32;
     for i in 0..n {
         let mv = buf[i];
         let cm = move_impact_heat(mv, &cat);
         cat_values.push(cm);
         max_move_impact = max_move_impact.max(cm.max(0) as u32);
+        if matches!(mv, Move::Wall { .. }) {
+            max_wall_impact = max_wall_impact.max(cm.max(0) as u32);
+        }
     }
 
     let depth = id_depth.max(1);
@@ -237,7 +241,16 @@ pub fn plan_root_lmr(
         } else {
             is_tactical_move(board, mv, our_dist, opp_dist_path, bfs)
         };
-        let attention = if max_move_impact > 0 {
+        // Walls normalize against the hottest WALL, not the hottest pawn move —
+        // otherwise a fast pawn destination dwarfs every wall's heat and makes
+        // the best wall on the board read as an irrelevant fringe move.
+        let attention = if is_wall {
+            if max_wall_impact > 0 {
+                cat_cm.max(0) as f64 / max_wall_impact as f64
+            } else {
+                0.0
+            }
+        } else if max_move_impact > 0 {
             cat_cm.max(0) as f64 / max_move_impact as f64
         } else {
             0.0

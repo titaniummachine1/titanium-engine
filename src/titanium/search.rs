@@ -4355,6 +4355,10 @@ impl TitaniumSearch {
         // impact is a heatmap lookup (wall = hottest touched square).
         let mut heat_by_id = [0i32; 264];
         let mut max_move_impact = 0u32;
+        // Walls and pawn moves are normalized separately: a pawn destination's
+        // heat can dwarf every wall's heat, which previously made the best wall
+        // on the board look like a cold ~9% move and forced it to depth 1.
+        let mut max_wall_impact = 0u32;
         let cat_lmr_active = self.cat_lmr_v16 && depth >= 2 && n > 0;
         if cat_lmr_active {
             if let Some(bridge) = self.bridge.as_mut() {
@@ -4364,6 +4368,9 @@ impl TitaniumSearch {
                     let h = move_impact_heat(mv, &cat);
                     heat_by_id[moves[i] as usize] = h;
                     max_move_impact = max_move_impact.max(h.max(0) as u32);
+                    if moves[i] >= 100 {
+                        max_wall_impact = max_wall_impact.max(h.max(0) as u32);
+                    }
                 }
             }
         }
@@ -4470,8 +4477,8 @@ impl TitaniumSearch {
                 && m >= 100
                 && m != tt_move
             {
-                let attention_ratio = if cat_lmr_active && max_move_impact > 0 {
-                    cat_heats[i].max(0) as f64 / max_move_impact as f64
+                let attention_ratio = if cat_lmr_active && max_wall_impact > 0 {
+                    cat_heats[i].max(0) as f64 / max_wall_impact as f64
                 } else {
                     1.0
                 };
