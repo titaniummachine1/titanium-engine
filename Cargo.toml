@@ -2,7 +2,7 @@
 name = "titanium"
 version = "0.2.0"
 edition = "2021"
-description = "Titanium Engine — hybrid Corridor-board AI (alpha-beta + guided MCTS)"
+description = "Titanium Engine — hybrid AI (alpha-beta + guided MCTS)"
 license = "GPL-3.0-or-later"
 
 [profile.release]

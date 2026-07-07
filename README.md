@@ -1,16 +1,16 @@
-# Titanium Corridor Engine
+# Titanium Engine
 
-Rust search engine for a corridor/wall-blocking abstract board game: iterative-deepening αβ, CAT corridor pruning, ACE v11 eval, UCI protocol, and WASM bindings.
+Rust search engine for an abstract wall-blocking board game: iterative-deepening αβ, CAT corridor pruning, ACE v11 eval, UCI protocol, and WASM bindings.
 
-Repo: [github.com/titaniummachine1/titanium-corridor](https://github.com/titaniummachine1/titanium-corridor)
+Repo: [github.com/titaniummachine1/titanium-engine](https://github.com/titaniummachine1/titanium-engine)
 
 Related repos:
 
-| Repo                                                                                               | Purpose                                              |
-| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| [Titanium-Corridor-Website](https://github.com/titaniummachine1/Titanium-Corridor-Website)         | Playable UI, benchmarks, vendored JS engines         |
-| [Titanium-Corridor-Coordinator](https://github.com/titaniummachine1/Titanium-Corridor-Coordinator) | Cloudflare Worker for distributed SPRT testing       |
-| [titanium-corridor-test-client](https://github.com/titaniummachine1/titanium-corridor-test-client) | CLI worker that runs matches against the coordinator |
+| Repo                                                                                     | Purpose                                              |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| [Titanium-Website](https://github.com/titaniummachine1/Titanium-Website)                 | Playable UI, benchmarks, vendored JS engines         |
+| [Titanium-Coordinator](https://github.com/titaniummachine1/Titanium-Coordinator)         | Cloudflare Worker for distributed SPRT testing       |
+| [titanium-test-client](https://github.com/titaniummachine1/titanium-test-client)         | CLI worker that runs matches against the coordinator |
 
 ## Build & test
 
