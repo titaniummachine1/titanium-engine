@@ -92,6 +92,31 @@ pub use crate::search::v16_lmr::ace_graduated_lmr_reduction;
 /// compounds multiplicatively down the tree and explodes the node count.
 const ACE_EME_TOP_MOVES: usize = 2;
 
+/// Flat move-ordering bonus for a wall touching either player's shortest-
+/// route cell set (see `route_touch_ordering`). Small relative to typical
+/// CAT impact-heat magnitudes -- a cold-start nudge among otherwise-similar
+/// moves, not a signal meant to override a strong CAT read or distort
+/// iterative deepening.
+const ROUTE_TOUCH_ORDER_BONUS: i32 = 20;
+
+/// Pure predicate, factored out for direct unit testing: does this wall
+/// touch a cell on either player's shortest-route set? `route0`/`route1`
+/// are the 81-cell boolean masks from `fill_sparse_route_masks`.
+fn wall_touches_route(
+    row: u8,
+    col: u8,
+    orientation: crate::core::board::WallOrientation,
+    route0: &[u8; 81],
+    route1: &[u8; 81],
+) -> bool {
+    crate::util::grid::wall_touch_squares(row, col, orientation)
+        .iter()
+        .any(|&(r, c)| {
+            let sq = (r as usize) * 9 + c as usize;
+            route0[sq] != 0 || route1[sq] != 0
+        })
+}
+
 /// Early Move Extension — +1 ply for the top ordered walls; +2 only for
 /// the very first non-TT wall when there is real depth left to spend.
 fn ace_graduated_eme_extension(move_index: usize, depth: i32) -> i32 {
@@ -467,6 +492,77 @@ mod lazy_smp_tests {
             assert!(n > 0);
             assert!(legal[..n].contains(&result.mv));
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod route_touch_tests {
+    use super::*;
+    use crate::core::board::WallOrientation;
+
+    fn mask_with(cells: &[(u8, u8)]) -> [u8; 81] {
+        let mut m = [0u8; 81];
+        for &(r, c) in cells {
+            m[(r as usize) * 9 + c as usize] = 1;
+        }
+        m
+    }
+
+    #[test]
+    fn wall_touching_route_cell_is_detected() {
+        // Horizontal wall at (row=3, col=4) touches cells
+        // (3,4) (3,5) (4,4) (4,5). Put a route cell at one of them.
+        let route0 = mask_with(&[(4, 5)]);
+        let route1 = [0u8; 81];
+        assert!(wall_touches_route(
+            3,
+            4,
+            WallOrientation::Horizontal,
+            &route0,
+            &route1
+        ));
+    }
+
+    #[test]
+    fn wall_touching_neither_players_route_is_not_detected() {
+        let route0 = mask_with(&[(0, 0)]);
+        let route1 = mask_with(&[(8, 8)]);
+        assert!(!wall_touches_route(
+            3,
+            4,
+            WallOrientation::Horizontal,
+            &route0,
+            &route1
+        ));
+    }
+
+    #[test]
+    fn wall_touching_either_players_route_counts() {
+        let route0 = [0u8; 81];
+        let route1 = mask_with(&[(3, 4)]); // top-left corner of the wall's 4 cells
+        assert!(wall_touches_route(
+            3,
+            4,
+            WallOrientation::Vertical,
+            &route0,
+            &route1
+        ));
+    }
+
+    #[test]
+    fn route_touch_ordering_flag_defaults_off() {
+        let g = GameState::new();
+        let search = TitaniumSearch::with_ti_movegen(g);
+        assert!(!search.route_touch_ordering);
+    }
+
+    #[test]
+    fn enable_route_touch_ordering_sets_flag_and_propagates_to_workers() {
+        let mut search = TitaniumSearch::with_ti_movegen(GameState::new());
+        search.enable_route_touch_ordering();
+        assert!(search.route_touch_ordering);
+        let worker = search.fork_lazy_worker(&search.g);
+        assert!(worker.route_touch_ordering);
     }
 }
 
@@ -1597,6 +1693,10 @@ pub struct TitaniumSearch {
     cat_lmr_v16: bool,
     cat_lmr_ceiling: u16,
     cat_lmr_fringe_pct: u16,
+    /// Experimental: small ordering bonus for walls touching either
+    /// player's shortest-route cell set (see ROUTE_TOUCH_ORDER_BONUS).
+    /// Off by default; only takes effect alongside cat_lmr_v16.
+    route_touch_ordering: bool,
     /// SOUND dead-zone wall prune at inner nodes (requires `bridge`): drop only
     /// walls in an unreachable void / sealed interior — provably irrelevant (they
     /// change no path and only burn inventory, never the best move). NPS-only;
@@ -1822,6 +1922,7 @@ impl TitaniumSearch {
             cat_lmr_v16: false,
             cat_lmr_ceiling: crate::cat::CAT_V16_LMR_CEILING_DEFAULT,
             cat_lmr_fringe_pct: crate::cat::CAT_V16_FRINGE_PCT_DEFAULT,
+            route_touch_ordering: false,
             dead_zone_prune: false,
             cheap_cert: false,
             cert_eval_leaves_only: false,
@@ -1938,6 +2039,10 @@ impl TitaniumSearch {
     /// Enable Early Move Extensions — same gates/tuning as graduated LMR, early indices.
     pub fn enable_eme(&mut self) {
         self.eme = true;
+    }
+
+    pub fn enable_route_touch_ordering(&mut self) {
+        self.route_touch_ordering = true;
     }
 
     pub fn set_opening_book(
@@ -2470,6 +2575,7 @@ impl TitaniumSearch {
         worker.cat_lmr_v16 = self.cat_lmr_v16;
         worker.cat_lmr_ceiling = self.cat_lmr_ceiling;
         worker.cat_lmr_fringe_pct = self.cat_lmr_fringe_pct;
+        worker.route_touch_ordering = self.route_touch_ordering;
         worker.dead_zone_prune = self.dead_zone_prune;
         worker.cheap_cert = self.cheap_cert;
         worker.cert_eval_leaves_only = self.cert_eval_leaves_only;
@@ -4608,6 +4714,42 @@ impl TitaniumSearch {
                     max_move_impact = max_move_impact.max(h.max(0) as u32);
                     if moves[i] >= 100 {
                         max_wall_impact = max_wall_impact.max(h.max(0) as u32);
+                    }
+                }
+            }
+            // Cheap cold-start nudge (experimental, off by default): a wall
+            // touching a cell on EITHER player's shortest-route set gets a
+            // small flat bonus, on top of (not instead of) the CAT heat
+            // above. Deliberately NOT "does this wall actually block the
+            // path" (that needs walking the path's edges, the expensive
+            // check this replaces) -- just "is it near/adjacent to the
+            // route", from the already-leaf-cheap route masks (bit-parallel
+            // flood, same cost class as the CAT heatmap itself). Small
+            // enough (ROUTE_TOUCH_ORDER_BONUS) to nudge otherwise-similar
+            // moves earlier without overriding a strong CAT signal or
+            // distorting iterative deepening.
+            if self.route_touch_ordering {
+                let d0f = self.d0[self.dist0_idx];
+                let d1f = self.d1[self.dist1_idx];
+                let mut route0 = [0u8; 81];
+                let mut route1 = [0u8; 81];
+                let mut flank_scratch = [0u8; 81];
+                fill_sparse_route_masks(&self.g, self.g.pawn[0], &d0f, &mut route0, &mut flank_scratch);
+                fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1f, &mut route1, &mut flank_scratch);
+                for i in 0..n {
+                    if moves[i] < 100 {
+                        continue; // pawn moves -- route-touch only makes sense for walls
+                    }
+                    if let crate::core::board::Move::Wall { row, col, orientation } =
+                        move_id_to_board(moves[i])
+                    {
+                        if wall_touches_route(row, col, orientation, &route0, &route1) {
+                            heat_by_id[moves[i] as usize] += ROUTE_TOUCH_ORDER_BONUS;
+                            max_move_impact = max_move_impact
+                                .max(heat_by_id[moves[i] as usize].max(0) as u32);
+                            max_wall_impact = max_wall_impact
+                                .max(heat_by_id[moves[i] as usize].max(0) as u32);
+                        }
                     }
                 }
             }
