@@ -69,6 +69,7 @@ fn main() {
         "eval" => run_eval(&args),
         "eval-batch" => run_eval_batch(),
         "eval-packed-batch" => run_eval_packed_batch(),
+        "score-out" => run_score_out(&args),
         "reduction-probe" => run_reduction_probe(&args),
         "reduction-shadow" => run_reduction_shadow(&args),
         "fields" => run_fields(&args),
@@ -116,6 +117,9 @@ fn print_usage() {
     println!("  titanium eval [moves...] [--json]     — HalfPW net eval dump (trainer parity)");
     println!(
         "  titanium eval-packed-batch            — stdin: u32 row + 24-byte packed state records"
+    );
+    println!(
+        "  titanium score-out --nodes N (--packed HEX | --moves MOVE...) — bounded AB score JSON"
     );
     println!(
         "  titanium fields [moves...] [--check]  — ASCII distance/corridor field grids + invariants"
@@ -660,6 +664,237 @@ fn run_eval_packed_batch() {
             }
         }
     }
+}
+
+/// Emit one bounded alpha-beta root score as machine-readable JSON.
+///
+/// Protocol `score-out-v1`:
+/// `titanium score-out --nodes N --packed HEX`
+/// or
+/// `titanium score-out --nodes N --moves e2 e8 ...`
+///
+/// `packed` is the canonical 24-byte position format (48 lowercase/uppercase
+/// hex characters), not the engine-internal ACE format. `nodes` is a hard
+/// search-node budget; the reported `nodes` is the exact number consumed.
+/// `bound` describes the last completed iterative-deepening root score:
+/// `exact` means at least one complete AB iteration was committed, while
+/// `unknown` means the budget stopped the search before the first iteration.
+/// `proven` is true only for a mate score verified by the AB search. A finite
+/// depth-limited score is not game-theoretically proven.
+fn run_score_out(args: &[String]) {
+    let mut nodes = None::<u64>;
+    let mut packed_hex = None::<String>;
+    let mut moves = Vec::<String>::new();
+    let mut input_kind = None::<&str>;
+    let mut error = None::<String>;
+    let mut i = 2usize;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--nodes" => match args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
+                Some(value) if value > 0 => {
+                    nodes = Some(value);
+                    i += 2;
+                }
+                _ => {
+                    error = Some("--nodes requires a positive u64".to_string());
+                    break;
+                }
+            },
+            "--packed" => match args.get(i + 1) {
+                Some(value) => {
+                    packed_hex = Some(value.clone());
+                    input_kind = Some("packed");
+                    i += 2;
+                }
+                None => {
+                    error = Some("--packed requires hexadecimal bytes".to_string());
+                    break;
+                }
+            },
+            "--moves" => {
+                input_kind = Some("moves");
+                i += 1;
+                while i < args.len() && !args[i].starts_with("--") {
+                    moves.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            flag if flag.starts_with("--") => {
+                error = Some(format!("unknown score-out option: {flag}"));
+                break;
+            }
+            value => {
+                error = Some(format!("unexpected score-out argument: {value}"));
+                break;
+            }
+        }
+    }
+
+    let budget = match (error, nodes) {
+        (Some(message), _) => {
+            println!("{}", score_out_error_json(&message));
+            return;
+        }
+        (None, Some(value)) => value,
+        (None, None) => {
+            println!("{}", score_out_error_json("--nodes is required"));
+            return;
+        }
+    };
+
+    if (packed_hex.is_some() && input_kind != Some("packed"))
+        || (packed_hex.is_none() && input_kind != Some("moves"))
+        || (packed_hex.is_some() && !moves.is_empty())
+    {
+        println!(
+            "{}",
+            score_out_error_json("provide exactly one of --packed HEX or --moves MOVE...")
+        );
+        return;
+    }
+
+    let board = if let Some(hex) = packed_hex {
+        match parse_packed_board(&hex) {
+            Ok(board) => board,
+            Err(message) => {
+                println!("{}", score_out_error_json(&message));
+                return;
+            }
+        }
+    } else {
+        let mut board = Board::new();
+        for mv in &moves {
+            if !looks_like_algebraic_move(mv) {
+                println!(
+                    "{}",
+                    score_out_error_json(&format!("invalid algebraic move: {mv}"))
+                );
+                return;
+            }
+            board.apply_algebraic(mv);
+        }
+        board
+    };
+
+    if board.is_terminal().is_some() {
+        println!("{}", score_out_error_json("position is terminal"));
+        return;
+    }
+
+    // A long deadline makes the node budget the controlling limit without
+    // allowing a malformed/degenerate position to run indefinitely.
+    let config = SearchConfig {
+        time_ms: 86_400_000,
+        max_nodes: budget,
+        log: false,
+        book_hint: None,
+        cert_enabled: None,
+        ..SearchConfig::default()
+    };
+    let mut session = GameSearchSession::new();
+    session.board = board.clone();
+    let Some(report) = run_search(&mut session, config) else {
+        println!("{}", score_out_error_json("no legal moves"));
+        return;
+    };
+    let score = report.root_score;
+    let bound = if report.search_depth > 0 {
+        "exact"
+    } else {
+        "unknown"
+    };
+    let proven = score.abs() >= 19_500 && report.search_depth > 0;
+    println!(
+        "{{\"schema\":\"score-out-v1\",\"ok\":true,\"input\":\"{}\",\"side_to_move\":{},\"score\":{},\"bound\":\"{}\",\"proven\":{},\"nodes\":{},\"node_budget\":{},\"depth\":{},\"selected_move\":\"{}\"}}",
+        input_kind.unwrap_or("unknown"),
+        match board.side() {
+            titanium::Player::One => 0,
+            titanium::Player::Two => 1,
+        },
+        score,
+        bound,
+        proven,
+        report.nodes,
+        budget,
+        report.search_depth,
+        json_escape(&format_move(report.best_move)),
+    );
+}
+
+#[cfg(test)]
+mod score_out_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_packed_frame_converts_to_board_coordinates() {
+        let mut packed = [0u8; titanium::PACKED_STATE_LEN];
+        packed[0] = 1;
+        packed[1] = 4; // canonical player 0: e1 / bottom goal
+        packed[2] = 76; // canonical player 1: e9 / top goal
+        packed[3] = 10;
+        packed[4] = 10;
+        packed[5] = 0; // player 0 to move
+        let board = parse_packed_board(&packed.iter().map(|b| format!("{b:02x}")).collect::<String>())
+            .expect("valid canonical frame");
+
+        assert_eq!(board.pawns, [(0, 4), (8, 4)]);
+        assert_eq!(board.walls_remaining, [10, 10]);
+        assert_eq!(board.side_to_move, titanium::Player::One);
+        assert_eq!(board.horizontal_walls, 0);
+        assert_eq!(board.vertical_walls, 0);
+    }
+
+    #[test]
+    fn score_out_error_is_single_json_frame() {
+        let frame = score_out_error_json("bad \"packed\" input");
+        assert!(frame.starts_with("{\"schema\":\"score-out-v1\""));
+        assert!(frame.contains("\"ok\":false"));
+        assert!(frame.contains("bad \\\"packed\\\" input"));
+        assert!(frame.ends_with('}'));
+    }
+}
+
+fn score_out_error_json(message: &str) -> String {
+    format!(
+        "{{\"schema\":\"score-out-v1\",\"ok\":false,\"error\":\"{}\"}}",
+        json_escape(message)
+    )
+}
+
+fn parse_packed_board(hex: &str) -> Result<Board, String> {
+    if hex.len() != titanium::PACKED_STATE_LEN * 2 {
+        return Err(format!(
+            "packed state hex must contain exactly {} bytes",
+            titanium::PACKED_STATE_LEN
+        ));
+    }
+    let mut packed = [0u8; titanium::PACKED_STATE_LEN];
+    for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let text = std::str::from_utf8(pair).map_err(|_| "packed state is not ASCII hex")?;
+        packed[i] =
+            u8::from_str_radix(text, 16).map_err(|_| format!("invalid packed hex at byte {i}"))?;
+    }
+    let fields = titanium::decode_packed_state(&packed)?;
+    let board = Board {
+        pawns: [
+            (fields.player0_cell / 9, fields.player0_cell % 9),
+            (fields.player1_cell / 9, fields.player1_cell % 9),
+        ],
+        walls_remaining: [fields.player0_walls, fields.player1_walls],
+        horizontal_walls: fields.horizontal_walls,
+        vertical_walls: fields.vertical_walls,
+        side_to_move: if fields.side_to_move == 0 {
+            titanium::Player::One
+        } else {
+            titanium::Player::Two
+        },
+        move_number: 1,
+        hash: 0,
+    };
+    let mut board = board;
+    board.hash = titanium::core::zobrist::hash_board(&board);
+    Ok(board)
 }
 
 fn looks_like_algebraic_move(arg: &str) -> bool {
@@ -1585,10 +1820,23 @@ fn ace_engine_flag(args: &[String]) -> Option<&str> {
 /// one-shot `genmove` label set so a session experiment cannot silently run
 /// as an ordinary production engine through a different construction path.
 fn session_engine_flag(args: &[String]) -> Option<&str> {
+    const SESSION_EXPERIMENT_ENGINES: &[&str] = &[
+        "titanium-v16-sfhist",
+        "titanium-v17",
+        "titanium-v17-cat-path-lmr",
+        "titanium-v17-route-touch",
+        "titanium-v17-qsearch",
+        "titanium-v17-route-touch-qsearch",
+        "titanium-v17-lazy-topn",
+        "titanium-v17-rfp-ace",
+        "titanium-v17-lmp-ace",
+        "titanium-v17-no-partial-iter",
+        "titanium-v17-no-predict-stop",
+        "titanium-v17-no-partial-no-predict",
+    ];
     args.windows(2)
         .find(|pair| {
-            pair[0] == "--engine"
-                && matches!(pair[1].as_str(), "titanium-v16-sfhist" | "titanium-v17")
+            pair[0] == "--engine" && SESSION_EXPERIMENT_ENGINES.contains(&pair[1].as_str())
         })
         .map(|pair| pair[1].as_str())
 }
@@ -1640,6 +1888,16 @@ fn uses_titanium_module(flag: &str) -> bool {
         || flag == "titanium-v16"
         || flag == "titanium-v16-sfhist"
         || flag == "titanium-v17"
+        || flag == "titanium-v17-cat-path-lmr"
+        || flag == "titanium-v17-route-touch"
+        || flag == "titanium-v17-qsearch"
+        || flag == "titanium-v17-route-touch-qsearch"
+        || flag == "titanium-v17-lazy-topn"
+        || flag == "titanium-v17-rfp-ace"
+        || flag == "titanium-v17-lmp-ace"
+        || flag == "titanium-v17-no-partial-iter"
+        || flag == "titanium-v17-no-predict-stop"
+        || flag == "titanium-v17-no-partial-no-predict"
         || flag == "titanium-v15-medium"
         || flag == "titanium-v15-frozen"
         || flag == "titanium-v15-no-raceproof"

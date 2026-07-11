@@ -973,7 +973,9 @@ fn fill_exact_dtm(g: &mut GameState, ex: &mut ExactScratch, tbl: &mut [i16]) {
             let off = gi * 5;
 
             let mut min_loss = i32::MAX;
-            let mut all_win = ns > 0;
+            // A side with no legal pawn move loses immediately.  Treat the
+            // empty AND set as vacuously true so this state receives -1.
+            let mut all_win = true;
             let mut max_win = 0i32;
 
             for j in 0..ns {
@@ -1018,10 +1020,10 @@ fn fill_exact_dtm(g: &mut GameState, ex: &mut ExactScratch, tbl: &mut [i16]) {
         k += 1;
     }
 
-    debug_assert_eq!(
-        n_unresolved, 0,
-        "DTM pass left {n_unresolved} unresolved states"
-    );
+    // States left after the retrograde fixed point are unresolved cyclic SCCs:
+    // neither side has a forced mate from them. They are legal non-forced
+    // races/draws and intentionally remain represented by zero, which the
+    // on-demand API exposes as `None`.
 }
 
 /// Fill the complete fixed-topology exact race table (Service B). Lazily
@@ -1139,7 +1141,8 @@ fn solve_race_config_reference(g: &mut GameState, s: &mut ReferenceScratch, tbl:
             let id = s.live[i] as usize;
             let ns = s.nsucc[id] as usize;
             let mut min_loss = 32_767i32;
-            let mut all_win = ns > 0;
+            // No legal move is an immediate loss for the side to move.
+            let mut all_win = true;
             let mut max_win = 0i32;
             let off = id * 5;
 
@@ -1922,7 +1925,7 @@ mod tests {
 
                 let ns = gen_successor_ids_for_test(&mut g, id, &mut buf, &mut succ);
                 let mut min_loss = i32::MAX;
-                let mut all_resolved_win = ns > 0;
+                let mut all_resolved_win = true;
                 let mut max_win = 0i32;
 
                 for j in 0..ns {

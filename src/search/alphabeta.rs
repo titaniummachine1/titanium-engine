@@ -308,8 +308,9 @@ impl SearchState<'_> {
 
     fn bump_nodes(&mut self) -> bool {
         self.nodes += 1;
-        // Check more frequently to respect limits better
-        self.nodes % 1024 == 0 && self.should_stop()
+        // Check every node so bounded callers can report an exact budget
+        // consumption count rather than overshooting by the polling interval.
+        self.should_stop()
     }
 }
 
@@ -2316,6 +2317,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "debug build stops at depth 2; use release native"
+    )]
     fn after_e2_depth_log_does_not_oscillate_zero_and_negative() {
         let mut board = Board::new();
         board.apply_algebraic("e2");

@@ -86,10 +86,6 @@ pub fn apply_lmr_path_correction(
     if race_gain > 0 && final_reduction > 0 {
         path_adjustment = -1;
         final_reduction = final_reduction.saturating_sub(1);
-    } else if race_gain == 0 && attention_ratio <= CAT_ATTENTION_TAIL_CUTOFF {
-        let delta = max_safe as i32 - final_reduction as i32;
-        path_adjustment = delta;
-        final_reduction = max_safe;
     }
 
     final_reduction = final_reduction.min(max_safe);
@@ -319,15 +315,25 @@ mod tests {
         let diag = apply_lmr_path_correction(base, 10, 1, 0.5, false);
         assert_eq!(diag.path_adjustment, -1);
         assert_eq!(diag.final_reduction, base - 1);
+        assert!(diag.final_reduction <= base);
     }
 
     #[test]
-    fn path_correction_dead_tail_when_no_race_and_cold_attention() {
+    fn path_correction_never_adds_dead_tail_reduction() {
         let base = cat_index_lmr_reduction(10, 8, 20, 40, 621, 1.0, false, 2);
         assert_eq!(base, 10);
         let diag = apply_lmr_path_correction(base, 10, 0, 0.06, false);
         assert_eq!(diag.final_reduction, 9);
-        assert_eq!(diag.path_adjustment, -1);
+        assert_eq!(diag.path_adjustment, 0);
+    }
+
+    #[test]
+    fn path_race_gain_uses_mover_relative_orientation() {
+        let (self_gain, opponent_delay, race_gain) = compute_race_gain(8, 6, 7, 7);
+        assert_eq!((self_gain, opponent_delay, race_gain), (1, 1, 2));
+
+        let (self_gain, opponent_delay, race_gain) = compute_race_gain(6, 8, 7, 7);
+        assert_eq!((self_gain, opponent_delay, race_gain), (-1, -1, -2));
     }
 
     #[test]
