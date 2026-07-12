@@ -835,8 +835,13 @@ mod score_out_tests {
         packed[3] = 10;
         packed[4] = 10;
         packed[5] = 0; // player 0 to move
-        let board = parse_packed_board(&packed.iter().map(|b| format!("{b:02x}")).collect::<String>())
-            .expect("valid canonical frame");
+        let board = parse_packed_board(
+            &packed
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>(),
+        )
+        .expect("valid canonical frame");
 
         assert_eq!(board.pawns, [(0, 4), (8, 4)]);
         assert_eq!(board.walls_remaining, [10, 10]);
@@ -1829,6 +1834,7 @@ fn session_engine_flag(args: &[String]) -> Option<&str> {
         "titanium-v17-route-touch-qsearch",
         "titanium-v17-lazy-topn",
         "titanium-v17-rfp-ace",
+        "titanium-v17-probcut",
         "titanium-v17-lmp-ace",
         "titanium-v17-no-partial-iter",
         "titanium-v17-no-predict-stop",
@@ -1894,6 +1900,7 @@ fn uses_titanium_module(flag: &str) -> bool {
         || flag == "titanium-v17-route-touch-qsearch"
         || flag == "titanium-v17-lazy-topn"
         || flag == "titanium-v17-rfp-ace"
+        || flag == "titanium-v17-probcut"
         || flag == "titanium-v17-lmp-ace"
         || flag == "titanium-v17-no-partial-iter"
         || flag == "titanium-v17-no-predict-stop"

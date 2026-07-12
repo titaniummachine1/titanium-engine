@@ -335,7 +335,10 @@ impl WasmAceEngine {
 /// Warm Titanium v16 session. TT and history persist between plies.
 #[wasm_bindgen]
 pub struct WasmEngine {
-    search: TitaniumSearch,
+    // Keep the large search state off the browser WASM stack. v17 added
+    // history tables large enough that moving this value through a 4 MiB
+    // WebAssembly stack traps during construction.
+    search: Box<TitaniumSearch>,
     engine_label: String,
     last_depth: i32,
     last_nodes: u64,
@@ -354,7 +357,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = *TitaniumSearch::grafted_v16_with_ceiling(g, None, ceiling);
+        let mut search = TitaniumSearch::grafted_v16_with_ceiling(g, None, ceiling);
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Play, None);
         let engine_label = "titanium-v16".to_string();
         WasmEngine {
@@ -364,6 +367,18 @@ impl WasmEngine {
             last_nodes: 0,
             last_stop_reason: "none",
         }
+    }
+
+    /// Current strongest profile, packaged in the same WASM module as v16.
+    #[wasm_bindgen]
+    pub fn new_v17(tier: u8) -> WasmEngine {
+        let mut engine = WasmEngine::new(tier);
+        crate::titanium::session::apply_session_experiment_flags(
+            &mut engine.search,
+            "titanium-v17",
+        );
+        engine.engine_label = "titanium-v17".to_string();
+        engine
     }
 
     pub fn reset(&mut self) {

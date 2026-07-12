@@ -33,6 +33,7 @@ fn is_v16_graft(engine_flag: &str) -> bool {
             | "titanium-v17-route-touch-qsearch"
             | "titanium-v17-lazy-topn"
             | "titanium-v17-rfp-ace"
+            | "titanium-v17-probcut"
             | "titanium-v17-lmp-ace"
             | "titanium-v17-no-partial-iter"
             | "titanium-v17-no-predict-stop"
@@ -40,11 +41,17 @@ fn is_v16_graft(engine_flag: &str) -> bool {
     )
 }
 
+/// Apply production session experiment flags (v17 variants, RFP, LMP, etc.).
+pub fn apply_session_experiment_flags(search: &mut TitaniumSearch, engine_flag: &str) {
+    configure_session_experiments(search, engine_flag);
+}
+
 fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str) {
     let is_v17 = matches!(
         engine_flag,
         "titanium-v17"
             | "titanium-v17-lmp-ace"
+            | "titanium-v17-probcut"
             | "titanium-v17-no-partial-iter"
             | "titanium-v17-no-predict-stop"
             | "titanium-v17-no-partial-no-predict"
@@ -59,6 +66,7 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
             | "titanium-v17-route-touch-qsearch"
             | "titanium-v17-lazy-topn"
             | "titanium-v17-rfp-ace"
+            | "titanium-v17-probcut"
             | "titanium-v17-lmp-ace"
     ) || is_v17;
     if enable_sf_history {
@@ -90,14 +98,21 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
         || engine_flag == "titanium-v17-lazy-topn"
         || engine_flag == "titanium-v17-rfp-ace"
         || engine_flag == "titanium-v17-lmp-ace"
+        || engine_flag == "titanium-v17-probcut"
     {
         search.enable_lazy_topn();
     }
-    if engine_flag == "titanium-v17" || engine_flag == "titanium-v17-lmp-ace" {
+    if engine_flag == "titanium-v17"
+        || engine_flag == "titanium-v17-lmp-ace"
+        || engine_flag == "titanium-v17-probcut"
+    {
         search.set_ace_lmp(true);
     }
-    if engine_flag == "titanium-v17-rfp-ace" {
+    if engine_flag == "titanium-v17" || engine_flag == "titanium-v17-rfp-ace" {
         search.set_ace_rfp(true);
+    }
+    if engine_flag == "titanium-v17-probcut" {
+        search.set_probcut(true);
     }
     if engine_flag == "titanium-v17-no-partial-iter"
         || engine_flag == "titanium-v17-no-partial-no-predict"
@@ -128,7 +143,7 @@ fn build_search(engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
         "ace-v13-grafted" | "titanium-v14" | "titanium-v15" => TitaniumSearch::grafted(g, None),
         _ => TitaniumSearch::with_ti_movegen(g),
     };
-    configure_session_experiments(&mut search, engine_flag);
+    apply_session_experiment_flags(&mut search, engine_flag);
     search
 }
 
@@ -364,14 +379,10 @@ mod session_tests {
     }
 
     #[test]
-    fn v17_rfp_ace_inherits_v17_and_only_changes_rfp() {
-        let candidate = build_search("titanium-v17-rfp-ace", GameState::new());
+    fn v17_default_enables_ace_rfp() {
         let default = build_search("titanium-v17", GameState::new());
-        assert!(candidate.sf_history_enabled());
-        assert!(candidate.q_search_enabled());
-        assert!(candidate.cat_path_lmr_enabled());
-        assert!(candidate.lazy_topn_enabled());
-        assert!(candidate.ace_rfp_enabled());
-        assert!(!default.ace_rfp_enabled());
+        let explicit = build_search("titanium-v17-rfp-ace", GameState::new());
+        assert!(default.ace_rfp_enabled());
+        assert!(explicit.ace_rfp_enabled());
     }
 }

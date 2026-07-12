@@ -16,12 +16,16 @@ use titanium::algebraic_to_move_id;
 use titanium::bench_instr;
 use titanium::movegen::prewarm;
 use titanium::titanium::net::live_weights_sha256;
+use titanium::titanium::session::apply_session_experiment_flags;
 use titanium::titanium::{move_id_to_algebraic, GameState, ThinkResult, TitaniumSearch};
 
 /// Reported + logged engine label. The actual search mode is selected in
 /// `fresh_search` (TITANIUM_BENCH_V16=1 → v16 CAT-LMR), so the label must
 /// follow the same env var or profiles get misattributed.
 fn engine_mode() -> &'static str {
+    if let Ok(flag) = std::env::var("TITANIUM_BENCH_ENGINE") {
+        return Box::leak(flag.into_boxed_str());
+    }
     if std::env::var("TITANIUM_BENCH_V16").as_deref() == Ok("1") {
         "titanium-v16"
     } else {
@@ -143,6 +147,15 @@ fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
         _ => load_position(position),
     };
     let lazy_walls = std::env::var("TITANIUM_BENCH_LAZY_WALLS").as_deref() == Ok("1");
+    if let Ok(flag) = std::env::var("TITANIUM_BENCH_ENGINE") {
+        let mut search = if lazy_walls {
+            TitaniumSearch::grafted_v16_lazy_walls_for_bench(g, Some(TT_BITS), 1000)
+        } else {
+            TitaniumSearch::grafted_v16_with_ceiling(g, Some(TT_BITS), 1000)
+        };
+        apply_session_experiment_flags(search.as_mut(), &flag);
+        return search;
+    }
     // TITANIUM_BENCH_V16=1 profiles the v16 CAT-LMR engine (default ceiling 1000)
     // so we can A/B the CAT cost vs the v15 baseline on identical positions.
     if std::env::var("TITANIUM_BENCH_V16").as_deref() == Ok("1") {
