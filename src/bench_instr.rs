@@ -109,6 +109,7 @@ pub struct BenchInstr {
     pub collect_wall_orientation: OpStat,
     pub wall_legality: OpStat,
     pub wall_proof_skip: OpStat,
+    pub wall_seal_skip: OpStat,
     pub can_step: OpStat,
     pub gen_moves: OpStat,
     pub tt_probe: OpStat,
@@ -205,7 +206,7 @@ impl BenchInstr {
         }
         let nodes = self.search_nodes;
         let total_ns = self.measured_ns;
-        let ops: [(&str, &OpStat); 44] = [
+        let ops: [(&str, &OpStat); 45] = [
             ("evaluate", &self.evaluate),
             ("eval_race_bound", &self.eval_race_bound),
             ("race_gate_cached", &self.race_gate_cached),
@@ -228,6 +229,7 @@ impl BenchInstr {
             ("collect_wall_orientation", &self.collect_wall_orientation),
             ("wall_legality", &self.wall_legality),
             ("wall_proof_skip", &self.wall_proof_skip),
+            ("wall_seal_skip", &self.wall_seal_skip),
             ("can_step", &self.can_step),
             ("gen_moves", &self.gen_moves),
             ("tt_probe", &self.tt_probe),

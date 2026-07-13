@@ -7,6 +7,7 @@ use crate::movegen::o1::{
 use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
+use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::path::masks::DirMasks;
 use crate::path::parallel::{bff_wall_legal_with_proof, pawn_bit, wall_delta, WallGrids};
 use crate::path::BfsScratch;
@@ -546,12 +547,91 @@ fn collect_wall_orientation_inner(
     n
 }
 
-/// Per-node wall-trial state: directional blocked-step grids + pawn flood bits.
+/// Connected components in the wall-barrier graph. The outer board boundary is
+/// component 1; placed walls connected to any edge join that same component.
+struct WallSealTopology {
+    occupied: u128,
+    labels: [u8; 128],
+}
+
+impl WallSealTopology {
+    fn new(occupied: u128) -> Self {
+        debug_assert!(occupied.count_ones() <= 20);
+        let mut labels = [0u8; 128];
+        let boundary = Self::component(occupied & WALL_EDGE_MASK, occupied);
+        Self::label_component(&mut labels, boundary, 1);
+
+        let mut remaining = occupied & !boundary;
+        let mut next_label = 2u8;
+        while remaining != 0 {
+            let seed = 1u128 << remaining.trailing_zeros();
+            let component = Self::component(seed, occupied);
+            Self::label_component(&mut labels, component, next_label);
+            next_label += 1;
+            remaining &= !component;
+        }
+        Self { occupied, labels }
+    }
+
+    fn component(seed: u128, occupied: u128) -> u128 {
+        let mut component = 0u128;
+        let mut frontier = seed & occupied;
+        while frontier != 0 {
+            component |= frontier;
+            let mut touching = 0u128;
+            let mut walls = frontier;
+            while walls != 0 {
+                let wall = walls.trailing_zeros() as usize;
+                walls &= walls - 1;
+                touching |= WALL_TOUCH_MASKS[wall];
+            }
+            frontier = touching & occupied & !component;
+        }
+        component
+    }
+
+    fn label_component(labels: &mut [u8; 128], mut component: u128, label: u8) {
+        while component != 0 {
+            let wall = component.trailing_zeros() as usize;
+            component &= component - 1;
+            labels[wall] = label;
+        }
+    }
+
+    /// Adding a barrier can disconnect the pawn graph only if it closes a cycle
+    /// in the dual wall graph. That requires two candidate contacts in the same
+    /// existing component (the outer boundary counts as one component).
+    #[inline]
+    fn can_seal(&self, candidate: usize) -> bool {
+        let mut seen_labels = if WALL_EDGE_MASK & (1u128 << candidate) != 0 {
+            1u32 << 1
+        } else {
+            0
+        };
+        let mut contacts = self.occupied & WALL_TOUCH_MASKS[candidate];
+        while contacts != 0 {
+            let wall = contacts.trailing_zeros() as usize;
+            contacts &= contacts - 1;
+            let label = self.labels[wall];
+            debug_assert!(label > 0 && label < 32);
+            let label_bit = 1u32 << label;
+            if seen_labels & label_bit != 0 {
+                return true;
+            }
+            seen_labels |= label_bit;
+        }
+        false
+    }
+}
+
+/// Per-node wall-trial state: topology proof, directional grids, and pawn flood bits.
 struct WallTrialCtx {
     grids: WallGrids,
     p1_bit: u128,
     p2_bit: u128,
     proof: u128,
+    occupied_walls: u128,
+    seal_topology: Option<WallSealTopology>,
 }
 
 impl WallTrialCtx {
@@ -563,6 +643,8 @@ impl WallTrialCtx {
             p1_bit: pawn_bit(r1, c1),
             p2_bit: pawn_bit(r2, c2),
             proof: 0,
+            occupied_walls: wall_occupied_mask(board),
+            seal_topology: None,
         }
     }
 
@@ -575,6 +657,31 @@ impl WallTrialCtx {
             crate::bench_instr::bump(|b| &mut b.wall_proof_skip);
             return true;
         }
+        let candidate = row as usize * 8
+            + col as usize
+            + if orientation == WallOrientation::Horizontal {
+                0
+            } else {
+                64
+            };
+        let topology = self
+            .seal_topology
+            .get_or_insert_with(|| WallSealTopology::new(self.occupied_walls));
+        if !topology.can_seal(candidate) {
+            crate::bench_instr::bump(|b| &mut b.wall_seal_skip);
+            return true;
+        }
+        self.wall_keeps_paths_open_exact(row, col, orientation)
+    }
+
+    #[inline]
+    fn wall_keeps_paths_open_exact(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+    ) -> bool {
+        let delta = wall_delta(row, col, orientation);
         self.grids.place(delta);
         let (ok, proof) = bff_wall_legal_with_proof(self.p1_bit, self.p2_bit, &self.grids);
         self.grids.remove(delta);
@@ -593,7 +700,7 @@ pub fn wall_path_ok_after_place(
     orientation: WallOrientation,
 ) -> bool {
     let mut ctx = WallTrialCtx::new(board);
-    ctx.wall_keeps_paths_open(row, col, orientation)
+    ctx.wall_keeps_paths_open_exact(row, col, orientation)
 }
 
 /// Matches scraped `collidesWithExistingWall` — scalar reference for the L2 table.
@@ -814,12 +921,14 @@ mod tests {
         checked: usize,
         strict_isolated: usize,
         topology_fast: usize,
+        component_fast: usize,
         bff_checks: usize,
     }
 
     fn audit_shortcuts(board: &Board, audit: &mut ShortcutAudit) {
         let masks = wall_masks(board);
         let mut ctx = WallTrialCtx::new(board);
+        let seal_topology = WallSealTopology::new(wall_occupied_mask(board));
         for (orientation, candidates, needs_flood) in [
             (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
             (WallOrientation::Vertical, masks.l12_v, masks.topo_v),
@@ -831,11 +940,15 @@ mod tests {
                 remaining &= remaining - 1;
                 let row = (slot / 8) as u8;
                 let col = (slot % 8) as u8;
-                let exact = ctx.wall_keeps_paths_open(row, col, orientation);
+                let exact = ctx.wall_keeps_paths_open_exact(row, col, orientation);
                 let topology_fast = needs_flood & (1u64 << slot) == 0;
-                let current = topology_fast || exact;
+                let candidate = slot + if horizontal { 0 } else { 64 };
+                let component_fast = !topology_fast && !seal_topology.can_seal(candidate);
+                let current = topology_fast || component_fast || exact;
                 if topology_fast {
                     audit.topology_fast += 1;
+                } else if component_fast {
+                    audit.component_fast += 1;
                 } else {
                     audit.bff_checks += 1;
                 }
@@ -847,6 +960,15 @@ mod tests {
                     board.vertical_walls,
                     board.pawns,
                 );
+                if component_fast {
+                    assert!(
+                        exact,
+                        "component shortcut mismatch: candidate={row},{col},{orientation:?} h={:#018x} v={:#018x} pawns={:?}",
+                        board.horizontal_walls,
+                        board.vertical_walls,
+                        board.pawns,
+                    );
+                }
                 if crate::movegen::wall_masks::wall_is_strictly_isolated(board, slot, horizontal) {
                     audit.strict_isolated += 1;
                     assert!(
@@ -900,8 +1022,12 @@ mod tests {
             }
         }
         eprintln!(
-            "shortcut audit checked={} strict_isolated={} topology_fast={} bff_checks={}",
-            audit.checked, audit.strict_isolated, audit.topology_fast, audit.bff_checks
+            "shortcut audit checked={} strict_isolated={} topology_fast={} component_fast={} bff_checks={}",
+            audit.checked,
+            audit.strict_isolated,
+            audit.topology_fast,
+            audit.component_fast,
+            audit.bff_checks
         );
         assert!(
             audit.checked >= 10_000,
