@@ -11,7 +11,6 @@ use crate::path::masks::DirMasks;
 use crate::path::parallel::{pawn_bit, pbff_wall_legal, wall_delta, WallGrids};
 use crate::path::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
-
 const DIRS: [(i8, i8); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
 /// Upper bound on legal moves in any Quoridor position (startpos ≈ 131).
@@ -83,8 +82,12 @@ pub fn generate_legal_moves_slice(
     if board.is_terminal().is_some() {
         return 0;
     }
-
-    generate_legal_moves_slice_mode(board, out, scratch, PawnGenMode::default())
+    let mut n = generate_pawn_moves_o1(board, out);
+    if board.walls_remaining[board.side_to_move as usize] > 0 {
+        n += generate_wall_moves_slice(board, &mut out[n..], scratch);
+    }
+    debug_assert!(n <= MAX_LEGAL_MOVES);
+    n
 }
 
 /// Legal moves with a selectable pawn generator — wall path logic unchanged.
@@ -97,10 +100,33 @@ pub fn generate_legal_moves_slice_mode(
     if board.is_terminal().is_some() {
         return 0;
     }
-
-    let mut n = generate_pawn_moves_with_mode(board, scratch, out, mode);
+    let mut n = if mode == PawnGenMode::O1Lookup {
+        generate_pawn_moves_o1(board, out)
+    } else {
+        generate_pawn_moves_with_mode(board, scratch, out, mode)
+    };
     if board.walls_remaining[board.side_to_move as usize] > 0 {
         n += generate_wall_moves_slice(board, &mut out[n..], scratch);
+    }
+    debug_assert!(n <= MAX_LEGAL_MOVES);
+    n
+}
+
+/// Benchmark-only legal generation using the old anchor-count flood precheck.
+/// Production callers must use [`generate_legal_moves_slice_mode`].
+#[doc(hidden)]
+pub fn generate_legal_moves_slice_anchor_baseline(
+    board: &mut Board,
+    out: &mut [Move],
+    scratch: &mut BfsScratch,
+    mode: PawnGenMode,
+) -> usize {
+    if board.is_terminal().is_some() {
+        return 0;
+    }
+    let mut n = generate_pawn_moves_with_mode(board, scratch, out, mode);
+    if board.walls_remaining[board.side_to_move as usize] > 0 {
+        n += generate_wall_moves_slice_anchor_baseline(board, &mut out[n..], scratch);
     }
     debug_assert!(n <= MAX_LEGAL_MOVES);
     n
@@ -128,7 +154,7 @@ pub fn generate_legal_moves_into(board: &mut Board, out: &mut Vec<Move>, scratch
 }
 
 pub fn generate_pawn_moves(board: &Board) -> Vec<Move> {
-    let mut out = Vec::with_capacity(4);
+    let mut out = Vec::with_capacity(8);
     generate_pawn_moves_into(board, &mut out);
     out
 }
@@ -218,13 +244,22 @@ pub fn generate_wall_moves_into(board: &mut Board, out: &mut Vec<Move>, scratch:
 }
 
 /// Path-valid wall placements (both players retain routes). Ignores wall budget / side to move.
-pub fn count_geometric_legal_walls(board: &mut Board, scratch: &mut BfsScratch) -> usize {
-    let mut buf = [Move::Wall {
-        row: 0,
-        col: 0,
-        orientation: WallOrientation::Horizontal,
-    }; MAX_LEGAL_MOVES];
-    generate_wall_moves_slice(board, &mut buf, scratch)
+pub fn count_geometric_legal_walls(board: &mut Board, _scratch: &mut BfsScratch) -> usize {
+    let masks = wall_masks(board);
+    let mut ctx: Option<WallTrialCtx> = None;
+    count_wall_orientation(
+        board,
+        masks.l12_h,
+        masks.topo_h,
+        WallOrientation::Horizontal,
+        &mut ctx,
+    ) + count_wall_orientation(
+        board,
+        masks.l12_v,
+        masks.topo_v,
+        WallOrientation::Vertical,
+        &mut ctx,
+    )
 }
 
 /// Board geometry that determines path-valid wall slots (ignores side / wall budget).
@@ -344,7 +379,7 @@ pub fn generate_legal_moves_slice_cached(
         return 0;
     }
 
-    let mut n = generate_pawn_moves_with_mode(board, scratch, out, PawnGenMode::default());
+    let mut n = generate_pawn_moves_o1(board, out);
     if board.walls_remaining[board.side_to_move as usize] > 0 {
         geometric_wall_len_cached(
             cache,
@@ -365,19 +400,43 @@ fn generate_wall_moves_slice(
     out: &mut [Move],
     _scratch: &mut BfsScratch,
 ) -> usize {
-    // Walls: L1 empty ∧ L2 collision → topo flood-skip → L3 bitboard flood when needed.
-    // Flood grids are built only if some candidate actually needs L3.
     let masks = wall_masks(board);
-    let (topo_h, topo_v) = if crate::movegen::wall_masks::wall_flood_skip_uses_anchor() {
-        crate::movegen::wall_masks::wall_needs_flood_masks(board)
-    } else {
-        (masks.topo_h, masks.topo_v)
-    };
+    generate_wall_moves_slice_with_topo(
+        board,
+        out,
+        masks.l12_h,
+        masks.l12_v,
+        masks.topo_h,
+        masks.topo_v,
+    )
+}
+
+/// A/B bench entry — anchor-count flood-skip baseline (not used in production movegen).
+#[doc(hidden)]
+pub fn generate_wall_moves_slice_anchor_baseline(
+    board: &mut Board,
+    out: &mut [Move],
+    _scratch: &mut BfsScratch,
+) -> usize {
+    let masks = wall_masks(board);
+    let (topo_h, topo_v) =
+        crate::movegen::wall_masks::wall_needs_flood_masks_anchor_baseline(board);
+    generate_wall_moves_slice_with_topo(board, out, masks.l12_h, masks.l12_v, topo_h, topo_v)
+}
+
+fn generate_wall_moves_slice_with_topo(
+    board: &mut Board,
+    out: &mut [Move],
+    l12_h: u64,
+    l12_v: u64,
+    topo_h: u64,
+    topo_v: u64,
+) -> usize {
     let mut ctx: Option<WallTrialCtx> = None;
     let mut n = 0usize;
     n += collect_wall_orientation(
         board,
-        masks.l12_h,
+        l12_h,
         topo_h,
         WallOrientation::Horizontal,
         &mut out[n..],
@@ -385,13 +444,38 @@ fn generate_wall_moves_slice(
     );
     n += collect_wall_orientation(
         board,
-        masks.l12_v,
+        l12_v,
         topo_v,
         WallOrientation::Vertical,
         &mut out[n..],
         &mut ctx,
     );
     n
+}
+
+fn count_wall_orientation(
+    board: &Board,
+    candidates: u64,
+    needs_flood: u64,
+    orientation: WallOrientation,
+    ctx: &mut Option<WallTrialCtx>,
+) -> usize {
+    let mut count = (candidates & !needs_flood).count_ones() as usize;
+    let mut heavy = candidates & needs_flood;
+    if heavy == 0 {
+        return count;
+    }
+    let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board));
+    while heavy != 0 {
+        let bit = heavy.trailing_zeros();
+        heavy &= heavy - 1;
+        let row = (bit / 8) as u8;
+        let col = (bit % 8) as u8;
+        if ctx.wall_keeps_paths_open(row, col, orientation) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// L1∧L2 candidates — phase A emits isolated walls; phase B runs L3 flood.
@@ -432,27 +516,31 @@ fn collect_wall_orientation_inner(
     }
 
     let mut heavy = candidates & needs_flood;
-    while heavy != 0 {
-        let bit = heavy.trailing_zeros();
-        heavy &= heavy - 1;
-        let row = (bit / 8) as u8;
-        let col = (bit % 8) as u8;
-        debug_assert!(wall_physically_legal_o1(
-            board,
-            row,
-            col,
-            orientation == WallOrientation::Horizontal
-        ));
-        if ctx
-            .get_or_insert_with(|| WallTrialCtx::new(board))
-            .wall_keeps_paths_open(row, col, orientation)
-        {
-            out[n] = Move::Wall {
+    if heavy != 0 {
+        let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board));
+        while heavy != 0 {
+            let bit = heavy.trailing_zeros();
+            heavy &= heavy - 1;
+            let row = (bit / 8) as u8;
+            let col = (bit % 8) as u8;
+            debug_assert!(wall_physically_legal_o1(
+                board,
                 row,
                 col,
-                orientation,
-            };
-            n += 1;
+                orientation == WallOrientation::Horizontal
+            ));
+            let legal = crate::bench_instr::record(
+                |b| &mut b.wall_legality,
+                || ctx.wall_keeps_paths_open(row, col, orientation),
+            );
+            if legal {
+                out[n] = Move::Wall {
+                    row,
+                    col,
+                    orientation,
+                };
+                n += 1;
+            }
         }
     }
     n

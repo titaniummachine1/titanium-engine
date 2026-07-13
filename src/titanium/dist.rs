@@ -169,6 +169,44 @@ pub fn width_in_layers(layers: &[u128; 81], depth: usize, d: u8) -> u32 {
     (layers[di] & FLOOD_PLAYABLE).count_ones()
 }
 
+/// Wall placement geometry for incremental edge-cut tests (ACE move ids >= 100).
+#[inline]
+pub fn wall_incr_probe_squares(m: i16) -> Option<(usize, usize, usize, usize)> {
+    if m < 100 {
+        return None;
+    }
+    let slot = (m % 100) as usize;
+    let a = (slot >> 3) * 9 + (slot & 7);
+    let (b2, c2, e2) = if m < 200 {
+        (a + 9, a + 1, a + 10) // hw: two vertical edges
+    } else {
+        (a + 1, a + 9, a + 10) // vw: two horizontal edges
+    };
+    Some((a, b2, c2, e2))
+}
+
+/// True when a newly placed wall may change this player's goal-distance field.
+///
+/// Uses the ACE incremental test: a wall only affects shortest-path distances
+/// when it blocks an edge between cells whose goal-distance differs (BFS
+/// gradient edge on some shortest route).
+#[inline]
+pub fn wall_incr_cuts_player_dist(d: &[u8; 81], m: i16) -> bool {
+    let Some((a, b2, c2, e2)) = wall_incr_probe_squares(m) else {
+        return false;
+    };
+    d[a] != d[b2] || d[c2] != d[e2]
+}
+
+/// Per-player incremental refresh flags for a single wall added on top of `d0`/`d1`.
+#[inline]
+pub fn wall_incr_refresh_flags(d0: &[u8; 81], d1: &[u8; 81], m: i16) -> (bool, bool) {
+    (
+        wall_incr_cuts_player_dist(d0, m),
+        wall_incr_cuts_player_dist(d1, m),
+    )
+}
+
 /// Inverse flood: distance from each cell to `player`'s goal row (ACE index).
 pub fn fill_ace_dist_to_goal(g: &GameState, player: usize, ace_dist: &mut [u8; 81]) {
     let masks = DirMasks::from_ace_game(g);
@@ -627,6 +665,88 @@ mod tests {
                 assert_eq!(route[i] & flank[i], 0);
             }
         }
+    }
+
+    #[test]
+    fn wall_incr_no_edge_cut_implies_unchanged_pawn_distance_oracle() {
+        use crate::titanium::game::GameState;
+
+        fn lcg(state: &mut u64) -> u64 {
+            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *state
+        }
+
+        let mut rng = 0xC47E_0DEDu64;
+        let mut wall_trials = 0usize;
+        let mut no_edge_trials = 0usize;
+        let mut false_negatives = 0usize;
+
+        for _ in 0..800 {
+            let mut g = GameState::new();
+            let plies = 4 + (lcg(&mut rng) % 28) as usize;
+            for _ in 0..plies {
+                let mut moves = [0i16; 160];
+                let mut n = g.gen_pawn_moves(&mut moves, 0);
+                for wt in 0..2usize {
+                    for slot in 0..64usize {
+                        if g.wall_legal(wt, slot) {
+                            moves[n] = (if wt == 0 { 100 } else { 200 }) + slot as i16;
+                            n += 1;
+                        }
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+                g.make_move(moves[(lcg(&mut rng) as usize) % n]);
+            }
+
+            let mut d0 = [0u8; 81];
+            let mut d1 = [0u8; 81];
+            fill_ace_dist_to_goal(&g, 0, &mut d0);
+            fill_ace_dist_to_goal(&g, 1, &mut d1);
+            let pre0 = d0[g.pawn[0]];
+            let pre1 = d1[g.pawn[1]];
+
+            for wt in 0..2usize {
+                for slot in 0..64usize {
+                    if !g.wall_legal(wt, slot) {
+                        continue;
+                    }
+                    let m = (if wt == 0 { 100 } else { 200 }) + slot as i16;
+                    wall_trials += 1;
+                    let (refresh0, refresh1) = wall_incr_refresh_flags(&d0, &d1, m);
+                    if refresh0 || refresh1 {
+                        continue;
+                    }
+                    no_edge_trials += 1;
+                    g.make_move(m);
+                    let mut child_d0 = [0u8; 81];
+                    let mut child_d1 = [0u8; 81];
+                    fill_ace_dist_to_goal(&g, 0, &mut child_d0);
+                    fill_ace_dist_to_goal(&g, 1, &mut child_d1);
+                    let post0 = child_d0[g.pawn[0]];
+                    let post1 = child_d1[g.pawn[1]];
+                    if post0 != pre0 || post1 != pre1 {
+                        false_negatives += 1;
+                    }
+                    g.unmake_move();
+                }
+            }
+        }
+
+        assert!(
+            wall_trials >= 5000,
+            "oracle coverage too small: {wall_trials} wall trials"
+        );
+        assert!(
+            no_edge_trials >= 500,
+            "oracle no-edge coverage too small: {no_edge_trials}"
+        );
+        assert_eq!(
+            false_negatives, 0,
+            "edge-cut skip would misclassify {false_negatives} / {no_edge_trials} no-edge walls"
+        );
     }
 
     #[test]

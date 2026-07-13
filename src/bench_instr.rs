@@ -1,5 +1,6 @@
 //! Benchmark-only counters and phase timers (`bench-instrument` feature).
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -23,6 +24,64 @@ impl OpStat {
         }
     }
 }
+
+/// Per call-site refresh_dist accounting. Index == site id.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RefreshSiteStat {
+    pub calls: u64,
+    pub ns: u128,
+    pub cheap: u64,
+    pub incr: u64,
+    pub full: u64,
+    pub reflood: u64,
+}
+
+pub const REFRESH_SITE_UNKNOWN: u8 = 0;
+pub const REFRESH_SITE_AB: u8 = 1;
+pub const REFRESH_SITE_QSEARCH_UNMAKE: u8 = 2;
+pub const REFRESH_SITE_QSEARCH_REMAKE: u8 = 3;
+pub const REFRESH_SITE_CAT_PATH_LMR: u8 = 4;
+pub const REFRESH_SITE_ROOT_DEF_INIT: u8 = 5;
+pub const REFRESH_SITE_ROOT_DEF_BEFORE: u8 = 6;
+pub const REFRESH_SITE_ROOT_DEF_AFTER: u8 = 7;
+pub const REFRESH_SITE_ROOT_WIN_BEFORE: u8 = 8;
+pub const REFRESH_SITE_ROOT_WIN_AFTER: u8 = 9;
+pub const REFRESH_SITE_RACE_PICK: u8 = 10;
+pub const REFRESH_SITE_PROGRESS: u8 = 11;
+pub const REFRESH_SITE_THINK_GUARD: u8 = 12;
+pub const REFRESH_SITE_THINK_FINAL: u8 = 13;
+pub const REFRESH_SITE_EVAL_POSITION: u8 = 14;
+pub const REFRESH_SITE_LAZY_ROOT: u8 = 15;
+pub const REFRESH_SITE_EVAL_DUMP: u8 = 16;
+pub const REFRESH_SITE_EVAL_PARITY: u8 = 17;
+pub const REFRESH_SITE_OPENING: u8 = 18;
+pub const REFRESH_SITE_CHEAP_CERT: u8 = 19;
+pub const REFRESH_SITE_RACE_ROOT: u8 = 20;
+pub const REFRESH_SITE_COUNT: usize = 21;
+
+pub const REFRESH_SITE_META: [(&str, u32, &str); REFRESH_SITE_COUNT] = [
+    ("unknown", 0, "?"),
+    ("ab", 5164, "ab"),
+    ("qsearch_unmake", 5078, "q_search_wall_dist_changed"),
+    ("qsearch_remake", 5082, "q_search_wall_dist_changed"),
+    ("cat_path_lmr", 5598, "ab"),
+    ("root_def_init", 6094, "root_defense_verify"),
+    ("root_def_before", 6108, "root_defense_verify"),
+    ("root_def_after", 6125, "root_defense_verify"),
+    ("root_win_before", 6263, "root_clean_win_verify"),
+    ("root_win_after", 6280, "root_clean_win_verify"),
+    ("race_pick", 4688, "race_root_pick"),
+    ("progress", 3502, "emit_stream_progress"),
+    ("think_guard", 7295, "think_search"),
+    ("think_final", 7314, "think_search"),
+    ("eval_position", 2871, "eval_position"),
+    ("lazy_root", 2943, "ordered_root_moves_snapshot"),
+    ("eval_dump", 3142, "eval_dump_json"),
+    ("eval_parity", 3284, "eval_parity_trace_json"),
+    ("opening", 6352, "think"),
+    ("cheap_cert", 6413, "think"),
+    ("race_root", 6508, "think"),
+];
 
 #[derive(Clone, Default, Debug)]
 pub struct BenchInstr {
@@ -71,8 +130,31 @@ pub struct BenchInstr {
     pub eval_cat_heat: OpStat,
     pub eval_tail: OpStat,
     pub mat_layers: OpStat,
+    pub refresh_site_stats: [RefreshSiteStat; REFRESH_SITE_COUNT],
+    pub refresh_ab_skipped: u64,
+    /// Child `ab(ply+1)` entered immediately after `cat_path_lmr` refresh.
+    pub cat_child_ab_entries: u64,
+    /// At that entry, `cached_stamp` + dist keys already valid (duplicate refresh).
+    pub cat_child_ab_dup_valid: u64,
+    /// Control path: duplicate `refresh_dist` still invoked (cheap inner path).
+    pub cat_child_ab_dup_refresh: u64,
+    /// Reuse path: child `ab()` skipped refresh when state provably valid.
+    pub cat_child_ab_dup_avoided: u64,
+    /// CAT-refreshed child returned from TT cutoff before `evaluate()`.
+    pub cat_child_ab_tt_cutoff_before_eval: u64,
+    /// CAT `refresh_dist` incr path: wall did not cut either shortest-path edge.
+    pub cat_incr_no_edge_cut: u64,
+    /// CAT path-LMR skipped refresh because wall cut neither shortest-path edge.
+    pub cat_no_edge_skip: u64,
+    /// Shared edge-cut probe invocations at the CAT path-LMR site.
+    pub cat_edge_test_calls: u64,
     search_t0: Option<Instant>,
     measured_ns: u128,
+}
+
+thread_local! {
+    static BENCH: std::cell::RefCell<BenchInstr> = std::cell::RefCell::new(BenchInstr::default());
+    static ACTIVE_REFRESH_SITE: Cell<u8> = Cell::new(REFRESH_SITE_UNKNOWN);
 }
 
 impl BenchInstr {
@@ -92,6 +174,10 @@ impl BenchInstr {
 
     pub fn set_stop_reason(&mut self, reason: &'static str) {
         self.stop_reason = reason;
+    }
+
+    pub fn refresh_site_calls_total(&self) -> u64 {
+        self.refresh_site_stats.iter().map(|s| s.calls).sum()
     }
 
     pub fn to_json(&self) -> String {
@@ -167,16 +253,52 @@ impl BenchInstr {
             .iter()
             .map(|(name, s)| row(name, s, nodes, total_ns))
             .collect();
+
+        let site_rows: Vec<String> = (0..REFRESH_SITE_COUNT)
+            .map(|i| {
+                let s = &self.refresh_site_stats[i];
+                let (label, line, func) = REFRESH_SITE_META[i];
+                let cpn = if nodes == 0 {
+                    0.0
+                } else {
+                    s.calls as f64 / nodes as f64
+                };
+                format!(
+                    r#"{{"site_id":{i},"label":"{label}","line":{line},"function":"{func}","calls":{calls},"calls_per_node":{cpn:.6},"total_ns":{ns},"ns_per_call":{npc:.1},"cheap":{cheap},"incr":{incr},"full":{full},"reflood":{reflood}}}"#,
+                    i = i,
+                    label = label,
+                    line = line,
+                    func = func,
+                    calls = s.calls,
+                    cpn = cpn,
+                    ns = s.ns,
+                    npc = if s.calls == 0 { 0.0 } else { s.ns as f64 / s.calls as f64 },
+                    cheap = s.cheap,
+                    incr = s.incr,
+                    full = s.full,
+                    reflood = s.reflood,
+                )
+            })
+            .collect();
+
         format!(
-            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","ops":[{}]}}"#,
+            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
             self.stop_reason,
-            parts.join(",")
+            self.refresh_dist.calls,
+            self.refresh_site_calls_total(),
+            self.refresh_ab_skipped,
+            self.cat_child_ab_entries,
+            self.cat_child_ab_dup_valid,
+            self.cat_child_ab_dup_refresh,
+            self.cat_child_ab_dup_avoided,
+            self.cat_child_ab_tt_cutoff_before_eval,
+            self.cat_incr_no_edge_cut,
+            self.cat_no_edge_skip,
+            self.cat_edge_test_calls,
+            parts.join(","),
+            site_rows.join(","),
         )
     }
-}
-
-thread_local! {
-    static BENCH: std::cell::RefCell<BenchInstr> = std::cell::RefCell::new(BenchInstr::default());
 }
 
 pub fn with_bench<F, R>(f: F) -> R
@@ -202,7 +324,6 @@ where
     body()
 }
 
-/// Count-only on nanosecond-hot paths (timing omitted to avoid probe skew).
 #[inline(always)]
 pub fn count<F, R>(pick: fn(&mut BenchInstr) -> &mut OpStat, body: F) -> R
 where
@@ -219,11 +340,111 @@ where
 }
 
 #[inline(always)]
+pub fn bump_u64(pick: fn(&mut BenchInstr) -> &mut u64) {
+    #[cfg(feature = "bench-instrument")]
+    with_bench(|b| {
+        *pick(b) += 1;
+    });
+}
+
+#[inline(always)]
 pub fn bump(pick: fn(&mut BenchInstr) -> &mut OpStat) {
     #[cfg(feature = "bench-instrument")]
     with_bench(|b| {
         pick(b).calls += 1;
     });
+}
+
+#[inline(always)]
+pub fn active_refresh_site() -> u8 {
+    #[cfg(feature = "bench-instrument")]
+    {
+        ACTIVE_REFRESH_SITE.get()
+    }
+    #[cfg(not(feature = "bench-instrument"))]
+    {
+        REFRESH_SITE_UNKNOWN
+    }
+}
+
+#[inline(always)]
+pub fn refresh_site_call_start(site: u8) {
+    #[cfg(feature = "bench-instrument")]
+    {
+        let idx = site as usize;
+        ACTIVE_REFRESH_SITE.set(site);
+        if idx < REFRESH_SITE_COUNT {
+            with_bench(|b| b.refresh_site_stats[idx].calls += 1);
+        }
+    }
+    #[cfg(not(feature = "bench-instrument"))]
+    let _ = site;
+}
+
+#[inline(always)]
+pub fn refresh_site_call_end(site: u8, dt: Duration) {
+    #[cfg(feature = "bench-instrument")]
+    {
+        let idx = site as usize;
+        let ns = dt.as_nanos();
+        if idx < REFRESH_SITE_COUNT {
+            with_bench(|b| {
+                b.refresh_site_stats[idx].ns += ns;
+                b.refresh_dist.record(dt);
+            });
+        } else {
+            with_bench(|b| b.refresh_dist.record(dt));
+        }
+        ACTIVE_REFRESH_SITE.set(REFRESH_SITE_UNKNOWN);
+    }
+    #[cfg(not(feature = "bench-instrument"))]
+    {
+        let _ = (site, dt);
+    }
+}
+
+#[inline(always)]
+pub fn refresh_site_path(path: u8) {
+    #[cfg(feature = "bench-instrument")]
+    {
+        let site = ACTIVE_REFRESH_SITE.get() as usize;
+        if site < REFRESH_SITE_COUNT {
+            with_bench(|b| match path {
+                0 => {
+                    b.refresh_cheap.calls += 1;
+                    b.refresh_site_stats[site].cheap += 1;
+                }
+                1 => {
+                    b.refresh_incr.calls += 1;
+                    b.refresh_site_stats[site].incr += 1;
+                }
+                _ => {
+                    b.refresh_full.calls += 1;
+                    b.refresh_site_stats[site].full += 1;
+                }
+            });
+        }
+    }
+    #[cfg(not(feature = "bench-instrument"))]
+    let _ = path;
+}
+
+#[inline(always)]
+pub fn refresh_site_reflood() {
+    #[cfg(feature = "bench-instrument")]
+    {
+        let site = ACTIVE_REFRESH_SITE.get() as usize;
+        bump(|b| &mut b.dist_reflood);
+        if site < REFRESH_SITE_COUNT {
+            with_bench(|b| b.refresh_site_stats[site].reflood += 1);
+        }
+    }
+}
+
+#[inline(always)]
+pub fn bump_ab_refresh_skipped() {
+    #[cfg(feature = "bench-instrument")]
+    with_bench(|b| b.refresh_ab_skipped += 1);
 }
 
 pub fn begin_search() {
@@ -250,7 +471,6 @@ pub fn take_json_report() -> Option<String> {
     None
 }
 
-/// RAII timer for multi-statement regions (e.g. `evaluate`).
 pub struct OpTimer {
     #[cfg(feature = "bench-instrument")]
     pick: fn(&mut BenchInstr) -> &mut OpStat,

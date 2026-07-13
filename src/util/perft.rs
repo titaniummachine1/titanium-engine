@@ -26,7 +26,8 @@ pub const PERFT_DEPTH_TIMEOUT_FLOOR_MS: u64 = 250;
 
 use crate::core::board::{Board, Move};
 use crate::movegen::{
-    generate_legal_moves_into, generate_legal_moves_slice, generate_legal_moves_slice_mode,
+    generate_legal_moves_into, generate_legal_moves_slice,
+    generate_legal_moves_slice_anchor_baseline, generate_legal_moves_slice_mode,
     generate_pawn_moves_slice_mode, PawnGenMode, MAX_LEGAL_MOVES,
 };
 use crate::path::BfsScratch;
@@ -39,14 +40,66 @@ pub type PerftContext = WorkerContext;
 pub fn perft_fast_ctx(
     board: &mut Board,
     depth: u32,
-    shared: Option<&mut SharedState>,
+    mut shared: Option<&mut SharedState>,
     worker: &mut WorkerContext,
 ) -> u64 {
-    perft_fast_mode_ctx(board, depth, PawnGenMode::default(), shared, worker)
+    if depth == 0 {
+        return 1;
+    }
+
+    let verify = board.tt_verify();
+    if let Some(shared) = shared.as_mut() {
+        let hit = crate::bench_instr::record(
+            |b| &mut b.tt_probe,
+            || shared.tt.probe(board.hash, verify, depth as u8),
+        );
+        if let Some(nodes) = hit {
+            crate::bench_instr::bump(|b| &mut b.tt_hit);
+            return nodes;
+        }
+    }
+
+    let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let move_count = crate::bench_instr::record(
+        |b| &mut b.gen_moves,
+        || generate_legal_moves_slice(board, &mut move_buf, &mut worker.bfs),
+    );
+    let nodes = if depth == 1 {
+        move_count as u64
+    } else {
+        let mut nodes = 0u64;
+        for &mv in &move_buf[..move_count] {
+            let undo = crate::bench_instr::record(|b| &mut b.make_move, || board.make_move(mv));
+            nodes += perft_fast_ctx(board, depth - 1, shared.as_deref_mut(), worker);
+            crate::bench_instr::record(|b| &mut b.unmake_move, || board.unmake_move(undo));
+        }
+        nodes
+    };
+
+    if let Some(shared) = shared {
+        crate::bench_instr::record(
+            |b| &mut b.tt_store,
+            || shared.tt.store(board.hash, verify, depth as u8, nodes),
+        );
+    }
+    nodes
 }
 
 /// TT perft with selectable pawn generator (production path uses TT + V11 walls).
 pub fn perft_fast_mode_ctx(
+    board: &mut Board,
+    depth: u32,
+    mode: PawnGenMode,
+    shared: Option<&mut SharedState>,
+    worker: &mut WorkerContext,
+) -> u64 {
+    if mode == PawnGenMode::O1Lookup {
+        return perft_fast_ctx(board, depth, shared, worker);
+    }
+    perft_fast_mode_ctx_inner(board, depth, mode, shared, worker)
+}
+
+fn perft_fast_mode_ctx_inner(
     board: &mut Board,
     depth: u32,
     mode: PawnGenMode,
@@ -75,7 +128,8 @@ pub fn perft_fast_mode_ctx(
         for i in 0..move_count {
             let mv = move_buf[i];
             let undo = board.make_move(mv);
-            nodes += perft_fast_mode_ctx(board, depth - 1, mode, shared.as_deref_mut(), worker);
+            nodes +=
+                perft_fast_mode_ctx_inner(board, depth - 1, mode, shared.as_deref_mut(), worker);
             board.unmake_move(undo);
         }
         nodes
@@ -94,13 +148,124 @@ pub fn perft_fast_mode(board: &mut Board, depth: u32, mode: PawnGenMode) -> u64 
     perft_fast_mode_ctx(board, depth, mode, Some(&mut shared), &mut worker)
 }
 
+/// Benchmark-only TT perft using the legacy anchor-count flood precheck.
+#[doc(hidden)]
+pub fn perft_fast_anchor_baseline(board: &mut Board, depth: u32) -> u64 {
+    let mut shared = SharedState::new();
+    let mut worker = WorkerContext::new();
+    perft_fast_anchor_baseline_ctx(board, depth, Some(&mut shared), &mut worker)
+}
+
+fn perft_fast_anchor_baseline_ctx(
+    board: &mut Board,
+    depth: u32,
+    mut shared: Option<&mut SharedState>,
+    worker: &mut WorkerContext,
+) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+    let verify = board.tt_verify();
+    if let Some(shared) = shared.as_mut() {
+        if let Some(nodes) = shared.tt.probe(board.hash, verify, depth as u8) {
+            return nodes;
+        }
+    }
+
+    let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let move_count = generate_legal_moves_slice_anchor_baseline(
+        board,
+        &mut move_buf,
+        &mut worker.bfs,
+        PawnGenMode::O1Lookup,
+    );
+    let nodes = if depth == 1 {
+        move_count as u64
+    } else {
+        let mut nodes = 0u64;
+        for &mv in &move_buf[..move_count] {
+            let undo = board.make_move(mv);
+            nodes +=
+                perft_fast_anchor_baseline_ctx(board, depth - 1, shared.as_deref_mut(), worker);
+            board.unmake_move(undo);
+        }
+        nodes
+    };
+    if let Some(shared) = shared {
+        shared.tt.store(board.hash, verify, depth as u8, nodes);
+    }
+    nodes
+}
+
 /// Perft without TT — for timing pawn-generation variants fairly.
 pub fn perft_no_tt_mode(board: &mut Board, depth: u32, mode: PawnGenMode) -> u64 {
     let mut scratch = BfsScratch::new();
     perft_no_tt_mode_ctx(board, depth, mode, &mut scratch)
 }
 
+/// Benchmark-only raw perft using the legacy anchor-count flood precheck.
+#[doc(hidden)]
+pub fn perft_no_tt_anchor_baseline(board: &mut Board, depth: u32) -> u64 {
+    let mut scratch = BfsScratch::new();
+    perft_no_tt_anchor_baseline_ctx(board, depth, &mut scratch)
+}
+
+fn perft_no_tt_anchor_baseline_ctx(board: &mut Board, depth: u32, scratch: &mut BfsScratch) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+    let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let move_count = generate_legal_moves_slice_anchor_baseline(
+        board,
+        &mut move_buf,
+        scratch,
+        PawnGenMode::O1Lookup,
+    );
+    if depth == 1 {
+        return move_count as u64;
+    }
+    let mut nodes = 0u64;
+    for &mv in &move_buf[..move_count] {
+        let undo = board.make_move(mv);
+        nodes += perft_no_tt_anchor_baseline_ctx(board, depth - 1, scratch);
+        board.unmake_move(undo);
+    }
+    nodes
+}
+
 pub fn perft_no_tt_mode_ctx(
+    board: &mut Board,
+    depth: u32,
+    mode: PawnGenMode,
+    scratch: &mut BfsScratch,
+) -> u64 {
+    if mode == PawnGenMode::O1Lookup {
+        return perft_no_tt_o1_ctx(board, depth, scratch);
+    }
+    perft_no_tt_mode_ctx_inner(board, depth, mode, scratch)
+}
+
+fn perft_no_tt_o1_ctx(board: &mut Board, depth: u32, scratch: &mut BfsScratch) -> u64 {
+    if depth == 0 {
+        return 1;
+    }
+
+    let mut move_buf = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+    let move_count = generate_legal_moves_slice(board, &mut move_buf, scratch);
+    if depth == 1 {
+        return move_count as u64;
+    }
+
+    let mut nodes = 0u64;
+    for &mv in &move_buf[..move_count] {
+        let undo = board.make_move(mv);
+        nodes += perft_no_tt_o1_ctx(board, depth - 1, scratch);
+        board.unmake_move(undo);
+    }
+    nodes
+}
+
+fn perft_no_tt_mode_ctx_inner(
     board: &mut Board,
     depth: u32,
     mode: PawnGenMode,
@@ -120,7 +285,7 @@ pub fn perft_no_tt_mode_ctx(
     for i in 0..move_count {
         let mv = move_buf[i];
         let undo = board.make_move(mv);
-        nodes += perft_no_tt_mode_ctx(board, depth - 1, mode, scratch);
+        nodes += perft_no_tt_mode_ctx_inner(board, depth - 1, mode, scratch);
         board.unmake_move(undo);
     }
     nodes

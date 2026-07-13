@@ -209,8 +209,11 @@ pub fn wall_needs_flood_v_from_bits(horizontal_walls: u64, vertical_walls: u64) 
 }
 
 /// True when a candidate wall can touch enough topology to possibly seal.
+///
+/// **Warning:** recomputes the whole-board topo mask per call. Prefer testing a
+/// precomputed `topo_h`/`topo_v` bit from [`wall_masks`] inside candidate loops.
 #[inline]
-pub fn wall_slot_needs_flood(
+pub fn wall_slot_needs_flood_recomputing_mask(
     horizontal_walls: u64,
     vertical_walls: u64,
     horizontal: bool,
@@ -222,6 +225,17 @@ pub fn wall_slot_needs_flood(
         topo_v_from(horizontal_walls, vertical_walls)
     };
     (mask >> slot) & 1 != 0
+}
+
+/// Alias kept for call sites that probe a single slot without a cached mask.
+#[inline]
+pub fn wall_slot_needs_flood(
+    horizontal_walls: u64,
+    vertical_walls: u64,
+    horizontal: bool,
+    slot: usize,
+) -> bool {
+    wall_slot_needs_flood_recomputing_mask(horizontal_walls, vertical_walls, horizontal, slot)
 }
 
 /// ACE/JS anchor-count precheck — conservative O(25) per slot (bench baseline).
@@ -298,42 +312,15 @@ fn wall_needs_flood_v_anchor_mask(horizontal_walls: u64, vertical_walls: u64) ->
     mask
 }
 
-/// Bench-only: `TITANIUM_BENCH=1` plus `TITANIUM_WALL_FLOOD_SKIP=anchor|old|0`.
-/// Production/tests always use O(1) topo unless both are set.
+/// Anchor-count flood-skip baseline — for A/B benches only (never call from production movegen).
 #[inline]
-pub fn wall_flood_skip_uses_anchor() -> bool {
-    static ANCHOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ANCHOR.get_or_init(|| {
-        if !matches!(
-            std::env::var("TITANIUM_BENCH").ok().as_deref(),
-            Some("1")
-        ) {
-            return false;
-        }
-        matches!(
-            std::env::var("TITANIUM_WALL_FLOOD_SKIP")
-                .ok()
-                .as_deref()
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some("anchor" | "0" | "old")
-        )
-    })
-}
-
-/// Flood-skip masks for movegen — topo shift (default) or anchor-count (bench baseline).
-#[inline]
-pub fn wall_needs_flood_masks(board: &Board) -> (u64, u64) {
+pub fn wall_needs_flood_masks_anchor_baseline(board: &Board) -> (u64, u64) {
     let h = board.horizontal_walls;
     let v = board.vertical_walls;
-    if wall_flood_skip_uses_anchor() {
-        (
-            wall_needs_flood_h_anchor_mask(h, v),
-            wall_needs_flood_v_anchor_mask(h, v),
-        )
-    } else {
-        (topo_h_from(h, v), topo_v_from(h, v))
-    }
+    (
+        wall_needs_flood_h_anchor_mask(h, v),
+        wall_needs_flood_v_anchor_mask(h, v),
+    )
 }
 
 #[cfg(test)]

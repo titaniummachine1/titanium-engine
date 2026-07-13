@@ -93,6 +93,7 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
         || is_v17
     {
         search.enable_cat_path_lmr();
+        search.enable_cat_no_edge_skip();
     }
     if engine_flag == "titanium-v17"
         || engine_flag == "titanium-v17-lazy-topn"
@@ -324,6 +325,7 @@ mod session_tests {
     fn default_v17_enables_cat_path_lmr() {
         let search = build_search("titanium-v17", GameState::new());
         assert!(search.cat_path_lmr_enabled());
+        assert!(search.cat_no_edge_skip_enabled());
     }
 
     #[test]

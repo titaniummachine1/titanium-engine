@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 
 use titanium::{
     cat_snapshot_json, format_move, generate_legal_moves, genmove_algebraic, lmr_snapshot_json,
-    perft_divide, run_search, run_session_stdio, Board, Engine, GameSearchSession, GenmoveConfig,
-    GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
-    MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
+    perft_divide, perft_fast_anchor_baseline, perft_no_tt_anchor_baseline, run_search,
+    run_session_stdio, Board, Engine, GameSearchSession, GenmoveConfig, GenmoveEngine, MctsConfig,
+    SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS, MCTS_DEFAULT_MAX_SIMULATIONS,
+    MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -311,7 +312,7 @@ fn run_perft(args: &[String]) {
     let cli = parse_cli(args);
     let (board, depth) = load_board(&cli, 2);
     if depth == 5 {
-        match run_perft_depth5_timed(&board, cli.threads, cli.no_tt) {
+        match run_perft_depth5_timed(&board, cli.threads, cli.no_tt, false) {
             Ok((nodes, elapsed)) => {
                 println!("perft {} {}", depth, nodes);
                 println!("threads {}", cli.threads);
@@ -337,6 +338,9 @@ fn run_perft(args: &[String]) {
 }
 
 fn perft5_timeout() -> Duration {
+    #[cfg(feature = "bench-instrument")]
+    return Duration::from_secs(120);
+    #[cfg(not(feature = "bench-instrument"))]
     Duration::from_secs(PERFT5_TIMEOUT_SECS)
 }
 
@@ -353,6 +357,7 @@ fn run_perft_depth5_timed(
     board: &Board,
     threads: usize,
     no_tt: bool,
+    anchor_baseline: bool,
 ) -> Result<(u64, Duration), ()> {
     use std::sync::mpsc;
 
@@ -362,14 +367,26 @@ fn run_perft_depth5_timed(
         .name("perft-d5".into())
         .spawn(move || {
             let mut engine = make_engine(threads);
+            titanium::bench_instr::begin_search();
             let start = Instant::now();
-            let nodes = if no_tt {
+            let nodes = if anchor_baseline && no_tt {
+                let mut scratch = board_copy.clone();
+                perft_no_tt_anchor_baseline(&mut scratch, 5)
+            } else if anchor_baseline {
+                let mut scratch = board_copy.clone();
+                perft_fast_anchor_baseline(&mut scratch, 5)
+            } else if no_tt {
                 let mut scratch = board_copy.clone();
                 engine.perft_no_tt(&mut scratch, 5)
             } else {
                 engine.perft(&board_copy, 5)
             };
-            let _ = done_tx.send((nodes, start.elapsed()));
+            let elapsed = start.elapsed();
+            titanium::bench_instr::end_search(nodes);
+            if let Some(report) = titanium::bench_instr::take_json_report() {
+                eprintln!("perft_profile {report}");
+            }
+            let _ = done_tx.send((nodes, elapsed));
         })
         .expect("spawn perft-d5");
 
@@ -390,10 +407,17 @@ fn run_perft_depth5_timed(
     board: &Board,
     threads: usize,
     no_tt: bool,
+    anchor_baseline: bool,
 ) -> Result<(u64, Duration), ()> {
     let mut engine = make_engine(threads);
     let start = Instant::now();
-    let nodes = if no_tt {
+    let nodes = if anchor_baseline && no_tt {
+        let mut board_copy = board.clone();
+        perft_no_tt_anchor_baseline(&mut board_copy, 5)
+    } else if anchor_baseline {
+        let mut board_copy = board.clone();
+        perft_fast_anchor_baseline(&mut board_copy, 5)
+    } else if no_tt {
         let mut board_copy = board.clone();
         engine.perft_no_tt(&mut board_copy, 5)
     } else {
@@ -406,6 +430,19 @@ fn run_perft_depth5_timed(
     Ok((nodes, elapsed))
 }
 
+fn perft_bench_uses_anchor() -> bool {
+    if env::var("TITANIUM_BENCH").ok().as_deref() != Some("1") {
+        return false;
+    }
+    matches!(
+        env::var("TITANIUM_WALL_FLOOD_SKIP")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "anchor" | "old" | "0"
+    )
+}
+
 /// Timed perft for benchmarks: full prewarm, emit `readyok`, then measure perft only.
 fn run_perft_bench(args: &[String]) {
     use std::io::Write as _;
@@ -413,17 +450,14 @@ fn run_perft_bench(args: &[String]) {
     let cli = parse_cli(args);
     let (board, depth) = load_board(&cli, 2);
     titanium::movegen::prewarm();
+    let flood_anchor = perft_bench_uses_anchor();
     println!("readyok");
     let _ = std::io::stdout().flush();
 
-    let flood_skip = if titanium::movegen::wall_masks::wall_flood_skip_uses_anchor() {
-        "anchor"
-    } else {
-        "topo"
-    };
+    let flood_skip = if flood_anchor { "anchor" } else { "topo" };
 
     if depth == 5 {
-        match run_perft_depth5_timed(&board, cli.threads, cli.no_tt) {
+        match run_perft_depth5_timed(&board, cli.threads, cli.no_tt, flood_anchor) {
             Ok((nodes, elapsed)) => {
                 let nps = nodes as f64 / elapsed.as_secs_f64();
                 println!(
@@ -437,12 +471,19 @@ fn run_perft_bench(args: &[String]) {
         return;
     }
 
-    let mut engine = make_engine(cli.threads);
     let start = Instant::now();
-    let nodes = if cli.no_tt {
+    let nodes = if flood_anchor && cli.no_tt {
+        let mut board_copy = board.clone();
+        perft_no_tt_anchor_baseline(&mut board_copy, depth)
+    } else if flood_anchor {
+        let mut board_copy = board.clone();
+        perft_fast_anchor_baseline(&mut board_copy, depth)
+    } else if cli.no_tt {
+        let mut engine = make_engine(cli.threads);
         let mut board_copy = board.clone();
         engine.perft_no_tt(&mut board_copy, depth)
     } else {
+        let mut engine = make_engine(cli.threads);
         engine.perft(&board, depth)
     };
     let elapsed = start.elapsed();
