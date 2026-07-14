@@ -358,7 +358,9 @@ impl WasmEngine {
             _ => 800,
         };
         let mut search = TitaniumSearch::grafted_v16_with_ceiling(g, None, ceiling);
-        search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Play, None);
+        // Order: bias root move order / attention from the human DAG, but always search.
+        // Play (forced book moves) is reserved for training/oracle CLIs via --book play.
+        search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         let engine_label = "titanium-v16".to_string();
         WasmEngine {
             search,
