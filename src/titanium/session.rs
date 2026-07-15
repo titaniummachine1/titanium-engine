@@ -38,6 +38,8 @@ fn is_v16_graft(engine_flag: &str) -> bool {
             | "titanium-v17-no-partial-iter"
             | "titanium-v17-no-predict-stop"
             | "titanium-v17-no-partial-no-predict"
+            | "titanium-v17-race1w"
+            | "titanium-v17-race2w"
     )
 }
 
@@ -55,6 +57,8 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
             | "titanium-v17-no-partial-iter"
             | "titanium-v17-no-predict-stop"
             | "titanium-v17-no-partial-no-predict"
+            | "titanium-v17-race1w"
+            | "titanium-v17-race2w"
     );
     let enable_sf_history = matches!(
         engine_flag,
@@ -100,16 +104,24 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
         || engine_flag == "titanium-v17-rfp-ace"
         || engine_flag == "titanium-v17-lmp-ace"
         || engine_flag == "titanium-v17-probcut"
+        || engine_flag == "titanium-v17-race1w"
+        || engine_flag == "titanium-v17-race2w"
     {
         search.enable_lazy_topn();
     }
     if engine_flag == "titanium-v17"
         || engine_flag == "titanium-v17-lmp-ace"
         || engine_flag == "titanium-v17-probcut"
+        || engine_flag == "titanium-v17-race1w"
+        || engine_flag == "titanium-v17-race2w"
     {
         search.set_ace_lmp(true);
     }
-    if engine_flag == "titanium-v17" || engine_flag == "titanium-v17-rfp-ace" {
+    if engine_flag == "titanium-v17"
+        || engine_flag == "titanium-v17-rfp-ace"
+        || engine_flag == "titanium-v17-race1w"
+        || engine_flag == "titanium-v17-race2w"
+    {
         search.set_ace_rfp(true);
     }
     if engine_flag == "titanium-v17-probcut" {
@@ -127,6 +139,11 @@ fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str)
     }
     if engine_flag.contains("pmc") {
         search.enable_eme();
+    }
+    if engine_flag == "titanium-v17" || engine_flag == "titanium-v17-race1w" {
+        search.set_remaining_wall_race_layers(true, false);
+    } else if engine_flag == "titanium-v17-race2w" {
+        search.set_remaining_wall_race_layers(true, true);
     }
 }
 
@@ -386,5 +403,22 @@ mod session_tests {
         let explicit = build_search("titanium-v17-rfp-ace", GameState::new());
         assert!(default.ace_rfp_enabled());
         assert!(explicit.ace_rfp_enabled());
+    }
+
+    #[test]
+    fn remaining_wall_race_variants_preserve_all_v17_defaults() {
+        let one = build_search("titanium-v17-race1w", GameState::new());
+        let both = build_search("titanium-v17-race2w", GameState::new());
+        for search in [&one, &both] {
+            assert!(search.sf_history_enabled());
+            assert!(search.q_search_enabled());
+            assert!(search.cat_path_lmr_enabled());
+            assert!(search.cat_no_edge_skip_enabled());
+            assert!(search.lazy_topn_enabled());
+            assert!(search.ace_lmp_enabled());
+            assert!(search.ace_rfp_enabled());
+        }
+        assert_eq!(one.remaining_wall_race_layers(), (true, false));
+        assert_eq!(both.remaining_wall_race_layers(), (true, true));
     }
 }

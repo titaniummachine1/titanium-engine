@@ -1400,6 +1400,195 @@ mod score_label_tests {
         ));
     }
 
+    fn two_wall_fixture(p0: &str, p1: &str, hands: [i32; 2], turn: usize) -> GameState {
+        use crate::titanium::game::ZOBRIST;
+        let mut game = GameState::new();
+        game.pawn = [
+            crate::titanium::algebraic_to_move_id(p0) as usize,
+            crate::titanium::algebraic_to_move_id(p1) as usize,
+        ];
+        game.wl = hands;
+        game.turn = turn;
+        game.hash_lo = ZOBRIST.pawn_lo[0][game.pawn[0]] ^ ZOBRIST.pawn_lo[1][game.pawn[1]];
+        game.hash_hi = ZOBRIST.pawn_hi[0][game.pawn[0]] ^ ZOBRIST.pawn_hi[1][game.pawn[1]];
+        if turn != 0 {
+            game.hash_lo ^= ZOBRIST.turn_lo;
+            game.hash_hi ^= ZOBRIST.turn_hi;
+        }
+        game
+    }
+
+    fn enabled_two_wall_search(game: GameState) -> Box<TitaniumSearch> {
+        let mut search = TitaniumSearch::new(game);
+        search.two_wall_race_resolved = Some(true);
+        search.rp_build_ok = true;
+        search.rc_count_cap = u32::MAX;
+        search.rc_solve_cap = f64::INFINITY;
+        search.deadline = Instant::now() + Duration::from_secs(30);
+        search
+    }
+
+    fn enabled_one_wall_search(game: GameState) -> Box<TitaniumSearch> {
+        let mut search = enabled_two_wall_search(game);
+        search.one_wall_race_resolved = Some(true);
+        search.two_wall_race_resolved = Some(false);
+        search
+    }
+
+    #[test]
+    fn one_wall_subset_accepts_holder_pure_race_win_as_bound() {
+        let game = two_wall_fixture("a6", "i4", [1, 0], 0);
+        let mut search = enabled_one_wall_search(game);
+        assert_eq!(
+            search.one_wall_race_bound(),
+            RaceBound::Lower(RACE_WIN_FLOOR)
+        );
+        assert_eq!(search.race_outcome_stats.one_wall_decisive, 1);
+    }
+
+    #[test]
+    fn one_wall_subset_declines_when_delayed_wall_can_matter() {
+        // The holder loses the pure race, but the opponent is not one step
+        // from goal. A delayed placement may matter, so the subset must fall
+        // back instead of manufacturing a loss.
+        let game = two_wall_fixture("a2", "i5", [1, 0], 0);
+        let mut search = enabled_one_wall_search(game);
+        assert_eq!(search.one_wall_race_bound(), RaceBound::Unknown);
+    }
+
+    #[test]
+    fn two_wall_subset_is_default_off() {
+        let game = two_wall_fixture("a7", "i4", [2, 0], 0);
+        let mut search = TitaniumSearch::new(game);
+        search.two_wall_race_resolved = Some(false);
+        assert_eq!(search.two_wall_monopoly_race_bound(), RaceBound::Unknown);
+        assert_eq!(search.race_outcome_stats.two_wall_calls, 0);
+    }
+
+    #[test]
+    fn two_wall_subset_accepts_monopoly_pure_race_win_as_bound() {
+        let game = two_wall_fixture("a7", "i4", [2, 0], 0);
+        let mut search = enabled_two_wall_search(game);
+        assert_eq!(
+            search.two_wall_monopoly_race_bound(),
+            RaceBound::Lower(RACE_WIN_FLOOR)
+        );
+        assert_eq!(search.race_outcome_stats.two_wall_decisive, 1);
+    }
+
+    #[test]
+    fn two_wall_forced_placement_fixture_matches_ordinary_search_winner() {
+        let game = two_wall_fixture("a7", "i2", [2, 0], 0);
+        let mut proof = enabled_two_wall_search(game.clone());
+        let bound = proof.two_wall_monopoly_race_bound();
+        assert_ne!(bound, RaceBound::Unknown, "forced-wall subset declined");
+
+        let mut ordinary = TitaniumSearch::new(game);
+        ordinary.two_wall_race_resolved = Some(false);
+        let result = ordinary.think(30_000, 5, true, false, "titanium-v17");
+        assert!(
+            result.score.abs() >= MATE - 1_000,
+            "ordinary depth-5 search did not prove the fixture: {}",
+            result.score
+        );
+        assert_eq!(bound.signum(), result.score.signum());
+    }
+
+    #[test]
+    fn two_wall_subset_rejects_split_nonholder_and_interacting_pawns() {
+        let cases = [
+            two_wall_fixture("a7", "i2", [1, 1], 0),
+            two_wall_fixture("a7", "i2", [0, 2], 0),
+            two_wall_fixture("e5", "e6", [2, 0], 0),
+        ];
+        for game in cases {
+            let mut search = enabled_two_wall_search(game);
+            assert_eq!(search.two_wall_monopoly_race_bound(), RaceBound::Unknown);
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic counter-oracle: explicit release invocation"]
+    fn two_wall_subset_random_empty_topology_counter_oracle() {
+        let mut checked = 0usize;
+        let mut ordinary_unresolved = 0usize;
+        for p0 in [18usize, 27, 36, 45, 54] {
+            for p1 in 63usize..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                let mut game = two_wall_fixture("a7", "i2", [2, 0], 0);
+                game.pawn = [p0, p1];
+                game.hash_lo = crate::titanium::game::ZOBRIST.pawn_lo[0][p0]
+                    ^ crate::titanium::game::ZOBRIST.pawn_lo[1][p1];
+                game.hash_hi = crate::titanium::game::ZOBRIST.pawn_hi[0][p0]
+                    ^ crate::titanium::game::ZOBRIST.pawn_hi[1][p1];
+
+                let mut proof = enabled_two_wall_search(game.clone());
+                let bound = proof.two_wall_monopoly_race_bound();
+                if bound == RaceBound::Unknown {
+                    continue;
+                }
+
+                let mut ordinary = TitaniumSearch::new(game);
+                ordinary.two_wall_race_resolved = Some(false);
+                let result = ordinary.think(30_000, 8, true, false, "titanium-v17");
+                if result.score.abs() < MATE - 1_000 {
+                    ordinary_unresolved += 1;
+                    continue;
+                }
+                assert_eq!(
+                    bound.signum(),
+                    result.score.signum(),
+                    "winner mismatch p0={p0} p1={p1}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 10, "insufficient decisive samples: {checked}");
+        eprintln!(
+            "two-wall counter-oracle: {checked} independently proven states, 0 mismatches, {ordinary_unresolved} ordinary-search unknown"
+        );
+    }
+
+    #[test]
+    #[ignore = "diagnostic performance comparison: explicit release invocation"]
+    fn two_wall_subset_ab_measurement() {
+        let fixtures = [
+            ("pure-win", two_wall_fixture("a7", "i4", [2, 0], 0), 8),
+            ("forced-wall", two_wall_fixture("a7", "i2", [2, 0], 0), 7),
+            ("reversed", two_wall_fixture("a8", "i3", [0, 2], 1), 7),
+        ];
+        for (name, game, depth) in fixtures {
+            let mut baseline = TitaniumSearch::new(game.clone());
+            baseline.two_wall_race_resolved = Some(false);
+            let t0 = Instant::now();
+            let baseline_result = baseline.think(30_000, depth, true, false, "titanium-v17");
+            let baseline_ms = t0.elapsed().as_millis();
+
+            let mut candidate = TitaniumSearch::new(game);
+            candidate.two_wall_race_resolved = Some(true);
+            let t1 = Instant::now();
+            let candidate_result = candidate.think(30_000, depth, true, false, "titanium-v17");
+            let candidate_ms = t1.elapsed().as_millis();
+
+            assert_eq!(
+                baseline_result.score.signum(),
+                candidate_result.score.signum()
+            );
+            eprintln!(
+                "two-wall AB {name}: depth={depth} baseline nodes={} ms={} candidate nodes={} ms={} calls={} decisive={} unknown={}",
+                baseline_result.nodes,
+                baseline_ms,
+                candidate_result.nodes,
+                candidate_ms,
+                candidate_result.race_outcome_stats.two_wall_calls,
+                candidate_result.race_outcome_stats.two_wall_decisive,
+                candidate_result.race_outcome_stats.two_wall_unknown,
+            );
+        }
+    }
+
     #[test]
     fn labels_true_mate_scores_separately_from_races() {
         assert_eq!(score_label(MATE - 5), "mate in 5");
@@ -2161,6 +2350,11 @@ pub struct TitaniumSearch {
     /// itself is left untouched (other callers, e.g. the alphabeta.rs test that
     /// toggles this env var at runtime, keep reading it fresh).
     wall_ignore_cert_resolved: Option<bool>,
+    /// Cached `TITANIUM_RACE_ONE_WALL` decision (default off during gating).
+    one_wall_race_resolved: Option<bool>,
+    /// Cached `TITANIUM_RACE_TWO_WALL` decision. The experiment is deliberately
+    /// default-off until its proof audit and strength gate both pass.
+    two_wall_race_resolved: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     eme: bool,
     pub nodes: u64,
@@ -2436,6 +2630,8 @@ impl TitaniumSearch {
             cert_eval_leaves_only: false,
             wall_ignore_cert_override: None,
             wall_ignore_cert_resolved: None,
+            one_wall_race_resolved: None,
+            two_wall_race_resolved: None,
             eme: false,
             nodes: 0,
             deadline: Instant::now(),
@@ -2602,6 +2798,21 @@ impl TitaniumSearch {
 
     pub fn set_ace_rfp(&mut self, on: bool) {
         self.ace_rfp = on;
+    }
+
+    /// Experiment-only race layers. They remain off unless an explicit engine
+    /// variant selects them; production `titanium-v17` is unchanged.
+    pub fn set_remaining_wall_race_layers(&mut self, one_wall: bool, two_wall: bool) {
+        self.one_wall_race_resolved = Some(one_wall);
+        self.two_wall_race_resolved = Some(two_wall);
+    }
+
+    #[cfg(test)]
+    pub fn remaining_wall_race_layers(&self) -> (bool, bool) {
+        (
+            self.one_wall_race_resolved.unwrap_or(false),
+            self.two_wall_race_resolved.unwrap_or(false),
+        )
     }
 
     pub fn ace_rfp_enabled(&self) -> bool {
@@ -3259,6 +3470,8 @@ impl TitaniumSearch {
         worker.cheap_cert = self.cheap_cert;
         worker.cert_eval_leaves_only = self.cert_eval_leaves_only;
         worker.wall_ignore_cert_override = self.wall_ignore_cert_override;
+        worker.one_wall_race_resolved = self.one_wall_race_resolved;
+        worker.two_wall_race_resolved = self.two_wall_race_resolved;
         worker.eme = self.eme;
         worker.use_partial_iter = self.use_partial_iter;
         worker.pure_mode = self.pure_mode;
@@ -4397,6 +4610,248 @@ impl TitaniumSearch {
     ///
     /// Bound-only deductions run in `ab()`, where the search window exists.
     /// Static evaluation never promotes a lower/upper bound to exact.
+    #[inline]
+    fn one_wall_race_enabled(&mut self) -> bool {
+        match self.one_wall_race_resolved {
+            Some(enabled) => enabled,
+            None => {
+                let enabled = std::env::var("TITANIUM_RACE_ONE_WALL")
+                    .ok()
+                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                self.one_wall_race_resolved = Some(enabled);
+                enabled
+            }
+        }
+    }
+
+    #[inline]
+    fn two_wall_race_enabled(&mut self) -> bool {
+        match self.two_wall_race_resolved {
+            Some(enabled) => enabled,
+            None => {
+                let enabled = std::env::var("TITANIUM_RACE_TWO_WALL")
+                    .ok()
+                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+                self.two_wall_race_resolved = Some(enabled);
+                enabled
+            }
+        }
+    }
+
+    /// Exact fixed-topology winner after discarding every remaining wall.
+    /// The result is a winner, not DTM: optional-wall callers expose a bound.
+    fn zero_wall_winner_for_current_topology(&mut self) -> Option<usize> {
+        let saved_hands = self.g.wl;
+        self.g.wl = [0, 0];
+        let score = self.exact_hands_empty_score(false);
+        self.g.wl = saved_hands;
+        score.map(|score| {
+            if score > 0 {
+                self.g.turn
+            } else {
+                self.g.turn ^ 1
+            }
+        })
+    }
+
+    #[inline]
+    fn pawns_are_race_separated(&self) -> bool {
+        let p0 = self.g.pawn[0];
+        let p1 = self.g.pawn[1];
+        (p0 / 9).abs_diff(p1 / 9).max((p0 % 9).abs_diff(p1 % 9)) > 2
+    }
+
+    fn opponent_distance_to_goal(&self) -> u8 {
+        let opponent = self.g.turn ^ 1;
+        let mut dist = [u8::MAX; 81];
+        self.g.compute_dist(opponent, &mut dist);
+        dist[self.g.pawn[opponent]]
+    }
+
+    /// Exact-outcome subset for one remaining wall when its holder moves.
+    fn one_wall_holder_winner(&mut self) -> Option<usize> {
+        if self.g.wl[0] + self.g.wl[1] != 1
+            || self.g.wl[self.g.turn] != 1
+            || !self.pawns_are_race_separated()
+        {
+            return None;
+        }
+
+        let holder = self.g.turn;
+        let pure_winner = self.zero_wall_winner_for_current_topology()?;
+        if pure_winner == holder {
+            return Some(holder);
+        }
+        if self.opponent_distance_to_goal() != 1 {
+            return None;
+        }
+
+        let mut saw_legal_wall = false;
+        let mut saw_unknown = false;
+        for wall_type in 0..2usize {
+            for slot in 0..64usize {
+                if !self.g.wall_legal(wall_type, slot) {
+                    continue;
+                }
+                saw_legal_wall = true;
+                let mv = if wall_type == 0 {
+                    100 + slot as i16
+                } else {
+                    200 + slot as i16
+                };
+                self.g.make_move(mv);
+                let child_winner = self.zero_wall_winner_for_current_topology();
+                self.g.unmake_move();
+                self.cached_stamp = -1;
+
+                match child_winner {
+                    Some(winner) if winner == holder => return Some(holder),
+                    Some(_) => {}
+                    None => saw_unknown = true,
+                }
+            }
+        }
+        if saw_legal_wall && !saw_unknown {
+            Some(holder ^ 1)
+        } else {
+            None
+        }
+    }
+
+    /// One-wall layer when the wall-less player moves. A win needs one covered
+    /// pawn reply; a loss requires every reply to be covered.
+    fn one_wall_nonholder_winner(&mut self) -> Option<usize> {
+        if self.g.wl[0] + self.g.wl[1] != 1 || self.g.wl[self.g.turn] != 0 {
+            return None;
+        }
+        let mover = self.g.turn;
+        let mut moves = [0i16; 16];
+        let count = self.g.gen_pawn_moves(&mut moves, 0);
+        if count == 0 {
+            return None;
+        }
+
+        let mut saw_unknown = false;
+        for &mv in &moves[..count] {
+            self.g.make_move(mv);
+            let child_winner = if self.g.winner() == mover as i32 {
+                Some(mover)
+            } else {
+                self.one_wall_holder_winner()
+            };
+            self.g.unmake_move();
+            self.cached_stamp = -1;
+
+            match child_winner {
+                Some(winner) if winner == mover => return Some(mover),
+                Some(_) => {}
+                None => saw_unknown = true,
+            }
+        }
+        if saw_unknown {
+            None
+        } else {
+            Some(mover ^ 1)
+        }
+    }
+
+    fn one_wall_race_bound(&mut self) -> RaceBound {
+        if !self.one_wall_race_enabled() || self.g.wl[0] + self.g.wl[1] != 1 {
+            return RaceBound::Unknown;
+        }
+        self.race_outcome_stats.one_wall_calls += 1;
+        let winner = if self.g.wl[self.g.turn] == 1 {
+            self.one_wall_holder_winner()
+        } else {
+            self.one_wall_nonholder_winner()
+        };
+        match winner {
+            Some(winner) => {
+                self.race_outcome_stats.one_wall_decisive += 1;
+                if winner == self.g.turn {
+                    RaceBound::Lower(RACE_WIN_FLOOR)
+                } else {
+                    RaceBound::Upper(-RACE_WIN_FLOOR)
+                }
+            }
+            None => {
+                self.race_outcome_stats.one_wall_unknown += 1;
+                RaceBound::Unknown
+            }
+        }
+    }
+
+    /// Sound monopoly-only subset for exactly two remaining walls.
+    fn two_wall_monopoly_race_bound(&mut self) -> RaceBound {
+        if !self.two_wall_race_enabled() || self.g.wl[0] + self.g.wl[1] != 2 {
+            return RaceBound::Unknown;
+        }
+        self.race_outcome_stats.two_wall_calls += 1;
+
+        let holder = self.g.turn;
+        let winner = if self.g.wl[holder] != 2 || !self.pawns_are_race_separated() {
+            None
+        } else {
+            match self.zero_wall_winner_for_current_topology() {
+                Some(winner) if winner == holder => Some(holder),
+                Some(_) if self.opponent_distance_to_goal() == 1 => {
+                    let mut saw_legal_wall = false;
+                    let mut saw_unknown = false;
+                    let mut holder_can_win = false;
+                    'walls: for wall_type in 0..2usize {
+                        for slot in 0..64usize {
+                            if !self.g.wall_legal(wall_type, slot) {
+                                continue;
+                            }
+                            saw_legal_wall = true;
+                            let mv = if wall_type == 0 {
+                                100 + slot as i16
+                            } else {
+                                200 + slot as i16
+                            };
+                            self.g.make_move(mv);
+                            let child_winner = self.one_wall_nonholder_winner();
+                            self.g.unmake_move();
+                            self.cached_stamp = -1;
+
+                            match child_winner {
+                                Some(winner) if winner == holder => {
+                                    holder_can_win = true;
+                                    break 'walls;
+                                }
+                                Some(_) => {}
+                                None => saw_unknown = true,
+                            }
+                        }
+                    }
+                    if holder_can_win {
+                        Some(holder)
+                    } else if saw_legal_wall && !saw_unknown {
+                        Some(holder ^ 1)
+                    } else {
+                        None
+                    }
+                }
+                Some(_) | None => None,
+            }
+        };
+
+        match winner {
+            Some(winner) => {
+                self.race_outcome_stats.two_wall_decisive += 1;
+                if winner == self.g.turn {
+                    RaceBound::Lower(RACE_WIN_FLOOR)
+                } else {
+                    RaceBound::Upper(-RACE_WIN_FLOOR)
+                }
+            }
+            None => {
+                self.race_outcome_stats.two_wall_unknown += 1;
+                RaceBound::Unknown
+            }
+        }
+    }
+
     fn try_hands_empty_endgame(&mut self, d_me_i: i32, d_opp_i: i32) -> HandsEmptyPipelineOutcome {
         // Stage 1: existing `race_tbl` LRU memo (probe only, no build).
         if self.race_proof {
@@ -5547,6 +6002,26 @@ impl TitaniumSearch {
         let ndm_lo = self.dir_masks_key_lo;
         let ndm_hi = self.dir_masks_key_hi;
         let ndm_cache = self.dir_masks_cache;
+        if self.g.wl[0] + self.g.wl[1] == 1 {
+            match self.one_wall_race_bound() {
+                RaceBound::Lower(value) if value >= beta => return Ok(beta),
+                RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
+                RaceBound::Lower(_)
+                | RaceBound::Upper(_)
+                | RaceBound::Exact(_)
+                | RaceBound::Unknown => {}
+            }
+        }
+        if self.g.wl[0] + self.g.wl[1] == 2 {
+            match self.two_wall_monopoly_race_bound() {
+                RaceBound::Lower(value) if value >= beta => return Ok(beta),
+                RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
+                RaceBound::Lower(_)
+                | RaceBound::Upper(_)
+                | RaceBound::Exact(_)
+                | RaceBound::Unknown => {}
+            }
+        }
         if self.g.wl[0] == 0 && self.g.wl[1] == 0 {
             // Service A is a typed alpha/beta bound, not a static score.  It
             // may cut only when it crosses the current window.  A PV/wide
