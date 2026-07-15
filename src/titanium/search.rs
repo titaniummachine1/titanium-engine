@@ -2350,11 +2350,14 @@ pub struct TitaniumSearch {
     /// itself is left untouched (other callers, e.g. the alphabeta.rs test that
     /// toggles this env var at runtime, keep reading it fresh).
     wall_ignore_cert_resolved: Option<bool>,
-    /// Cached `TITANIUM_RACE_ONE_WALL` decision (default off during gating).
+    /// Cached `TITANIUM_RACE_ONE_WALL` decision.
     one_wall_race_resolved: Option<bool>,
     /// Cached `TITANIUM_RACE_TWO_WALL` decision. The experiment is deliberately
     /// default-off until its proof audit and strength gate both pass.
     two_wall_race_resolved: Option<bool>,
+    /// Restrict the optional two-wall proof to PV/full-window nodes. Race1
+    /// remains available throughout the tree.
+    two_wall_race_pv_only: bool,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     eme: bool,
     pub nodes: u64,
@@ -2632,6 +2635,7 @@ impl TitaniumSearch {
             wall_ignore_cert_resolved: None,
             one_wall_race_resolved: None,
             two_wall_race_resolved: None,
+            two_wall_race_pv_only: false,
             eme: false,
             nodes: 0,
             deadline: Instant::now(),
@@ -2807,12 +2811,21 @@ impl TitaniumSearch {
         self.two_wall_race_resolved = Some(two_wall);
     }
 
+    pub fn set_two_wall_race_pv_only(&mut self, on: bool) {
+        self.two_wall_race_pv_only = on;
+    }
+
     #[cfg(test)]
     pub fn remaining_wall_race_layers(&self) -> (bool, bool) {
         (
             self.one_wall_race_resolved.unwrap_or(false),
             self.two_wall_race_resolved.unwrap_or(false),
         )
+    }
+
+    #[cfg(test)]
+    pub fn two_wall_race_pv_only(&self) -> bool {
+        self.two_wall_race_pv_only
     }
 
     pub fn ace_rfp_enabled(&self) -> bool {
@@ -3472,6 +3485,7 @@ impl TitaniumSearch {
         worker.wall_ignore_cert_override = self.wall_ignore_cert_override;
         worker.one_wall_race_resolved = self.one_wall_race_resolved;
         worker.two_wall_race_resolved = self.two_wall_race_resolved;
+        worker.two_wall_race_pv_only = self.two_wall_race_pv_only;
         worker.eme = self.eme;
         worker.use_partial_iter = self.use_partial_iter;
         worker.pure_mode = self.pure_mode;
@@ -6012,7 +6026,10 @@ impl TitaniumSearch {
                 | RaceBound::Unknown => {}
             }
         }
-        if self.g.wl[0] + self.g.wl[1] == 2 {
+        let pv_node = beta > alpha.saturating_add(1);
+        if self.g.wl[0] + self.g.wl[1] == 2
+            && (!self.two_wall_race_pv_only || pv_node)
+        {
             match self.two_wall_monopoly_race_bound() {
                 RaceBound::Lower(value) if value >= beta => return Ok(beta),
                 RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
