@@ -234,7 +234,7 @@ const fn build_mirc() -> [usize; 81] {
     let mut arr = [0usize; 81];
     let mut i = 0;
     while i < 81 {
-        arr[i] = (8 - i / 9) * 9 + i % 9;
+        arr[i] = (8 - i / 9) * 9 + (8 - i % 9);
         i += 1;
     }
     arr
@@ -243,7 +243,7 @@ const fn build_mirs() -> [usize; 64] {
     let mut arr = [0usize; 64];
     let mut i = 0;
     while i < 64 {
-        arr[i] = (7 - i / 8) * 8 + i % 8;
+        arr[i] = (7 - i / 8) * 8 + (7 - i % 8);
         i += 1;
     }
     arr
