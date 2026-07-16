@@ -6,7 +6,7 @@ use crate::titanium::game::{GameState, ZOBRIST};
 
 pub const POSITION_SCHEMA_VERSION: u8 = 1;
 pub const PACKED_STATE_LEN: usize = 24;
-pub const FEATURE_SCHEMA: &str = "halfpw-sparse-route5-ws20-cat-v1";
+pub const FEATURE_SCHEMA: &str = "halfpw-sparse-route5-ws20-catv5-normalized5-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedFields {

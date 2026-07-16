@@ -63,9 +63,11 @@ pub struct Net {
     /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
     /// not even computed, so the live net is unaffected. A retrained blob carries
     /// learned weights → `cat_active` true → contributes.
-    pub cat_witness_me: Vec<f64>,
-    pub cat_witness_opp: Vec<f64>,
-    pub cat_heat: Vec<f64>,
+    pub cat_raw_me: Vec<f64>,
+    pub cat_raw_opp: Vec<f64>,
+    pub cat_propagated_me: Vec<f64>,
+    pub cat_propagated_opp: Vec<f64>,
+    pub cat_propagated_combined: Vec<f64>,
     pub cat_active: bool,
 }
 
@@ -105,10 +107,12 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
     let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
     let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
     let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
+    let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
     let has_cat_v5 = bytes.len() == expected_cat_v5;
     let has_cat_v5_witness = bytes.len() == expected_cat_v5_witness;
+    let has_cat_v5_normalized = bytes.len() == expected_cat_v5_normalized;
     assert!(
-        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness,
+        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized,
         "net_weights blob size mismatch for declared NET_H={h} \
          (got {} bytes, expected {expected_no_cat}, {expected_cat_v5}, or {expected_cat_v5_witness}) — \
          run training/freeze_baseline_weights.py",
@@ -133,29 +137,53 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&route_near_opp)
         .chain(&route_contested)
         .any(|&w| w != 0.0);
-    let (cat_witness_me, cat_witness_opp, cat_heat) = if has_cat_v5_witness {
+    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) = if has_cat_v5_normalized {
         (
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
             read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
             read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
             read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
         )
+    } else if has_cat_v5_witness {
+        let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+        let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+        let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+        for w in &mut raw_me { *w *= 4.0; }
+        for w in &mut raw_opp { *w *= 4.0; }
+        for w in &mut combined { *w *= 400.0 / 256.0; }
+        (
+            raw_me,
+            raw_opp,
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+            combined,
+        )
     } else if has_cat_v5 {
+        let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+        for w in &mut combined { *w *= 400.0 / 256.0; }
         (
             vec![0.0; FIELD_PLANE_LEN],
             vec![0.0; FIELD_PLANE_LEN],
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+            combined,
         )
     } else {
         (
             vec![0.0; FIELD_PLANE_LEN],
             vec![0.0; FIELD_PLANE_LEN],
             vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
         )
     };
-    let cat_active = cat_witness_me
+    let cat_active = cat_raw_me
         .iter()
-        .chain(&cat_witness_opp)
-        .chain(&cat_heat)
+        .chain(&cat_raw_opp)
+        .chain(&cat_propagated_me)
+        .chain(&cat_propagated_opp)
+        .chain(&cat_propagated_combined)
         .any(|&w| w != 0.0);
     let mut route_bybit = Box::new([[[0.0f64; 128]; 5]; 2]);
     for turn in 0..2usize {
@@ -188,9 +216,11 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         route_contested,
         route_active,
         route_bybit,
-        cat_witness_me,
-        cat_witness_opp,
-        cat_heat,
+        cat_raw_me,
+        cat_raw_opp,
+        cat_propagated_me,
+        cat_propagated_opp,
+        cat_propagated_combined,
         cat_active,
     }
 }
@@ -238,9 +268,11 @@ pub fn install_medium_weights(bytes: &[u8]) -> Result<(), &'static str> {
     let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
     let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
     let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
+    let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
     if bytes.len() != expected_no_cat
         && bytes.len() != expected_cat_v5
         && bytes.len() != expected_cat_v5_witness
+        && bytes.len() != expected_cat_v5_normalized
     {
         return Err("medium weights size mismatch");
     }

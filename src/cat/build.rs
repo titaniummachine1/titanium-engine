@@ -654,12 +654,14 @@ fn add_catv5_propagated_heat(
     }
 }
 
-/// CATv5 NN fields: raw per-player precise witnesses plus the existing
-/// propagated CATv5 combined heatmap. The raw sum is intentionally omitted:
-/// it is an exact linear combination of the two raw inputs.
+/// CATv5 NN fields. The raw 0..4 witness value identifies which deterministic
+/// unique path owns a cell (paths may overlap only on the first ply). This is
+/// the compact representation: no extra per-path arrays in the hot evaluator.
 pub struct CatV5Heatmaps {
     pub witness_p0: [u8; 81],
     pub witness_p1: [u8; 81],
+    pub propagated_p0: [u16; 81],
+    pub propagated_p1: [u16; 81],
     pub propagated: [u16; 81],
 }
 
@@ -685,11 +687,15 @@ pub fn build_catv5_heatmaps(board: &Board) -> CatV5Heatmaps {
         let sq = square_index(r, c) as usize;
         witness_p0[sq] = 0;
         witness_p1[sq] = 0;
+        h0[sq] = 0;
+        h1[sq] = 0;
         propagated[sq] = 0;
     }
     CatV5Heatmaps {
         witness_p0,
         witness_p1,
+        propagated_p0: h0,
+        propagated_p1: h1,
         propagated,
     }
 }
@@ -769,6 +775,22 @@ mod tests {
             "precise witnesses must seed CATv5 propagation, not make a sparse path-only map"
         );
         assert!(maps.witness_p0.iter().any(|&h| h == 4));
+    }
+
+    #[test]
+    fn catv5_nn_fields_have_fixed_normalization_bounds() {
+        let maps = build_catv5_heatmaps(&Board::new());
+        for sq in 0..81 {
+            assert!(maps.witness_p0[sq] <= 4);
+            assert!(maps.witness_p1[sq] <= 4);
+            assert!(maps.propagated_p0[sq] <= 200);
+            assert!(maps.propagated_p1[sq] <= 200);
+            assert_eq!(
+                maps.propagated[sq],
+                maps.propagated_p0[sq].saturating_add(maps.propagated_p1[sq])
+            );
+            assert!(maps.propagated[sq] <= 400);
+        }
     }
 
     #[test]

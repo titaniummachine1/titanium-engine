@@ -3614,8 +3614,9 @@ impl TitaniumSearch {
         )
     }
 
-    /// Emit CATv5's two raw precise-witness planes plus its propagated combined
-    /// heat plane for database records whose other features are already stored.
+    /// Emit CATv5's four exact paths per player, ranked raw witnesses, and
+    /// per-player/combined propagated fields. Normalization belongs to the
+    /// learning boundary; this diagnostic protocol preserves exact integers.
     pub fn cat_dump_json_packed(&self, row: u32) -> String {
         let bridge = TiBridge::from_game(&self.g);
         let maps = crate::cat::build::build_catv5_heatmaps(&bridge.board);
@@ -3623,9 +3624,11 @@ impl TitaniumSearch {
         let field16 =
             |arr: &[u16; 81]| arr.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
         format!(
-            "{{\"row\":{row},\"ok\":true,\"protocol\":\"catv5-precise-packed-v1\",\"cat_witness_p0_field\":[{}],\"cat_witness_p1_field\":[{}],\"cat_propagated_field\":[{}]}}",
+            "{{\"row\":{row},\"ok\":true,\"protocol\":\"catv5-precise-packed-v2\",\"cat_witness_p0_field\":[{}],\"cat_witness_p1_field\":[{}],\"cat_propagated_p0_field\":[{}],\"cat_propagated_p1_field\":[{}],\"cat_propagated_field\":[{}]}}",
             field8(&maps.witness_p0),
             field8(&maps.witness_p1),
+            field16(&maps.propagated_p0),
+            field16(&maps.propagated_p1),
             field16(&maps.propagated),
         )
     }
@@ -3691,20 +3694,14 @@ impl TitaniumSearch {
         let mut flank1 = [0u8; 81];
         fill_sparse_route_masks(&self.g, self.g.pawn[0], &d0f, &mut route0, &mut flank0);
         fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1f, &mut route1, &mut flank1);
-        let (cat_best_p0, cat_best_p1, cat_heat_p0, cat_heat_p1, cat_heat) = {
+        let (cat_best_p0, cat_best_p1, cat_maps) = {
             let mut bridge = TiBridge::from_game(&self.g);
             let maps = crate::cat::build::build_catv5_heatmaps(&bridge.board);
             let mut cat = crate::cat::attention::CorridorAttention::default();
             cat.square_heat = maps.propagated;
             let (best0, best1) =
                 crate::cat::best_pawn_cat_heats(&bridge.board, &cat, &mut bridge.bfs);
-            (
-                best0,
-                best1,
-                maps.witness_p0,
-                maps.witness_p1,
-                maps.propagated,
-            )
+            (best0, best1, maps)
         };
         let legal_walls = 0;
         let (cross_p0, cross_p1) = (0, 0);
@@ -3719,7 +3716,7 @@ impl TitaniumSearch {
         format!(
             "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\
              \"d0\":{},\"d1\":{},\"legal_wall_count\":{},\"legal_path_cross_p0\":{},\"legal_path_cross_p1\":{},\
-             \"cat_best_p0\":{},\"cat_best_p1\":{},\"cat_witness_p0_field\":[{}],\"cat_witness_p1_field\":[{}],\"cat_propagated_field\":[{}],\
+             \"cat_best_p0\":{},\"cat_best_p1\":{},\"cat_witness_p0_field\":[{}],\"cat_witness_p1_field\":[{}],\"cat_propagated_p0_field\":[{}],\"cat_propagated_p1_field\":[{}],\"cat_propagated_field\":[{}],\
              \"corridor_width0\":{},\"corridor_width1\":{},\
              \"goal_inv_p0_field\":[{}],\"goal_inv_p1_field\":[{}],\
              \"pawn_fwd_p0_field\":[{}],\"pawn_fwd_p1_field\":[{}],\
@@ -3746,9 +3743,11 @@ impl TitaniumSearch {
             cross_p1,
             cat_best_p0,
             cat_best_p1,
-            field(&cat_heat_p0),
-            field(&cat_heat_p1),
-            field16(&cat_heat),
+            field(&cat_maps.witness_p0),
+            field(&cat_maps.witness_p1),
+            field16(&cat_maps.propagated_p0),
+            field16(&cat_maps.propagated_p1),
+            field16(&cat_maps.propagated),
             width_me,
             width_opp,
             field(&d0f),
@@ -3874,17 +3873,19 @@ impl TitaniumSearch {
         if nw.cat_active {
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
-                let canonical = |sq: usize| if me == 0 { sq } else { NET_MIRC[sq] };
+                let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
+                    (&cat.witness_p0, &cat.witness_p1, &cat.propagated_p0, &cat.propagated_p1)
+                } else {
+                    (&cat.witness_p1, &cat.witness_p0, &cat.propagated_p1, &cat.propagated_p0)
+                };
                 for sq in 0..81usize {
-                    let (me_h, opp_h) = if me == 0 {
-                        (cat.witness_p0[sq], cat.witness_p1[sq])
-                    } else {
-                        (cat.witness_p1[sq], cat.witness_p0[sq])
-                    };
-                    let canon = canonical(sq);
-                    cat_out += nw.cat_witness_me[canon] * f64::from(me_h)
-                        + nw.cat_witness_opp[canon] * f64::from(opp_h)
-                        + nw.cat_heat[canon] * (f64::from(cat.propagated[sq]) / 256.0);
+                    let canon = if me == 0 { sq } else { NET_MIRC[sq] };
+                    cat_out += nw.cat_raw_me[canon] * (f64::from(raw_me[sq]) / 4.0)
+                        + nw.cat_raw_opp[canon] * (f64::from(raw_opp[sq]) / 4.0)
+                        + nw.cat_propagated_me[canon] * (f64::from(prop_me[sq]) / 200.0)
+                        + nw.cat_propagated_opp[canon] * (f64::from(prop_opp[sq]) / 200.0)
+                        + nw.cat_propagated_combined[canon]
+                            * (f64::from(cat.propagated[sq]) / 400.0);
                 }
             }
         }
@@ -5280,18 +5281,20 @@ impl TitaniumSearch {
             let _cat_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_cat_heat);
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
-                let canonical = |sq: usize| if me == 0 { sq } else { NET_MIRC[sq] };
+                let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
+                    (&cat.witness_p0, &cat.witness_p1, &cat.propagated_p0, &cat.propagated_p1)
+                } else {
+                    (&cat.witness_p1, &cat.witness_p0, &cat.propagated_p1, &cat.propagated_p0)
+                };
                 let mut cat_score = 0.0;
                 for sq in 0..81usize {
-                    let (me_h, opp_h) = if me == 0 {
-                        (cat.witness_p0[sq], cat.witness_p1[sq])
-                    } else {
-                        (cat.witness_p1[sq], cat.witness_p0[sq])
-                    };
-                    let canon = canonical(sq);
-                    cat_score += nw.cat_witness_me[canon] * f64::from(me_h)
-                        + nw.cat_witness_opp[canon] * f64::from(opp_h)
-                        + nw.cat_heat[canon] * (f64::from(cat.propagated[sq]) / 256.0);
+                    let canon = if me == 0 { sq } else { NET_MIRC[sq] };
+                    cat_score += nw.cat_raw_me[canon] * (f64::from(raw_me[sq]) / 4.0)
+                        + nw.cat_raw_opp[canon] * (f64::from(raw_opp[sq]) / 4.0)
+                        + nw.cat_propagated_me[canon] * (f64::from(prop_me[sq]) / 200.0)
+                        + nw.cat_propagated_opp[canon] * (f64::from(prop_opp[sq]) / 200.0)
+                        + nw.cat_propagated_combined[canon]
+                            * (f64::from(cat.propagated[sq]) / 400.0);
                 }
                 out += cat_score;
             }
