@@ -67,6 +67,22 @@ pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
 const HIST_SPAN: usize = 256;
+/// TT search-depth field width: 8 bits → physical max 255.
+/// Game plies are a separate limit (~128 with 3-fold / match `max_plies`);
+/// iterative deepening is also clamped to this.
+pub const TT_DEPTH_MAX: i32 = 255;
+const TT_DEPTH_SHIFT: i32 = 12;
+const TT_DEPTH_MASK: i32 = 0xFF;
+
+#[inline]
+fn tt_pack_depth(depth: i32) -> i32 {
+    depth.clamp(0, TT_DEPTH_MAX) << TT_DEPTH_SHIFT
+}
+
+#[inline]
+fn tt_unpack_depth(meta: i32) -> i32 {
+    (meta >> TT_DEPTH_SHIFT) & TT_DEPTH_MASK
+}
 
 #[inline]
 fn ace_to_hist(m: i16) -> Option<u8> {
@@ -563,11 +579,25 @@ mod lazy_smp_tests {
         );
         let entry = shared.probe(123, 456).expect("stored helper entry");
         assert_eq!(entry.score, 99);
-        assert_eq!(entry.meta >> 12, 5);
+        assert_eq!(tt_unpack_depth(entry.meta), 5);
     }
 
     #[test]
-    fn shared_stop_flag_is_observed() {
+    fn tt_depth_field_is_eight_bits_clamped_to_255() {
+        assert_eq!(tt_unpack_depth(tt_pack_depth(0)), 0);
+        assert_eq!(tt_unpack_depth(tt_pack_depth(128)), 128);
+        assert_eq!(tt_unpack_depth(tt_pack_depth(255)), 255);
+        assert_eq!(tt_unpack_depth(tt_pack_depth(256)), 255);
+        assert_eq!(tt_unpack_depth(tt_pack_depth(10_000)), 255);
+        // High garbage bits above the 8-bit depth field must be ignored.
+        let dirty = tt_pack_depth(42) | (0x7F << 20);
+        assert_eq!(tt_unpack_depth(dirty), 42);
+    }
+
+    #[test]
+    fn shared_stop_flag_is_observed_PLACEHOLDER_REMOVE() {
+        // placeholder to keep patch unique — will delete
+    }
         let mut search = fresh();
         let runtime = Arc::new(LazySmpRuntime::new(Instant::now() + Duration::from_secs(1)));
         runtime.stop.store(true, Ordering::Relaxed);
@@ -1121,7 +1151,7 @@ impl SharedTitaniumTt {
             .expect("shared TT write lock poisoned");
         let was_empty = slot.meta == 0;
         let stale_gen = !pure_mode && !was_empty && slot.entry_gen != tt_gen;
-        let deeper = !was_empty && !stale_gen && (entry.meta >> 12) >= (slot.meta >> 12);
+        let deeper = !was_empty && !stale_gen && tt_unpack_depth(entry.meta) >= tt_unpack_depth(slot.meta);
         if was_empty || stale_gen || deeper {
             *slot = entry;
             if was_empty {
@@ -2473,7 +2503,10 @@ pub struct TitaniumSearch {
     pub g: GameState,
     tt_key_hi: Vec<u32>,
     tt_key_lo: Vec<u32>,
-    tt_meta: Vec<i32>, // move | flag<<10 | depth<<12, 0 = empty
+    /// Packed TT word: `move(10) | flag<<10 | depth<<12` with depth in **8 bits**
+    /// (0..=255). Higher bits of `meta` are unused / must be zero on store.
+    /// `meta == 0` means empty.
+    tt_meta: Vec<i32>,
     tt_score: Vec<i32>,
     // ZeroFence-A: 1 = tainted-zero entry (move-only, never a score cutoff)
     tt_rep: Vec<u8>,
@@ -6653,7 +6686,7 @@ impl TitaniumSearch {
         } {
             crate::bench_instr::bump(|b| &mut b.tt_hit);
             tt_move = (meta & 1023) as i16;
-            let tdepth = meta >> 12;
+            let tdepth = tt_unpack_depth(meta);
             let tflag = (meta >> 10) & 3;
             if tdepth >= depth && ply > 0 {
                 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -7456,7 +7489,7 @@ impl TitaniumSearch {
                 SharedTtEntry {
                     key_hi: self.g.hash_hi,
                     key_lo: self.g.hash_lo,
-                    meta: best_move as i32 | (sf << 10) | (depth << 12),
+                    meta: best_move as i32 | (sf << 10) | tt_pack_depth(depth),
                     score: ts,
                     rep: rb,
                     anc_lo: if rb != 0 { self.sub_anc_lo[ply] } else { 0 },
@@ -7467,12 +7500,12 @@ impl TitaniumSearch {
         } else {
             let was_empty = self.tt_meta[idx] == 0;
             let stale_gen = !self.pure_mode && !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
-            let deeper = !was_empty && !stale_gen && depth >= (self.tt_meta[idx] >> 12);
+            let deeper = !was_empty && !stale_gen && depth.clamp(0, TT_DEPTH_MAX) >= tt_unpack_depth(self.tt_meta[idx]);
             if was_empty || stale_gen || deeper {
                 crate::bench_instr::bump(|b| &mut b.tt_store);
                 self.tt_key_hi[idx] = self.g.hash_hi;
                 self.tt_key_lo[idx] = self.g.hash_lo;
-                self.tt_meta[idx] = best_move as i32 | (sf << 10) | (depth << 12);
+                self.tt_meta[idx] = best_move as i32 | (sf << 10) | tt_pack_depth(depth);
                 self.tt_score[idx] = ts;
                 self.tt_rep[idx] = rb;
                 self.tt_entry_gen[idx] = self.tt_gen;
@@ -7496,12 +7529,12 @@ impl TitaniumSearch {
         {
             let was_empty = self.tt_meta[idx] == 0;
             let stale_gen = !self.pure_mode && !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
-            let deeper = !was_empty && !stale_gen && depth >= (self.tt_meta[idx] >> 12);
+            let deeper = !was_empty && !stale_gen && depth.clamp(0, TT_DEPTH_MAX) >= tt_unpack_depth(self.tt_meta[idx]);
             if was_empty || stale_gen || deeper {
                 crate::bench_instr::bump(|b| &mut b.tt_store);
                 self.tt_key_hi[idx] = self.g.hash_hi;
                 self.tt_key_lo[idx] = self.g.hash_lo;
-                self.tt_meta[idx] = best_move as i32 | (sf << 10) | (depth << 12);
+                self.tt_meta[idx] = best_move as i32 | (sf << 10) | tt_pack_depth(depth);
                 self.tt_score[idx] = ts;
                 self.tt_rep[idx] = rb;
                 self.tt_entry_gen[idx] = self.tt_gen;
@@ -8076,7 +8109,7 @@ impl TitaniumSearch {
         self.tt_adaptive = false;
         self.apply_think_start_state();
 
-        let depth_limit = if max_depth > 0 { max_depth } else { 128 };
+        let depth_limit = if max_depth > 0 { max_depth.min(TT_DEPTH_MAX) } else { 128 };
         let root_moves_raw = self.ordered_root_moves_snapshot(depth_limit);
         if root_moves_raw.is_empty() {
             return self.think(time_ms, max_depth, full, log, engine_label);
@@ -8404,7 +8437,7 @@ impl TitaniumSearch {
         let mut last_pawn_best: i16 = -1;
         let mut last_pawn_score: i32 = i32::MIN;
         let mut depth_log: Vec<AceDepthLogEntry> = Vec::new();
-        let max_depth = if max_depth > 0 { max_depth } else { 128 };
+        let max_depth = if max_depth > 0 { max_depth.min(TT_DEPTH_MAX) } else { 128 };
         let root_q_left = if self.q_search { self.q_max } else { 0 };
 
         // Dynamic iterative-deepening startup: probe the TT for the root position.
@@ -8441,7 +8474,7 @@ impl TitaniumSearch {
                     self.tt_key_hi[ridx] == self.g.hash_hi && self.tt_key_lo[ridx] == self.g.hash_lo
                 }
             } {
-                let tt_depth = rmeta >> 12;
+                let tt_depth = tt_unpack_depth(rmeta);
                 let tt_flag = (rmeta >> 10) & 3;
                 if tt_depth >= 4 && tt_flag == 0 {
                     // Exact score: safe to use as aspiration seed and skip iterations.
