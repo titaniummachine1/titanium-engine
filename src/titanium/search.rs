@@ -595,9 +595,7 @@ mod lazy_smp_tests {
     }
 
     #[test]
-    fn shared_stop_flag_is_observed_PLACEHOLDER_REMOVE() {
-        // placeholder to keep patch unique — will delete
-    }
+    fn shared_stop_flag_is_observed() {
         let mut search = fresh();
         let runtime = Arc::new(LazySmpRuntime::new(Instant::now() + Duration::from_secs(1)));
         runtime.stop.store(true, Ordering::Relaxed);
