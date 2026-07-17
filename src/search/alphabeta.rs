@@ -619,10 +619,8 @@ pub(crate) fn eval_stm(board: &Board, stm: Player, bfs: &mut BfsScratch) -> i32 
     let our_walls = board.walls_remaining[stm as usize];
     let opp_walls = board.walls_remaining[opp as usize];
     let corridor_flex_score = if our_walls <= 2 || opp_walls <= 2 {
-        let our_bottlenecks =
-            i32::from(crate::cat::corridor_bottleneck_count(bfs, board, stm));
-        let opp_bottlenecks =
-            i32::from(crate::cat::corridor_bottleneck_count(bfs, board, opp));
+        let our_bottlenecks = i32::from(crate::cat::corridor_bottleneck_count(bfs, board, stm));
+        let opp_bottlenecks = i32::from(crate::cat::corridor_bottleneck_count(bfs, board, opp));
         let own_risk = if our_walls <= 2 && opp_walls > our_walls {
             our_bottlenecks * LOW_WALL_TRAP_CM
         } else {

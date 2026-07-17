@@ -137,47 +137,56 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&route_near_opp)
         .chain(&route_contested)
         .any(|&w| w != 0.0);
-    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) = if has_cat_v5_normalized {
-        (
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-        )
-    } else if has_cat_v5_witness {
-        let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-        let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-        let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-        for w in &mut raw_me { *w *= 4.0; }
-        for w in &mut raw_opp { *w *= 4.0; }
-        for w in &mut combined { *w *= 400.0 / 256.0; }
-        (
-            raw_me,
-            raw_opp,
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            combined,
-        )
-    } else if has_cat_v5 {
-        let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-        for w in &mut combined { *w *= 400.0 / 256.0; }
-        (
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            combined,
-        )
-    } else {
-        (
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-        )
-    };
+    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
+        if has_cat_v5_normalized {
+            (
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            )
+        } else if has_cat_v5_witness {
+            let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            for w in &mut raw_me {
+                *w *= 4.0;
+            }
+            for w in &mut raw_opp {
+                *w *= 4.0;
+            }
+            for w in &mut combined {
+                *w *= 400.0 / 256.0;
+            }
+            (
+                raw_me,
+                raw_opp,
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                combined,
+            )
+        } else if has_cat_v5 {
+            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            for w in &mut combined {
+                *w *= 400.0 / 256.0;
+            }
+            (
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                combined,
+            )
+        } else {
+            (
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+            )
+        };
     let cat_active = cat_raw_me
         .iter()
         .chain(&cat_raw_opp)

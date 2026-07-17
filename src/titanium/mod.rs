@@ -138,6 +138,10 @@ pub struct TitaniumParams {
     pub ti_movegen: bool,
     /// Stream iterative-deepening progress on stderr (`info json`).
     pub log: bool,
+    /// Top-N root lines to expose in progress JSON (`multiPv`).
+    pub multipv: usize,
+    /// Emit ranked `rootMoves` in progress JSON.
+    pub root_scores: bool,
     /// Early Move Extensions on ordered wall moves (mirror of graduated LMR).
     pub eme: bool,
     /// Root opening book mode (`off` | `order` | `play`).
@@ -156,6 +160,8 @@ impl Default for TitaniumParams {
             cat: false,
             ti_movegen: false,
             log: false,
+            multipv: 1,
+            root_scores: true,
             eme: false,
             book: crate::titanium::opening_book::OpeningBookMode::Off,
             book_db: None,
@@ -193,6 +199,8 @@ pub fn titanium_genmove(
     if params.eme {
         search.enable_eme();
     }
+    search.set_multipv(params.multipv as u32);
+    search.set_root_scores(params.root_scores);
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::path::PathBuf;
@@ -326,6 +334,8 @@ mod tests {
             cat: false,
             ti_movegen: true,
             log: false,
+            multipv: 1,
+            root_scores: true,
             eme: false,
             book: crate::titanium::opening_book::OpeningBookMode::Off,
             book_db: None,

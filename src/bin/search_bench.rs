@@ -8,15 +8,19 @@
 //!   cargo build --profile profiling -p titanium --bin search_bench --features bench-instrument --manifest-path engine\Cargo.toml
 
 use std::fs;
+use std::hint::black_box;
 use std::process::Command;
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 use titanium::algebraic_to_move_id;
 use titanium::bench_instr;
+use titanium::cat::build::{build_impact_heatmap, build_impact_heatmap_legacy};
+use titanium::cat::CorridorAttention;
+use titanium::core::board::Board;
 use titanium::movegen::prewarm;
-use titanium::titanium::net::live_weights_sha256;
 use titanium::titanium::lazy_seal::{dump_lazy_seal_stats, reset_lazy_seal_stats};
+use titanium::titanium::net::live_weights_sha256;
 use titanium::titanium::session::apply_session_experiment_flags;
 use titanium::titanium::{move_id_to_algebraic, GameState, ThinkResult, TitaniumSearch};
 
@@ -34,7 +38,11 @@ fn engine_mode() -> &'static str {
     let lazy = std::env::var("TITANIUM_BENCH_LAZY_WALLS").as_deref() == Ok("1");
     let seal_mode = std::env::var("TITANIUM_LAZY_SEAL_MODE").unwrap_or_default();
     if lazy {
-        let seal = if seal_mode.is_empty() { "deferred" } else { &seal_mode };
+        let seal = if seal_mode.is_empty() {
+            "deferred"
+        } else {
+            &seal_mode
+        };
         Box::leak(format!("{base}-lazy-{seal}").into_boxed_str())
     } else {
         Box::leak(base.into_boxed_str())
@@ -139,6 +147,16 @@ fn load_position(name: &str) -> GameState {
         g.make_move(algebraic_to_move_id(mv));
     }
     g
+}
+
+fn load_board(name: &str, ply: Option<usize>) -> Board {
+    let moves = position_moves(name);
+    let limit = ply.unwrap_or(moves.len()).min(moves.len());
+    let mut board = Board::new();
+    for mv in &moves[..limit] {
+        board.apply_algebraic(mv);
+    }
+    board
 }
 
 fn load_position_from_moves(moves: &str) -> GameState {
@@ -445,6 +463,101 @@ fn bench_profile(sec: u64, position: &str, moves: Option<&str>, full: bool, thre
     });
 }
 
+fn cat_micro_run(board: &Board, catv6: bool, iterations: usize) -> (u128, u64) {
+    let mut checksum = 0u64;
+    let t0 = Instant::now();
+    for i in 0..iterations {
+        let cat = if catv6 {
+            build_impact_heatmap(black_box(board))
+        } else {
+            build_impact_heatmap_legacy(black_box(board))
+        };
+        let sq = (i * 37) % 81;
+        checksum =
+            checksum.wrapping_add(u64::from(cat.square_heat((sq / 9) as u8, (sq % 9) as u8)));
+        black_box(&cat);
+    }
+    (t0.elapsed().as_nanos(), checksum)
+}
+
+fn bench_cat_micro(position: &str, ply: Option<usize>, iterations: usize, rounds: usize) {
+    let board = load_board(position, ply);
+    for _ in 0..100 {
+        black_box(build_impact_heatmap(&board));
+        black_box(build_impact_heatmap_legacy(&board));
+    }
+
+    let mut legacy_ns = Vec::with_capacity(rounds);
+    let mut catv6_ns = Vec::with_capacity(rounds);
+    for round in 0..rounds {
+        let order = if round % 2 == 0 {
+            [(false, "legacy"), (true, "catv6")]
+        } else {
+            [(true, "catv6"), (false, "legacy")]
+        };
+        for (catv6, label) in order {
+            let (elapsed_ns, checksum) = cat_micro_run(&board, catv6, iterations);
+            let ns_per_call = elapsed_ns as f64 / iterations as f64;
+            let calls_per_sec = 1_000_000_000.0 / ns_per_call;
+            println!(
+                "{{\"bench_type\":\"cat_micro_raw\",\"position\":{},\"ply\":{},\"round\":{},\"variant\":{},\"iterations\":{},\"elapsed_ns\":{},\"ns_per_call\":{:.2},\"calls_per_sec\":{:.0},\"checksum\":{}}}",
+                json_str(position),
+                ply.map_or_else(|| "null".to_string(), |v| v.to_string()),
+                round + 1,
+                json_str(label),
+                iterations,
+                elapsed_ns,
+                ns_per_call,
+                calls_per_sec,
+                checksum,
+            );
+            if catv6 {
+                catv6_ns.push(ns_per_call);
+            } else {
+                legacy_ns.push(ns_per_call);
+            }
+        }
+    }
+
+    let legacy_median = median_f64(&legacy_ns);
+    let catv6_median = median_f64(&catv6_ns);
+    println!(
+        "{{\"bench_type\":\"cat_micro_summary\",\"position\":{},\"ply\":{},\"rounds\":{},\"iterations_per_round\":{},\"legacy_median_ns_per_call\":{:.2},\"catv6_median_ns_per_call\":{:.2},\"legacy_calls_per_sec\":{:.0},\"catv6_calls_per_sec\":{:.0},\"speedup\":{:.4},\"time_reduction_pct\":{:.2}}}",
+        json_str(position),
+        ply.map_or_else(|| "null".to_string(), |v| v.to_string()),
+        rounds,
+        iterations,
+        legacy_median,
+        catv6_median,
+        1_000_000_000.0 / legacy_median,
+        1_000_000_000.0 / catv6_median,
+        legacy_median / catv6_median,
+        100.0 * (1.0 - catv6_median / legacy_median),
+    );
+}
+
+fn dump_cat_planes(position: &str, ply: Option<usize>) {
+    let board = load_board(position, ply);
+    let legacy = build_impact_heatmap_legacy(&board);
+    let catv6 = build_impact_heatmap(&board);
+    let values = |cat: &CorridorAttention| {
+        (0..81usize)
+            .map(|sq| cat.square_heat((sq / 9) as u8, (sq % 9) as u8).to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let moves = position_moves(position);
+    let limit = ply.unwrap_or(moves.len()).min(moves.len());
+    println!(
+        "{{\"bench_type\":\"cat_dump\",\"position\":{},\"ply\":{},\"moves\":{},\"legacy\":[{}],\"catv6\":[{}]}}",
+        json_str(position),
+        limit,
+        json_str(&moves[..limit].join(" ")),
+        values(&legacy),
+        values(&catv6),
+    );
+}
+
 fn parse_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
@@ -521,9 +634,27 @@ fn main() {
             let sec = parse_u64(&args, "--sec", 10);
             bench_profile(sec, position, moves, full, threads);
         }
+        "catmicro" => {
+            let iterations = parse_usize(&args, "--iters", 10_000);
+            let rounds = parse_usize(&args, "--runs", 7);
+            let ply = args
+                .iter()
+                .position(|a| a == "--ply")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok());
+            bench_cat_micro(position, ply, iterations, rounds);
+        }
+        "catdump" => {
+            let ply = args
+                .iter()
+                .position(|a| a == "--ply")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.parse().ok());
+            dump_cat_planes(position, ply);
+        }
         other => {
             eprintln!(
-                "unknown mode {other}; use time|depth|profile|instr [--position NAME] [--full] [--sec N] [--runs N]"
+                "unknown mode {other}; use time|depth|profile|instr|catmicro|catdump [--position NAME] [--full] [--sec N] [--runs N]"
             );
             std::process::exit(2);
         }

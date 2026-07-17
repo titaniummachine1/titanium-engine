@@ -571,6 +571,7 @@ mod lazy_smp_tests {
             ThinkResult {
                 mv,
                 score: depth * 10,
+                root_moves: Vec::new(),
                 depth,
                 nodes,
                 main_thread_nodes: 0,
@@ -1260,6 +1261,7 @@ impl RaceResultInfo {
 pub struct ThinkResult {
     pub mv: i16,
     pub score: i32,
+    pub root_moves: Vec<(i16, i32)>,
     pub depth: i32,
     pub nodes: u64,
     pub main_thread_nodes: u64,
@@ -1358,6 +1360,53 @@ mod score_label_tests {
     fn labels_race_scores_as_forced_races() {
         assert_eq!(score_label(RACE_MATE - 30), "race win in 30");
         assert_eq!(score_label(-(RACE_MATE - 17)), "race loss in 17");
+    }
+
+    #[test]
+    fn root_moves_progress_json_includes_rank_and_multipv() {
+        let root_moves = vec![(76i16, 80i32), (4i16, 123i32)];
+        let json = ace_progress_json(
+            "test",
+            &[],
+            1,
+            0,
+            0,
+            &[],
+            0,
+            123,
+            &root_moves,
+            5,
+            5,
+            0,
+            true,
+            2,
+        );
+        assert!(json.contains(r#""rank":1"#));
+        assert!(json.contains(r#""rank":2"#));
+        assert!(json.contains(r#""move":"e9"#));
+        assert!(json.contains(r#""move":"e1"#));
+        assert!(json.contains(r#""multiPv":["#));
+        assert!(json.contains(r#""score":123"#));
+        assert!(json.contains(r#""score":80"#));
+
+        let json_off = ace_progress_json(
+            "test",
+            &[],
+            1,
+            0,
+            0,
+            &[],
+            0,
+            123,
+            &root_moves,
+            5,
+            5,
+            0,
+            false,
+            2,
+        );
+        assert!(json_off.contains(r#""rootMoves":[]"#));
+        assert!(json_off.contains(r#""multiPv":["#));
     }
 
     #[test]
@@ -2029,7 +2078,12 @@ pub fn format_root_defense_diag_json(entries: &[RootDefenseDiag]) -> String {
     out
 }
 
-pub fn think_result_progress_json(engine_label: &str, result: &ThinkResult) -> String {
+pub fn think_result_progress_json(
+    engine_label: &str,
+    result: &ThinkResult,
+    root_scores: bool,
+    multipv: usize,
+) -> String {
     let json = ace_progress_json(
         engine_label,
         &result.depth_log,
@@ -2039,9 +2093,12 @@ pub fn think_result_progress_json(engine_label: &str, result: &ThinkResult) -> S
         &result.helper_nodes,
         result.total_nodes,
         result.score,
+        &result.root_moves,
         result.white_dist,
         result.black_dist,
         result.ms,
+        root_scores,
+        multipv,
     );
     append_race_result_json(json, result.race)
 }
@@ -2070,6 +2127,44 @@ fn append_race_result_json(mut json: String, race: RaceResultInfo) -> String {
     json
 }
 
+fn format_ranked_root_json(
+    ordered: &[(i16, i32)],
+    root_scores: bool,
+    multipv: usize,
+) -> (String, String) {
+    let mut root_json = String::new();
+    if root_scores {
+        for (i, (mv, score)) in ordered.iter().enumerate() {
+            if i > 0 {
+                root_json.push(',');
+            }
+            let alg = crate::titanium::move_id_to_algebraic(*mv);
+            root_json.push_str(&format!(
+                r#"{{"move":"{}","score":{},"rank":{}}}"#,
+                alg,
+                score,
+                i + 1
+            ));
+        }
+    }
+    let mut multipv_json = String::new();
+    let multipv_count = multipv.min(ordered.len());
+    for i in 0..multipv_count {
+        if i > 0 {
+            multipv_json.push(',');
+        }
+        let (mv, score) = ordered[i];
+        let alg = crate::titanium::move_id_to_algebraic(mv);
+        multipv_json.push_str(&format!(
+            r#"{{"move":"{}","score":{},"rank":{}}}"#,
+            alg,
+            score,
+            i + 1
+        ));
+    }
+    (root_json, multipv_json)
+}
+
 fn ace_progress_json(
     engine_label: &str,
     depth_log: &[AceDepthLogEntry],
@@ -2079,9 +2174,12 @@ fn ace_progress_json(
     helper_nodes: &[u64],
     total_nodes: u64,
     root_score: i32,
+    root_moves: &[(i16, i32)],
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
+    root_scores: bool,
+    multipv: usize,
 ) -> String {
     let mut depth_json = String::new();
     for (i, e) in depth_log.iter().enumerate() {
@@ -2104,8 +2202,12 @@ fn ace_progress_json(
         helper_json.push_str(&nodes.to_string());
     }
     let root_score_text = score_label(root_score);
+    let mut ordered_root_moves = root_moves.to_vec();
+    ordered_root_moves.sort_by(|a, b| b.1.cmp(&a.1));
+    let (root_json, multipv_json) =
+        format_ranked_root_json(&ordered_root_moves, root_scores, multipv);
     format!(
-        r#"{{"engine":"{engine_label}","stoppedBy":"{engine_label}","searchDepth":{search_depth},"nodes":{nodes},"mainThreadNodes":{main_thread_nodes},"helperNodes":[{helper_json}],"totalNodes":{total_nodes},"totalNodesAcrossWorkers":{total_nodes},"rootScore":{root_score},"rootScoreText":"{root_score_text}","whiteDist":{white_dist},"blackDist":{black_dist},"elapsedMs":{elapsed_ms},"depthLog":[{depth_json}]}}"#
+        r#"{{"engine":"{engine_label}","stoppedBy":"{engine_label}","searchDepth":{search_depth},"nodes":{nodes},"mainThreadNodes":{main_thread_nodes},"helperNodes":[{helper_json}],"totalNodes":{total_nodes},"totalNodesAcrossWorkers":{total_nodes},"rootScore":{root_score},"rootScoreText":"{root_score_text}","whiteDist":{white_dist},"blackDist":{black_dist},"elapsedMs":{elapsed_ms},"depthLog":[{depth_json}],"rootMoves":[{root_json}],"multiPv":[{multipv_json}]}}"#
     )
 }
 
@@ -2115,9 +2217,12 @@ fn emit_ace_progress(
     search_depth: i32,
     nodes: u64,
     root_score: i32,
+    root_moves: &[(i16, i32)],
     white_dist: u8,
     black_dist: u8,
     elapsed_ms: u64,
+    root_scores: bool,
+    multipv: usize,
     race: RaceResultInfo,
     #[cfg(feature = "wasm")] wasm_progress: Option<&mut Vec<String>>,
     #[cfg(feature = "wasm")] wasm_cb: Option<&js_sys::Function>,
@@ -2132,9 +2237,12 @@ fn emit_ace_progress(
             &[],
             nodes,
             root_score,
+            root_moves,
             white_dist,
             black_dist,
             elapsed_ms,
+            root_scores,
+            multipv,
         ),
         race,
     );
@@ -2454,6 +2562,12 @@ pub struct TitaniumSearch {
     stream_label: String,
     stream_t0: Instant,
     stream_root_score: i32,
+    stream_root_moves: Vec<(i16, i32)>,
+    /// Top-N root lines to expose in progress JSON (`multiPv`). Open-window root
+    /// search when `> 1` so scores are comparable.
+    multipv: usize,
+    /// When true, emit ranked `rootMoves` in progress JSON (not full MultiPV PV lines).
+    root_scores: bool,
     stream_search_depth: i32,
     stream_depth_log: Vec<AceDepthLogEntry>,
     stream_last_emit_nodes: u64,
@@ -2714,6 +2828,9 @@ impl TitaniumSearch {
             stream_label: String::new(),
             stream_t0: Instant::now(),
             stream_root_score: 0,
+            stream_root_moves: Vec::new(),
+            multipv: 1,
+            root_scores: true,
             stream_search_depth: 0,
             stream_depth_log: Vec::new(),
             stream_last_emit_nodes: 0,
@@ -2821,6 +2938,25 @@ impl TitaniumSearch {
 
     pub fn set_ace_lmp(&mut self, on: bool) {
         self.ace_lmp = on;
+    }
+
+    /// Report top-N root moves by score in progress JSON. When `> 1`, root moves
+    /// are searched with an open window so scores are comparable.
+    pub fn set_multipv(&mut self, n: u32) {
+        self.multipv = n.max(1) as usize;
+    }
+
+    pub fn multipv(&self) -> usize {
+        self.multipv
+    }
+
+    /// Dump searched root moves with score+rank in progress JSON; not MultiPV PV lines.
+    pub fn set_root_scores(&mut self, enabled: bool) {
+        self.root_scores = enabled;
+    }
+
+    pub fn root_scores_enabled(&self) -> bool {
+        self.root_scores
     }
 
     pub fn ace_lmp_enabled(&self) -> bool {
@@ -3874,9 +4010,19 @@ impl TitaniumSearch {
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
                 let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
-                    (&cat.witness_p0, &cat.witness_p1, &cat.propagated_p0, &cat.propagated_p1)
+                    (
+                        &cat.witness_p0,
+                        &cat.witness_p1,
+                        &cat.propagated_p0,
+                        &cat.propagated_p1,
+                    )
                 } else {
-                    (&cat.witness_p1, &cat.witness_p0, &cat.propagated_p1, &cat.propagated_p0)
+                    (
+                        &cat.witness_p1,
+                        &cat.witness_p0,
+                        &cat.propagated_p1,
+                        &cat.propagated_p0,
+                    )
                 };
                 for sq in 0..81usize {
                     let canon = if me == 0 { sq } else { NET_MIRC[sq] };
@@ -4018,9 +4164,12 @@ impl TitaniumSearch {
             self.stream_search_depth,
             self.nodes,
             self.stream_root_score,
+            &self.stream_root_moves,
             white_dist,
             black_dist,
             elapsed_ms,
+            self.root_scores,
+            self.multipv,
             RaceResultInfo::from_score(self.stream_root_score),
             #[cfg(feature = "wasm")]
             Some(&mut self.wasm_progress),
@@ -5282,9 +5431,19 @@ impl TitaniumSearch {
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
                 let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
-                    (&cat.witness_p0, &cat.witness_p1, &cat.propagated_p0, &cat.propagated_p1)
+                    (
+                        &cat.witness_p0,
+                        &cat.witness_p1,
+                        &cat.propagated_p0,
+                        &cat.propagated_p1,
+                    )
                 } else {
-                    (&cat.witness_p1, &cat.witness_p0, &cat.propagated_p1, &cat.propagated_p0)
+                    (
+                        &cat.witness_p1,
+                        &cat.witness_p0,
+                        &cat.propagated_p1,
+                        &cat.propagated_p0,
+                    )
                 };
                 let mut cat_score = 0.0;
                 for sq in 0..81usize {
@@ -6566,7 +6725,10 @@ impl TitaniumSearch {
                 }
             }
             let new_depth = depth - 1;
-            let result = if self.eme
+            let result = if ply == 0 && self.multipv > 1 {
+                self.ab(new_depth, -INF, INF, ply + 1, true, m, q_left)
+                    .map(|s| -s)
+            } else if self.eme
                 && i > 0
                 && i <= ACE_EME_TOP_MOVES
                 && depth >= ACE_LMR_MIN_DEPTH
@@ -6826,6 +6988,15 @@ impl TitaniumSearch {
                 self.sub_anc_hi[ply] = self.sub_anc_hi[ply + 1];
             }
             let score = result?;
+            if ply == 0 {
+                if let Some((_, sc)) = self.stream_root_moves.iter_mut().find(|(mv, _)| *mv == m) {
+                    if score > *sc {
+                        *sc = score;
+                    }
+                } else {
+                    self.stream_root_moves.push((m, score));
+                }
+            }
             if self.sf_history {
                 if m >= 100 {
                     searched_walls[searched_wall_count] = m;
@@ -7383,6 +7554,7 @@ impl TitaniumSearch {
             return ThinkResult {
                 mv: direct_mv,
                 score: 0,
+                root_moves: Vec::new(),
                 depth: 0,
                 nodes: 0,
                 main_thread_nodes: 0,
@@ -7416,9 +7588,12 @@ impl TitaniumSearch {
                         99,
                         solution.legal_moves as u64,
                         solution.score,
+                        &[],
                         self.d0[self.dist0_idx][self.g.pawn[0]],
                         self.d1[self.dist1_idx][self.g.pawn[1]],
                         rt0.elapsed().as_millis() as u64,
+                        self.root_scores,
+                        self.multipv,
                         solution.info,
                         #[cfg(feature = "wasm")]
                         Some(&mut self.wasm_progress),
@@ -7429,6 +7604,7 @@ impl TitaniumSearch {
                 return ThinkResult {
                     mv: solution.mv,
                     score: solution.score,
+                    root_moves: Vec::new(),
                     depth: 99,
                     nodes: solution.legal_moves as u64,
                     main_thread_nodes: solution.legal_moves as u64,
@@ -7479,6 +7655,7 @@ impl TitaniumSearch {
                         } else {
                             -(RACE_MATE - rk)
                         },
+                        root_moves: Vec::new(),
                         depth: 99,
                         nodes: nm as u64,
                         main_thread_nodes: nm as u64,
@@ -7573,6 +7750,7 @@ impl TitaniumSearch {
             return ThinkResult {
                 mv: direct_mv,
                 score: 0,
+                root_moves: Vec::new(),
                 depth: 0,
                 nodes: 0,
                 main_thread_nodes: 0,
@@ -7914,6 +8092,7 @@ impl TitaniumSearch {
         self.stream_root_score = 0;
         self.stream_search_depth = 0;
         self.stream_depth_log.clear();
+        self.stream_root_moves.clear();
         self.stream_last_emit_nodes = 0;
         self.stream_last_emit_ms = 0;
         self.stream_last_best = super::TITANIUM_NO_MOVE;
@@ -8016,6 +8195,7 @@ impl TitaniumSearch {
             self.root_pawn_score = i32::MIN;
             self.stream_root_score = last_score;
             self.stream_search_depth = d;
+            self.stream_root_moves.clear();
             let nodes_at_depth = self.nodes;
             let result = if d >= 4 && last_score > -2000 && last_score < 2000 {
                 // aspiration: graded widening (ka_ab.js-style) — a failed bound
@@ -8312,6 +8492,7 @@ impl TitaniumSearch {
         ThinkResult {
             mv: last_best,
             score: last_score,
+            root_moves: self.stream_root_moves.clone(),
             depth: last_depth,
             nodes: self.nodes,
             main_thread_nodes: self.nodes,

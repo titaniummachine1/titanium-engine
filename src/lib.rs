@@ -59,6 +59,8 @@ pub use search::{
     WorkerContext, DEFAULT_MAX_NODES, DEFAULT_TIME_MS, MCTS_DEFAULT_MAX_SIMULATIONS,
     MCTS_DEFAULT_UCT,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use util::perft::perft_fast_timed;
 #[cfg(feature = "parallel")]
 pub use util::perft::perft_parallel_root;
 pub use util::perft::{
@@ -67,8 +69,6 @@ pub use util::perft::{
     perft_no_tt_anchor_baseline, perft_no_tt_mode, perft_pawn_only_mode, PerftContext,
     PERFT3_STARTPOS, PERFT4_STARTPOS, PERFT5_STARTPOS, PERFT5_TIMEOUT_SECS,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use util::perft::perft_fast_timed;
 
 // Titanium v15 production API (formerly `acev13` module path).
 pub use titanium::fields_viz;

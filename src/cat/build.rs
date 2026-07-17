@@ -262,10 +262,7 @@ pub(crate) fn build_corridor_search_data(
     let mut opponent_path_len = 0usize;
     let mut reachable_flood = 0u128;
 
-    for (player, attention) in [
-        (Player::One, &mut white),
-        (Player::Two, &mut black),
-    ] {
+    for (player, attention) in [(Player::One, &mut white), (Player::Two, &mut black)] {
         let (dist_from, dist_to) = scratch.dist_scratch_mut();
         reachable_flood |=
             add_player_corridor_attention(board, player, masks, attention, dist_from, dist_to);
@@ -579,11 +576,7 @@ fn catv5_witness_paths(
     (paths, count)
 }
 
-fn add_catv5_witness_heat(
-    paths: &[u128; CAT_V5_WITNESS_PATHS],
-    count: usize,
-    heat: &mut [u8; 81],
-) {
+fn add_catv5_witness_heat(paths: &[u128; CAT_V5_WITNESS_PATHS], count: usize, heat: &mut [u8; 81]) {
     for rank in 0..count {
         let mut bits = paths[rank];
         while bits != 0 {
@@ -611,8 +604,7 @@ fn add_catv5_propagated_heat(
     let start_bit = flood_bit_sq(start);
     let mut to_goal = DistLayers::default();
     fill_dist_layers_to_goal_row(player, masks, &mut to_goal);
-    let Some(shortest) = (0..to_goal.depth).find(|&d| to_goal.masks[d] & start_bit != 0)
-    else {
+    let Some(shortest) = (0..to_goal.depth).find(|&d| to_goal.masks[d] & start_bit != 0) else {
         return;
     };
     let mut forward = 0u128;

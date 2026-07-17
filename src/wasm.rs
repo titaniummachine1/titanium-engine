@@ -470,7 +470,12 @@ impl WasmEngine {
         self.last_nodes = result.nodes;
         self.last_stop_reason = result.stop_reason;
         if stream {
-            let json = think_result_progress_json(&self.engine_label, &result);
+            let json = think_result_progress_json(
+                &self.engine_label,
+                &result,
+                self.search.root_scores_enabled(),
+                self.search.multipv(),
+            );
             self.search.queue_wasm_progress(json);
         }
         if result.mv == TITANIUM_NO_MOVE {
@@ -525,6 +530,14 @@ impl WasmEngine {
 
     pub fn legal_moves(&self) -> String {
         String::new()
+    }
+
+    pub fn set_multipv(&mut self, n: u32) {
+        self.search.set_multipv(n);
+    }
+
+    pub fn set_root_scores(&mut self, enabled: bool) {
+        self.search.set_root_scores(enabled);
     }
 
     pub fn winner(&self) -> i32 {

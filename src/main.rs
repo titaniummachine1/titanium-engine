@@ -2321,6 +2321,8 @@ fn run_genmove_ace(args: &[String]) {
             log,
             book,
             book_db,
+            multipv: 1,
+            root_scores: true,
         };
         match titanium::titanium_genmove(&moves, params, label) {
             Some((algebraic, info)) => {
