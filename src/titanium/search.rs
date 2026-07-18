@@ -3451,7 +3451,16 @@ impl TitaniumSearch {
         tt_bits: Option<usize>,
         ceiling: u16,
     ) -> Box<Self> {
-        let mut search = Self::grafted(g, tt_bits);
+        Self::grafted_v17_with_ceiling_and_weights(g, tt_bits, ceiling, net())
+    }
+
+    pub fn grafted_v17_with_ceiling_and_weights(
+        g: GameState,
+        tt_bits: Option<usize>,
+        ceiling: u16,
+        weights: &'static Net,
+    ) -> Box<Self> {
+        let mut search = Self::grafted_with_weights(g, tt_bits, weights);
         search.cat_lmr_v16 = true;
         search.cat_lmr_ceiling = if crate::cat::CAT_V16_LMR_CEILINGS.contains(&ceiling) {
             ceiling

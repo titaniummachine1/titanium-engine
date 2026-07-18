@@ -2,8 +2,9 @@
 //!
 //! Philosophy: NN = geometric prior, search = tactical proof. See `field_planes.rs`.
 //!
-//! Two embedded blobs:
-//!   `net_weights.bin`        — v15 live (micro-train + deploy updates this)
+//! Four embedded blobs:
+//!   `net_weights.bin`        — live production (deploy / training updates this) → v18
+//!   `net_weights_v17.bin`    — frozen website-era v17 snapshot (compare target)
 //!   `net_weights_frozen.bin` — pinned v13 baseline (ti-pure anchor + v15-frozen)
 //!   `net_weights_medium.bin` — browser Medium tier, also used by native proxy
 //!
@@ -36,6 +37,8 @@ const H_HEADER_LEN: usize = 8;
 static NET_BYTES: &[u8] = include_bytes!("net_weights.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("net_weights_frozen.bin");
 static NET_MEDIUM_BYTES: &[u8] = include_bytes!("net_weights_medium.bin");
+/// Website-era Titanium v17 snapshot — never overwritten by deploy_accepted_to_website.
+static NET_V17_BYTES: &[u8] = include_bytes!("net_weights_v17.bin");
 
 pub struct Net {
     /// Active hidden width for THIS loaded net (<= MAX_NET_H). Everything
@@ -251,6 +254,16 @@ pub fn net() -> &'static Net {
 pub fn net_frozen() -> &'static Net {
     static NET: OnceLock<Net> = OnceLock::new();
     NET.get_or_init(|| load_net_from_bytes(NET_FROZEN_BYTES))
+}
+
+/// Legacy website Titanium v17 weights — frozen for v17-vs-v18 comparison.
+pub fn net_v17() -> &'static Net {
+    static NET: OnceLock<Net> = OnceLock::new();
+    NET.get_or_init(|| load_net_from_bytes(NET_V17_BYTES))
+}
+
+pub fn v17_weights_sha256() -> [u8; 32] {
+    Sha256::digest(NET_V17_BYTES).into()
 }
 
 pub fn live_weights_sha256() -> [u8; 32] {

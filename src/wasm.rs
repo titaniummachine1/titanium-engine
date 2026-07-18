@@ -13,7 +13,7 @@ use crate::titanium::{
     algebraic_to_move_id, move_id_to_algebraic, GameState, TitaniumSearch, TITANIUM_NO_MOVE,
 };
 
-const ENGINE_VERSION: &str = "titanium-v17";
+const ENGINE_VERSION: &str = "titanium-v18";
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -348,6 +348,7 @@ pub struct WasmEngine {
 #[wasm_bindgen]
 impl WasmEngine {
     /// `tier`: 3 = CAT 500, 4 = CAT 800, 5 = CAT 1000. Other values use CAT 800.
+    /// Legacy Titanium v16 product entry (same search graft as v17/v18).
     #[wasm_bindgen(constructor)]
     pub fn new(tier: u8) -> WasmEngine {
         install_panic_hook();
@@ -358,29 +359,68 @@ impl WasmEngine {
             _ => 800,
         };
         let mut search = TitaniumSearch::grafted_v17_with_ceiling(g, None, ceiling);
-        // Order: bias root move order / attention from the human DAG, but always search.
-        // Play (forced book moves) is reserved for training/oracle CLIs via --book play.
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
-        let engine_label = "titanium-v17".to_string();
         WasmEngine {
             search,
-            engine_label,
+            engine_label: "titanium-v16".to_string(),
             last_depth: 0,
             last_nodes: 0,
             last_stop_reason: "none",
         }
     }
 
-    /// Current strongest profile, packaged in the same WASM module as v16.
+    /// Legacy website Titanium v17 — frozen NNUE snapshot for comparison vs v18.
     #[wasm_bindgen]
     pub fn new_v17(tier: u8) -> WasmEngine {
-        let mut engine = WasmEngine::new(tier);
-        crate::titanium::session::apply_session_experiment_flags(
-            &mut engine.search,
-            "titanium-v17",
+        install_panic_hook();
+        let g = GameState::new();
+        let ceiling = match tier {
+            3 => 500,
+            5 => 1000,
+            _ => 800,
+        };
+        let mut search = TitaniumSearch::grafted_v17_with_ceiling_and_weights(
+            g,
+            None,
+            ceiling,
+            crate::titanium::net::net_v17(),
         );
-        engine.engine_label = "titanium-v17".to_string();
-        engine
+        search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
+        crate::titanium::session::apply_session_experiment_flags(&mut search, "titanium-v17");
+        WasmEngine {
+            search,
+            engine_label: "titanium-v17".to_string(),
+            last_depth: 0,
+            last_nodes: 0,
+            last_stop_reason: "none",
+        }
+    }
+
+    /// Production Titanium v18 — live NNUE weights (updated by deploy / training).
+    #[wasm_bindgen]
+    pub fn new_v18(tier: u8) -> WasmEngine {
+        install_panic_hook();
+        let g = GameState::new();
+        let ceiling = match tier {
+            3 => 500,
+            5 => 1000,
+            _ => 800,
+        };
+        let mut search = TitaniumSearch::grafted_v17_with_ceiling_and_weights(
+            g,
+            None,
+            ceiling,
+            crate::titanium::net::net(),
+        );
+        search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
+        crate::titanium::session::apply_session_experiment_flags(&mut search, "titanium-v18");
+        WasmEngine {
+            search,
+            engine_label: "titanium-v18".to_string(),
+            last_depth: 0,
+            last_nodes: 0,
+            last_stop_reason: "none",
+        }
     }
 
     pub fn reset(&mut self) {

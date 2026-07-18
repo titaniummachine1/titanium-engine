@@ -22,6 +22,7 @@ fn is_grafted_engine(engine_flag: &str) -> bool {
         engine_flag,
         "titanium-v16"
             | "titanium-v16-sfhist"
+            | "titanium-v18"
             | "titanium-v17"
             | "titanium-v17-cat-path-lmr"
             | "titanium-v17-route-touch"
@@ -49,7 +50,7 @@ pub fn apply_session_experiment_flags(search: &mut TitaniumSearch, engine_flag: 
 
 fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str) {
     let engine_flag = match engine_flag {
-        "titanium-v16" | "titanium-v16-sfhist" => "titanium-v17",
+        "titanium-v16" | "titanium-v16-sfhist" | "titanium-v18" => "titanium-v17",
         other => other,
     };
     let is_v17 = matches!(
