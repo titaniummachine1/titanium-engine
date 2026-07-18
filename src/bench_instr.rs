@@ -122,12 +122,32 @@ pub struct BenchInstr {
     pub nnue_incr_update: OpStat,
     pub eval_cache_hit: OpStat,
     pub eval_cache_miss: OpStat,
+    pub eval_cache_replace: OpStat,
     pub refresh_cheap: OpStat,
     pub refresh_incr: OpStat,
     pub refresh_full: OpStat,
     pub dist_lru_hit: OpStat,
     pub dist_lru_miss: OpStat,
+    pub dist_lru_layer_copy: OpStat,
+    /// Cumulative bytes copied by `dist_lru_layer_copy` on hit (`d * size_of::<u128>()`).
+    pub dist_lru_layer_copy_bytes: u64,
+    /// Layer-depth histogram on `dist_lru_store` (route_active): buckets
+    /// 0-4, 5-8, 9-12, 13-16, 17-32, 33+.
+    pub dist_layer_depth_hist: [u64; 6],
+    /// Running max depth seen by `bump_dist_layer_depth`.
+    pub dist_layer_depth_max: u64,
     pub dist_reflood: OpStat,
+    pub route_active_eval: OpStat,
+    pub route_inactive_eval: OpStat,
+    pub dist_lru_hit_layers: OpStat,
+    pub dist_lru_hit_scalar: OpStat,
+    pub dist_lru_store_layers: OpStat,
+    pub dist_lru_store_scalar: OpStat,
+    pub dist_lru_replace: OpStat,
+    /// Store took the spill path (d0 or d1 depth > DIST_LAYER_INLINE).
+    pub dist_lru_spill_store: OpStat,
+    /// Load restored a spill tail (depth > DIST_LAYER_INLINE).
+    pub dist_lru_spill_load: OpStat,
     pub eval_width_opp: OpStat,
     pub eval_cat_heat: OpStat,
     pub eval_tail: OpStat,
@@ -206,7 +226,7 @@ impl BenchInstr {
         }
         let nodes = self.search_nodes;
         let total_ns = self.measured_ns;
-        let ops: [(&str, &OpStat); 45] = [
+          let ops: [(&str, &OpStat); 56] = [
             ("evaluate", &self.evaluate),
             ("eval_race_bound", &self.eval_race_bound),
             ("race_gate_cached", &self.race_gate_cached),
@@ -242,12 +262,23 @@ impl BenchInstr {
             ("nnue_incr_update", &self.nnue_incr_update),
             ("eval_cache_hit", &self.eval_cache_hit),
             ("eval_cache_miss", &self.eval_cache_miss),
+            ("eval_cache_replace", &self.eval_cache_replace),
             ("refresh_cheap", &self.refresh_cheap),
             ("refresh_incr", &self.refresh_incr),
             ("refresh_full", &self.refresh_full),
             ("dist_lru_hit", &self.dist_lru_hit),
             ("dist_lru_miss", &self.dist_lru_miss),
+            ("dist_lru_layer_copy", &self.dist_lru_layer_copy),
             ("dist_reflood", &self.dist_reflood),
+            ("route_active_eval", &self.route_active_eval),
+            ("route_inactive_eval", &self.route_inactive_eval),
+            ("dist_lru_hit_layers", &self.dist_lru_hit_layers),
+            ("dist_lru_hit_scalar", &self.dist_lru_hit_scalar),
+            ("dist_lru_store_layers", &self.dist_lru_store_layers),
+            ("dist_lru_store_scalar", &self.dist_lru_store_scalar),
+            ("dist_lru_replace", &self.dist_lru_replace),
+            ("dist_lru_spill_store", &self.dist_lru_spill_store),
+            ("dist_lru_spill_load", &self.dist_lru_spill_load),
             ("eval_width_opp", &self.eval_width_opp),
             ("eval_cat_heat", &self.eval_cat_heat),
             ("eval_tail", &self.eval_tail),
@@ -285,9 +316,28 @@ impl BenchInstr {
             })
             .collect();
 
+        // DistTopoEntry layout sizes — sourced from helpers next to DistTopoEntry
+        // so JSON stays aligned with search_impl (scalar ≈ key+depths+d0+d1 = 174).
+        let dist_topo_entry_bytes = crate::titanium::search::dist_topo_entry_size_bytes();
+        let dist_topo_scalar_bytes = crate::titanium::search::dist_topo_scalar_bytes();
+        let dist_topo_layer_bytes = crate::titanium::search::dist_topo_layer_bytes();
+
+        let dist_layer_depth_samples: u64 = self.dist_layer_depth_hist.iter().sum();
         format!(
-            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
+            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","dist_topo_entry_bytes":{},"dist_topo_scalar_bytes":{},"dist_topo_layer_bytes":{},"dist_lru_layer_copy_bytes":{},"dist_layer_depth_hist":{{"0_4":{},"5_8":{},"9_12":{},"13_16":{},"17_32":{},"33_plus":{}}},"dist_layer_depth_samples":{},"dist_layer_depth_max":{},"refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
             self.stop_reason,
+            dist_topo_entry_bytes,
+            dist_topo_scalar_bytes,
+            dist_topo_layer_bytes,
+            self.dist_lru_layer_copy_bytes,
+            self.dist_layer_depth_hist[0],
+            self.dist_layer_depth_hist[1],
+            self.dist_layer_depth_hist[2],
+            self.dist_layer_depth_hist[3],
+            self.dist_layer_depth_hist[4],
+            self.dist_layer_depth_hist[5],
+            dist_layer_depth_samples,
+            self.dist_layer_depth_max,
             self.refresh_dist.calls,
             self.refresh_site_calls_total(),
             self.refresh_ab_skipped,
@@ -349,6 +399,16 @@ pub fn bump_u64(pick: fn(&mut BenchInstr) -> &mut u64) {
     with_bench(|b| {
         *pick(b) += 1;
     });
+}
+
+#[inline(always)]
+pub fn add_u64(pick: fn(&mut BenchInstr) -> &mut u64, n: u64) {
+    #[cfg(feature = "bench-instrument")]
+    with_bench(|b| {
+        *pick(b) += n;
+    });
+    #[cfg(not(feature = "bench-instrument"))]
+    let _ = (pick, n);
 }
 
 #[inline(always)]
@@ -449,6 +509,29 @@ pub fn refresh_site_reflood() {
 pub fn bump_ab_refresh_skipped() {
     #[cfg(feature = "bench-instrument")]
     with_bench(|b| b.refresh_ab_skipped += 1);
+}
+
+/// Record one player layer-depth sample from `dist_lru_store` (route_active).
+#[inline(always)]
+pub fn bump_dist_layer_depth(depth: usize) {
+    #[cfg(feature = "bench-instrument")]
+    with_bench(|b| {
+        let idx = match depth {
+            0..=4 => 0,
+            5..=8 => 1,
+            9..=12 => 2,
+            13..=16 => 3,
+            17..=32 => 4,
+            _ => 5,
+        };
+        b.dist_layer_depth_hist[idx] += 1;
+        let d = depth as u64;
+        if d > b.dist_layer_depth_max {
+            b.dist_layer_depth_max = d;
+        }
+    });
+    #[cfg(not(feature = "bench-instrument"))]
+    let _ = depth;
 }
 
 pub fn begin_search() {

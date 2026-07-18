@@ -26,7 +26,7 @@ use std::time::Instant;
 use titanium::core::board::Board;
 use titanium::core::board::WallOrientation;
 use titanium::movegen::o1::{wall_masks, WallMasks};
-use titanium::oracle::canta::board_after_canta_game;
+use titanium::validation::canta::board_after_canta_game;
 use titanium::pathfinding::bff::wall::{
     pawn_bit, pbff_ks_wall_legal, pbff_wall_legal, wall_delta, WallGrids,
 };

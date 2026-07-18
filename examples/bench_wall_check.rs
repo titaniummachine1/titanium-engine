@@ -2,7 +2,7 @@
 //! measured on the 15 canta midgame positions (wall-heavy, realistic).
 use std::time::Instant;
 use titanium::core::board::{Board, Player, WallOrientation};
-use titanium::oracle::canta::board_after_canta_game;
+use titanium::validation::canta::board_after_canta_game;
 use titanium::path::flood::{flood_to_goal, goal_square_mask};
 use titanium::path::masks::DirMasks;
 use titanium::path::parallel::{

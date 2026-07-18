@@ -7,7 +7,7 @@ use crate::core::board::Board;
 use crate::core::board::Undo;
 use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::pathfinding::BfsScratch;
-use crate::search::runtime::Engine;
+use crate::legacy_search::runtime::Engine;
 use crate::titanium::game::GameState;
 use crate::titanium::search::board_move_to_move_id;
 use crate::util::perft::{perft_fast, PERFT3_STARTPOS, PERFT4_STARTPOS, PERFT4_TEST_TIMEOUT_SECS};

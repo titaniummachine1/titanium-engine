@@ -140,7 +140,7 @@ Web: enable **CAT** in Analysis, read numbers on squares (≥60 warm tint, ≥16
 
 | Area        | Files                                                                                     |
 | ----------- | ----------------------------------------------------------------------------------------- |
-| Search      | `engine/src/search/alphabeta.rs`                                                          |
+| Search      | `engine/legacy/search/alphabeta.rs`                                                       |
 | CAT prune   | `engine/src/cat/prune.rs`                                                                 |
 | CAT viz API | `engine/src/cat/viz.rs`                                                                   |
 | Movegen     | `engine/src/movegen/legal.rs`, `pawn_bits.rs`                                             |

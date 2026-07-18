@@ -96,24 +96,6 @@ const WASM_FEATURES: &str = "wasm-threads,embed-tables";
 #[cfg(not(feature = "wasm-threads"))]
 const WASM_FEATURES: &str = "wasm,embed-tables";
 
-fn ace_params_from_mode(
-    engine_mode: &str,
-    movetime_ms: u32,
-    max_depth: i32,
-) -> crate::ace::AceParams {
-    let ti_movegen = engine_mode.contains("-ti");
-    let eme = engine_mode.contains("pmc");
-    crate::ace::AceParams {
-        time_ms: (movetime_ms as u64).max(1),
-        max_depth: if max_depth > 0 { max_depth } else { 128 },
-        full: false,
-        cat: false,
-        ti_movegen,
-        log: false,
-        eme,
-    }
-}
-
 fn replay_moves(moves: &str) -> Result<GameState, JsError> {
     let mut g = GameState::new();
     for text in moves.split_whitespace().filter(|s| !s.is_empty()) {
@@ -203,7 +185,7 @@ impl WasmCatEngine {
         lmr_aggression_percent: i32,
     ) -> String {
         self.sync_to(moves);
-        crate::search::lmr_viz::lmr_snapshot_json(
+        crate::legacy_search::lmr_viz::lmr_snapshot_json(
             &mut self.board,
             u64::from(time_ms),
             id_depth,
@@ -266,70 +248,6 @@ pub fn wasm_build_identity_json() -> String {
         r#"{{"engine_version":"{ENGINE_VERSION}","git_commit":"{git}","build_timestamp":"{built_at}","features":"{WASM_FEATURES}","weights_live_sha256":"{live}"}}"#,
         live = hex32(&live_weights_sha256()),
     )
-}
-
-/// ACE Rust port in WASM — one-shot genmove from a move list (GitHub Pages; no native binary).
-#[wasm_bindgen]
-pub struct WasmAceEngine;
-
-#[wasm_bindgen]
-impl WasmAceEngine {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmAceEngine {
-        WasmAceEngine
-    }
-
-    pub fn genmove(
-        &self,
-        moves: &str,
-        movetime_ms: u32,
-        max_depth: i32,
-        engine_mode: &str,
-        on_progress: Option<js_sys::Function>,
-    ) -> String {
-        install_panic_hook();
-        let list: Vec<String> = moves
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        let params = ace_params_from_mode(engine_mode, movetime_ms, max_depth);
-        let stream = on_progress.is_some();
-        let mut g = crate::ace::AceGame::new();
-        for text in &list {
-            g.make_move(crate::ace::algebraic_to_ace(text));
-        }
-        if g.winner() >= 0 {
-            return "(none)".to_string();
-        }
-        let mut search = if params.ti_movegen && params.cat {
-            crate::ace::AceSearch::with_ti_movegen_and_cat(g)
-        } else if params.ti_movegen {
-            crate::ace::AceSearch::with_ti_movegen(g)
-        } else if params.cat {
-            crate::ace::AceSearch::with_cat(g)
-        } else {
-            crate::ace::AceSearch::new(g)
-        };
-        if params.eme {
-            search.enable_eme();
-        }
-        search.set_wasm_progress(on_progress);
-        let result = search.think(
-            params.time_ms,
-            params.max_depth,
-            params.full,
-            stream,
-            engine_mode,
-        );
-        if result.mv == crate::ace::ACE_NO_MOVE {
-            "(none)".to_string()
-        } else if result.mv == 0 && search.g.winner() >= 0 {
-            "(none)".to_string()
-        } else {
-            move_id_to_algebraic(result.mv)
-        }
-    }
 }
 
 /// Warm Titanium v17 session. TT and history persist between plies.

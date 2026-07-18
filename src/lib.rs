@@ -1,29 +1,32 @@
 //! Titanium Engine — Quoridor search core.
 //!
+//! Architecture v1.0 (see `docs/architecture.md`):
 //! ```text
-//! core/     board, zobrist
-//! util/     grid, perft
-//! movegen/  legal moves only
-//! path/     BFS reachability
-//! cat/      Corridor Attention Table v3 + pruning + viz
-//! eval/     static evaluation (see search::alphabeta)
-//! search/   αβ negamax, TT, pipeline, genmove
-//! opening/  book
+//! Live under src/:
+//!   core/ movegen/ pathfinding/ cat/   Layer 0 — infrastructure
+//!   titanium/position/                 Layer 1
+//!   titanium/{eval,endgame}/           Layer 2
+//!   titanium/search/                   Layer 3 — play search
+//!   titanium/uci/ + validation/ + weights/  Layer 4 + assets
+//!
+//! Historical (not under src/):
+//!   engine/legacy/{search,opening}/    αβ/CLI + crate-root opening book
 //! ```
+//! Training lives at repo-root `training/` — outside this crate.
+//! Do not put new play-engine code under `engine/legacy/`.
 
-pub mod ace;
 pub mod bench_instr;
 pub mod cat;
 pub mod core;
-pub mod eval;
-pub mod friend_perft;
+#[path = "../legacy/search/mod.rs"]
+pub mod legacy_search;
 pub mod movegen;
+#[path = "../legacy/opening/mod.rs"]
 pub mod opening;
-pub mod oracle;
 pub mod pathfinding;
-pub mod search;
 pub mod titanium;
 pub mod util;
+pub mod validation;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -47,12 +50,12 @@ pub use movegen::{
 };
 pub use opening::{ply_number, BOOK_MAX_PLY};
 pub use pathfinding::{both_players_reach_goals, can_reach_goal, shortest_distance, BfsScratch};
-pub use search::greedy::choose_greedy_move;
+pub use legacy_search::greedy::choose_greedy_move;
 #[allow(deprecated)]
-pub use search::lmr_viz::lmr_snapshot_json;
-pub use search::session_stdio::run_session_stdio;
-pub use search::uci::run_uci_stdio;
-pub use search::{
+pub use legacy_search::lmr_viz::lmr_snapshot_json;
+pub use legacy_search::session_stdio::run_session_stdio;
+pub use legacy_search::uci::run_uci_stdio;
+pub use legacy_search::{
     genmove_algebraic, run_search, search_best_move, search_mcts, search_phase, walls_placed,
     Engine, EngineLimits, GameSearchSession, GenmoveConfig, GenmoveEngine, MctsConfig, MctsReport,
     SearchConfig, SearchPhase, SearchReport, SharedState, ThreadBenchResult, TranspositionTable,
@@ -69,6 +72,9 @@ pub use util::perft::{
     perft_no_tt_anchor_baseline, perft_no_tt_mode, perft_pawn_only_mode, PerftContext,
     PERFT3_STARTPOS, PERFT4_STARTPOS, PERFT5_STARTPOS, PERFT5_TIMEOUT_SECS,
 };
+
+// Re-export for sibling engines (e.g. `engines/ace`) that need ACE-row goal bits.
+pub use titanium::dist;
 
 // Titanium v15 production API (formerly `acev13` module path).
 pub use titanium::fields_viz;

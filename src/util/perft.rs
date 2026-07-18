@@ -31,10 +31,10 @@ use crate::movegen::{
     generate_pawn_moves_slice_mode, PawnGenMode, MAX_LEGAL_MOVES,
 };
 use crate::pathfinding::BfsScratch;
-use crate::search::context::{SharedState, WorkerContext};
+use crate::legacy_search::context::{SharedState, WorkerContext};
 use std::collections::BTreeMap;
 
-/// Back-compat name — prefer [`WorkerContext`] + [`SharedState`] or [`crate::search::context::Engine`].
+/// Back-compat name — prefer [`WorkerContext`] + [`SharedState`] or [`crate::legacy_search::context::Engine`].
 pub type PerftContext = WorkerContext;
 
 pub fn perft_fast_ctx(
@@ -429,9 +429,9 @@ pub fn perft_naive(board: &Board, depth: u32) -> u64 {
     nodes
 }
 
-/// Default perft entry — single-thread [`crate::search::runtime::Engine`].
+/// Default perft entry — single-thread [`crate::legacy_search::runtime::Engine`].
 pub fn perft(board: &Board, depth: u32) -> u64 {
-    crate::search::runtime::Engine::new().perft(board, depth)
+    crate::legacy_search::runtime::Engine::new().perft(board, depth)
 }
 
 pub fn perft_divide(board: &Board, depth: u32) -> (u64, BTreeMap<String, u64>) {
@@ -474,7 +474,7 @@ pub fn format_move(mv: Move) -> String {
 mod tests {
     use super::*;
     use crate::movegen::generate_legal_moves;
-    use crate::search::runtime::Engine;
+    use crate::legacy_search::runtime::Engine;
     use crate::util::clock::{Duration, Instant};
     use core_affinity::CoreId;
     use std::sync::mpsc;

@@ -1,6 +1,6 @@
 //! Wall-movegen throughput: perft over the 15 canta midgame positions.
 use std::time::Instant;
-use titanium::oracle::canta::board_after_canta_game;
+use titanium::validation::canta::board_after_canta_game;
 use titanium::util::perft::perft_fast;
 
 fn main() {

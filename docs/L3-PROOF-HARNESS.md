@@ -7,8 +7,8 @@ until this harness exists and the spec is signed off.
 
 ## Why §C is worth it (measured)
 
-`cargo run --release --bin l3_study` (depth-3 subtrees, production movegen,
-i7-4900MQ, main @ post-Zobrist):
+Historical L3 flood-fraction study (orphan `l3_study` binary removed; depth-3
+subtrees, production movegen, i7-4900MQ, main @ post-Zobrist):
 
 | root | walls | cand/node | flood-needed | flood-reject | L3 time share |
 |------|------:|----------:|-------------:|-------------:|--------------:|
@@ -96,7 +96,7 @@ canta game 0.
 
 ### T5 — skip-rate report (justification, not correctness)
 
-`l3_study` extended with the scheme: report % of floods converted to
+Skip-rate report extended with the scheme: report % of floods converted to
 `SafeSkip` per root. **Merge bar: ≥ 60% median skip on canta roots**,
 otherwise the added complexity isn't paying for itself (measured ceiling
 is ~94% of movegen time; a sub-60% skip leaves most of it).

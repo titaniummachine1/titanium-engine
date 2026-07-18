@@ -43,6 +43,12 @@ default = ["parallel"]
 # telemetry counters. Use search-telemetry as a descriptive alias when profiling.
 bench-instrument = []
 search-telemetry = ["bench-instrument"]
+# Pre-B f64 eval-cache values (still 21-bit) for A/B benches only — not production.
+eval_cache_baseline = []
+# A/B only: DistTopoEntry keeps [u128;81] inline (spill unused). Not for production.
+dist_layers_full81 = []
+# A/B only: DistTopoEntry inline capacity 12 instead of 16. Not for production.
+dist_layers_inline12 = []
 # Multi-threaded perft / Lazy SMP (rayon). Normal wasm builds leave this off;
 # browser Lazy SMP uses the explicit wasm-threads profile below.
 parallel = ["dep:rayon"]

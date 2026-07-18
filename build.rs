@@ -16,7 +16,6 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={tables}");
     println!("cargo:rerun-if-changed={remap}");
-    println!("cargo:rerun-if-changed=build/movegen_o1/mod.rs");
 
     // ── Suboptimal-build guard ────────────────────────────────────────────────
     // Re-run whenever the bypass env var changes so flipping it triggers recheck.

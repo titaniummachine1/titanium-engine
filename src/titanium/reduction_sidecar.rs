@@ -3,7 +3,7 @@
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
-use super::net::live_weights_sha256;
+use crate::titanium::net::live_weights_sha256;
 
 pub const INPUTS: usize = 37;
 const MAGIC_V1: &[u8; 8] = b"TISRDX1\0";

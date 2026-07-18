@@ -93,6 +93,15 @@ fn cargo_features() -> String {
     if cfg!(feature = "bench-instrument") {
         feats.push("bench-instrument");
     }
+    if cfg!(feature = "eval_cache_baseline") {
+        feats.push("eval_cache_baseline");
+    }
+    if cfg!(feature = "dist_layers_full81") {
+        feats.push("dist_layers_full81");
+    }
+    if cfg!(feature = "dist_layers_inline12") {
+        feats.push("dist_layers_inline12");
+    }
     if cfg!(feature = "embed-tables") {
         feats.push("embed-tables");
     }

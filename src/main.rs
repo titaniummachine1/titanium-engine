@@ -4,11 +4,11 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use titanium::{
-    cat_snapshot_json, format_move, generate_legal_moves, genmove_algebraic, lmr_snapshot_json,
-    perft_divide, perft_fast_anchor_baseline, perft_no_tt_anchor_baseline, run_search,
-    run_session_stdio, Board, Engine, GameSearchSession, GenmoveConfig, GenmoveEngine, MctsConfig,
-    SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS, MCTS_DEFAULT_MAX_SIMULATIONS,
-    MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
+    both_players_reach_goals, cat_snapshot_json, format_move, generate_legal_moves,
+    genmove_algebraic, lmr_snapshot_json, perft_divide, perft_fast_anchor_baseline,
+    perft_no_tt_anchor_baseline, run_search, run_session_stdio, Board, Engine, GameSearchSession,
+    GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
+    MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -57,7 +57,6 @@ fn main() {
     match args[1].as_str() {
         "perft" => run_perft(&args),
         "perft-bench" => run_perft_bench(&args),
-        "friend-perft" => titanium::friend_perft::run(),
         "divide" => run_divide(&args),
         "bench" => run_bench(&args),
         "perft-race" => run_perft_race(&args),
@@ -65,12 +64,11 @@ fn main() {
         "thread-bench" => run_thread_bench(&args),
         "moves" => run_moves(),
         "genmove" => run_genmove(&args),
-        "ace-bench" => run_ace_bench(&args),
-        "ace-perft" => run_ace_perft(&args),
         "cat" => run_cat(&args),
         "eval" => run_eval(&args),
         "eval-batch" => run_eval_batch(),
         "eval-packed-batch" => run_eval_packed_batch(),
+        "path-scan" => run_path_scan(),
         "cat-packed-batch" => run_cat_packed_batch(),
         "score-out" => run_score_out(&args),
         "reduction-probe" => run_reduction_probe(&args),
@@ -86,7 +84,12 @@ fn main() {
             Some(flag) if uses_titanium_module(flag) => {
                 titanium::run_titanium_session_stdio(flag, parse_threads_arg(&args))
             }
-            Some(flag) => titanium::ace::run_ace_session_stdio(flag),
+            Some(_) => {
+                eprintln!(
+                    "error: true ACE engines (ace, ace-v8, …) moved to the `ace` binary under engines/ace/"
+                );
+                std::process::exit(2);
+            }
             None => run_session_stdio(),
         },
         _ => print_usage(),
@@ -115,12 +118,15 @@ fn print_usage() {
         "  titanium session [--engine ace-v13-ti|titanium-v17] — long-lived REPL (TT persists between plies)"
     );
     println!(
-        "  titanium genmove --engine ace-v13 [moves...] — gen13 ACE port (O1 movegen; ace-v13-pure = faithful 1:1)"
+        "  titanium genmove --engine ace-v13 [moves...] — gen13 / Titanium search (O1 movegen; ace-v13-pure = faithful 1:1)"
     );
-    println!("  titanium ace-perft [depth] [--iters N] — ACE vs Titanium movegen perft compare");
+    println!("  True ACE engines (ace, ace-v8, …) live in engines/ace — use the `ace` binary.");
     println!("  titanium eval [moves...] [--json]     — HalfPW net eval dump (trainer parity)");
     println!(
         "  titanium eval-packed-batch            — stdin: u32 row + 24-byte packed state records"
+    );
+    println!(
+        "  titanium path-scan                    — stdin lines: game_id move1 move2 ...; Titanium legal+path check"
     );
     println!(
         "  titanium cat-packed-batch             — stdin: u32 row + 24-byte packed state records"
@@ -836,6 +842,65 @@ fn read_packed_batch(command: &str) -> Vec<(u32, [u8; titanium::PACKED_STATE_LEN
         .collect()
 }
 
+/// Replay algebraic move lists; fail if any move is illegal for Titanium or
+/// either pawn loses its goal path. Stdin: `game_id move1 move2 ...` per line.
+/// Stdout: `OK id plies=N` or `FAIL id ply=K reason=... move=...`
+fn run_path_scan() {
+    use std::io::{self, BufRead, Write};
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("path-scan read error: {e}");
+                std::process::exit(1);
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let Some(id) = parts.next() else { continue };
+        let mut board = Board::new();
+        let mut ply = 0usize;
+        let mut done = false;
+        for mv_str in parts {
+            let legal = generate_legal_moves(&board);
+            let Some(mv) = legal.into_iter().find(|m| format_move(*m) == mv_str) else {
+                // Game already ended: trailing PGN noise after a goal — not a path violation.
+                if board.is_terminal().is_some() {
+                    let _ = writeln!(
+                        stdout,
+                        "OK {id} plies={ply} trailing_after_terminal={mv_str}"
+                    );
+                    done = true;
+                    break;
+                }
+                let _ = writeln!(
+                    stdout,
+                    "FAIL {id} ply={ply} reason=illegal_move move={mv_str}"
+                );
+                done = true;
+                break;
+            };
+            let _ = board.make_move(mv);
+            ply += 1;
+            // Legal walls already require paths; still assert for pawn-only corruption.
+            if !both_players_reach_goals(&board) {
+                let _ = writeln!(stdout, "FAIL {id} ply={ply} reason=no_path move={mv_str}");
+                done = true;
+                break;
+            }
+        }
+        if !done {
+            let _ = writeln!(stdout, "OK {id} plies={ply}");
+        }
+    }
+}
+
 fn run_eval_packed_batch() {
     use rayon::prelude::*;
     use titanium::{titanium_game_from_packed, TitaniumSearch};
@@ -1232,7 +1297,7 @@ fn run_rollout(args: &[String]) {
         board.apply_algebraic(mv);
     }
     let t0 = Instant::now();
-    let ranks = titanium::search::rollout::rollout_rank(&mut board, sims, plies, seed);
+    let ranks = titanium::legacy_search::rollout::rollout_rank(&mut board, sims, plies, seed);
     let roll_ms = t0.elapsed().as_millis();
 
     // ── Ground-truth deep ranking ───────────────────────────────────────────
@@ -1358,7 +1423,7 @@ fn run_match(args: &[String]) {
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::sync::Mutex;
-    use titanium::search::alphabeta::CERT_PROOFS;
+    use titanium::legacy_search::alphabeta::CERT_PROOFS;
 
     let mut games = 100usize;
     let mut time_sec = 2.0f64;
@@ -2017,26 +2082,20 @@ fn run_genmove(args: &[String]) {
 
 // ── ACE v7 port (pure) ───────────────────────────────────────────────────────
 
-/// Returns the engine flag if it routes through the Titanium module (or earlier ace module).
-/// This covers both the ACE reference family and the Titanium v14/v15 production engines.
+/// Returns the engine flag if it routes through Titanium search (`ace-v13*` / `titanium-v*`).
+/// True ACE engines (`ace`, `ace-v8`, …) live in the separate `ace` crate.
 fn ace_engine_flag(args: &[String]) -> Option<&str> {
     args.windows(2).find_map(|w| {
         if w[0] != "--engine" {
             return None;
         }
         match w[1].as_str() {
-            // ACE reference engines (older versions)
-            "ace" | "ace-v8" | "ace-v10" | "ace-v11" | "ace-cat" | "ace-ti" | "ace-v8-ti"
-            | "ace-v8-ti-pmc" | "ace-v10-ti" | "ace-v10-ti-pmc" | "ace-v11-ti"
-            | "ace-v11-ti-pmc" | "ace-pmc"
-            // ACE v13 reference engines (JS-equivalent baselines)
-            | "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc"
-            | "ace-v13-pure" | "ace-v13-grafted" | "ace-v13-grafted-no-raceproof"
-            | "ace-v13-ti-pure"
-            // Titanium production engines (use titanium search core)
+            // ACE v13 reference engines (JS-equivalent baselines) — TitaniumSearch
+            "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc" | "ace-v13-pure" | "ace-v13-grafted"
+            | "ace-v13-grafted-no-raceproof" | "ace-v13-ti-pure"
+            // Titanium production engines
             | "titanium-v14" | "titanium-v15" | "titanium-v15-medium" | "titanium-v15-frozen"
-            | "titanium-v16" | "titanium-v17"
-            | "titanium-v15-no-raceproof" => Some(w[1].as_str()),
+            | "titanium-v16" | "titanium-v17" | "titanium-v15-no-raceproof" => Some(w[1].as_str()),
             _ => None,
         }
     })
@@ -2101,12 +2160,10 @@ fn parse_threads_arg(args: &[String]) -> usize {
 
 fn ace_engine_mode(flag: &str) -> &'static str {
     match flag {
-        "ace-cat" => "ace-cat",
         // gen13: the headline `ace-v13` is the OPTIMIZED engine — it uses the
         // Titanium O1 movegen. `ace-v13-pure` is the faithful 1:1 (native ACE
         // `wall_legal` movegen) kept as the JS-matching reference.
-        "ace-ti" | "ace-v8-ti" | "ace-v8-ti-pmc" | "ace-v10-ti" | "ace-v10-ti-pmc"
-        | "ace-v11-ti" | "ace-v11-ti-pmc" | "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc" => "ace-ti",
+        "ace-v13" | "ace-v13-ti" | "ace-v13-ti-pmc" => "ace-ti",
         _ => "ace",
     }
 }
@@ -2264,276 +2321,121 @@ fn run_genmove_ace(args: &[String]) {
         i += 1;
     }
 
-    // ACE v11 uses `AceParams` / `ace_genmove`; Titanium v15 uses `TitaniumParams` / `titanium_genmove`.
-    // Output handling is shared; only the module path and param types differ.
-    macro_rules! emit_genmove {
-        ($module:path) => {{
-            use $module as ace_mod;
-            let params = ace_mod::AceParams {
-                cat,
-                ti_movegen,
-                eme,
-                time_ms,
-                max_depth,
-                full,
-                log,
-                ..Default::default()
-            };
-            match ace_mod::ace_genmove(&moves, params, label) {
-                Some((algebraic, info)) => {
-                    if !log {
-                        let mut depth_json = String::new();
-                        for (j, e) in info.depth_log.iter().enumerate() {
-                            if j > 0 {
-                                depth_json.push(',');
-                            }
-                            let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
-                            let score_text = score_text(e.score);
-                            depth_json.push_str(&format!(
-                                "{{\"depth\":{},\"score\":{},\"scoreText\":\"{}\",\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
-                                e.depth, e.score, score_text, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
-                            ));
-                        }
-                        let root_score_text = score_text(info.score);
-                        eprintln!(
-                            "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"depthLog\":[{}]}}",
-                            label, label, info.depth, info.nodes, info.score,
-                            root_score_text,
-                            info.white_dist, info.black_dist, info.ms, depth_json
-                        );
-                    }
-                    println!("bestmove {}", algebraic);
-                }
-                None => println!("bestmove (none)"),
-            }
-        }};
-    }
-
-    if uses_titanium_module(label) {
-        let params = titanium::TitaniumParams {
-            cat,
-            ti_movegen,
-            eme,
-            time_ms,
-            max_depth,
-            threads,
-            full,
-            log,
-            book,
-            book_db,
-            multipv: 1,
-            root_scores: true,
-        };
-        match titanium::titanium_genmove(&moves, params, label) {
-            Some((algebraic, info)) => {
-                let mut depth_json = String::new();
-                for (j, e) in info.depth_log.iter().enumerate() {
-                    if j > 0 {
-                        depth_json.push(',');
-                    }
-                    let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
-                    let score_text = score_text(e.score);
-                    depth_json.push_str(&format!(
-                        "{{\"depth\":{},\"score\":{},\"scoreText\":\"{}\",\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
-                        e.depth, e.score, score_text, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
-                    ));
-                }
-                let helper_nodes = info
-                    .helper_nodes
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let helper_depths = info
-                    .helper_completed_depths
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let root_widths = info
-                    .root_widths
-                    .iter()
-                    .map(|p| {
-                        let retained_ids = info
-                            .root_move_ids
-                            .get(p.worker_id)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        let visited_idx = info
-                            .root_visits
-                            .get(p.worker_id)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        let visited_unique = visited_idx
-                            .iter()
-                            .copied()
-                            .collect::<std::collections::HashSet<_>>()
-                            .len();
-                        let retained_json = retained_ids
-                            .iter()
-                            .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let visited_json = visited_idx
-                            .iter()
-                            .filter_map(|&i| retained_ids.get(i))
-                            .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        format!(
-                            "{{\"workerId\":{},\"rootValueThresholdPct\":{},\"rootMovesBeforeFilter\":{},\"rootMovesRetained\":{},\"rootMovesRetainedPct\":{:.1},\"rootMovesVisitedUnique\":{},\"retainedMoveIds\":[{}],\"visitedMoveIds\":[{}],\"allowed\":{}}}",
-                            p.worker_id,
-                            p.root_value_threshold_pct,
-                            p.root_moves_before_filter,
-                            p.root_move_count,
-                            p.root_moves_retained_pct(),
-                            visited_unique,
-                            retained_json,
-                            visited_json,
-                            // Deprecated: kept only for backward compatibility with any
-                            // existing consumer of this field. Now always equals
-                            // rootMovesRetained -- it no longer re-applies the heat
-                            // threshold as a bogus move-count percentage.
-                            p.allowed_root_moves(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let root_score_text = score_text(info.score);
-                let book_json = info
-                    .opening_book
-                    .as_ref()
-                    .map(titanium::opening_book::diagnostics_json)
-                    .unwrap_or_else(|| "null".to_string());
-                let root_defense_json =
-                    titanium::titanium::format_root_defense_diag_json(&info.root_defense_diag);
-                eprintln!(
-                    "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"mainThreadNodes\":{},\"helperNodes\":[{}],\"totalNodes\":{},\"mainCompletedDepth\":{},\"helperCompletedDepths\":[{}],\"rootWidths\":[{}],\"depthLog\":[{}],\"openingBook\":{},\"rootDefense\":{}}}",
-                    label, label, info.depth, info.nodes, info.score,
-                    root_score_text,
-                    info.white_dist, info.black_dist, info.ms,
-                    info.main_thread_nodes,
-                    helper_nodes,
-                    info.total_nodes,
-                    info.main_completed_depth,
-                    helper_depths,
-                    root_widths,
-                    depth_json,
-                    book_json,
-                    root_defense_json
-                );
-                println!("bestmove {}", algebraic);
-            }
-            None => println!("bestmove (none)"),
-        }
-    } else {
-        emit_genmove!(titanium::ace);
-    }
-}
-
-/// Parity harness vs the JS reference — fixed depth, ACE numeric moves.
-/// `--cat` switches to the hybrid wall filter.
-fn run_ace_bench(args: &[String]) {
-    let use_cat = args.iter().any(|a| a == "--cat");
-    let depth: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-    let mut g = titanium::ace::AceGame::new();
-    for arg in args.iter().skip(3) {
-        if let Ok(m) = arg.parse::<i16>() {
-            g.make_move(m);
-        }
-    }
-    println!("hash {} {}", g.hash_lo, g.hash_hi);
-    let mut search = if use_cat {
-        titanium::ace::AceSearch::with_cat(g)
-    } else {
-        titanium::ace::AceSearch::new(g)
+    // ace-v13* / titanium-v* use TitaniumParams / titanium_genmove.
+    let params = titanium::TitaniumParams {
+        cat,
+        ti_movegen,
+        eme,
+        time_ms,
+        max_depth,
+        threads,
+        full,
+        log,
+        book,
+        book_db,
+        multipv: 1,
+        root_scores: true,
     };
-    let r = search.think(1_000_000_000, depth, true, false, "ace-bench");
-    println!(
-        "{{\"move\":{},\"score\":{},\"depth\":{},\"nodes\":{},\"ms\":{}}}",
-        r.mv, r.score, r.depth, r.nodes, r.ms
-    );
-}
-
-/// Compare perft: ACE v7 native movegen vs Titanium `perft_fast` (10s cap at depth 4).
-fn run_ace_perft(args: &[String]) {
-    use std::time::Duration;
-
-    let depth: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
-    let mut timeout_secs = titanium::ace::default_timeout(depth).as_secs();
-    let mut i = 3usize;
-    while i < args.len() {
-        if args[i] == "--timeout" {
-            if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<u64>().ok()) {
-                timeout_secs = sec;
-                i += 2;
-                continue;
+    match titanium::titanium_genmove(&moves, params, label) {
+        Some((algebraic, info)) => {
+            let mut depth_json = String::new();
+            for (j, e) in info.depth_log.iter().enumerate() {
+                if j > 0 {
+                    depth_json.push(',');
+                }
+                let pv = e.pv.replace('\\', "\\\\").replace('"', "\\\"");
+                let score_text = score_text(e.score);
+                depth_json.push_str(&format!(
+                    "{{\"depth\":{},\"score\":{},\"scoreText\":\"{}\",\"nodes\":{},\"elapsedMs\":{},\"marginalNodes\":{},\"pv\":\"{}\"}}",
+                    e.depth, e.score, score_text, e.nodes, e.elapsed_ms, e.marginal_nodes, pv
+                ));
             }
-        }
-        i += 1;
-    }
-    let timeout = Duration::from_secs(timeout_secs);
-
-    fn print_line(r: &titanium::ace::TimedPerftResult) {
-        if r.timed_out {
-            println!(
-                "  {:12} TIMEOUT after {:.1}s (no result)",
-                r.label,
-                r.elapsed_ms as f64 / 1000.0
+            let helper_nodes = info
+                .helper_nodes
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let helper_depths = info
+                .helper_completed_depths
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let root_widths = info
+                .root_widths
+                .iter()
+                .map(|p| {
+                    let retained_ids = info
+                        .root_move_ids
+                        .get(p.worker_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let visited_idx = info
+                        .root_visits
+                        .get(p.worker_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let visited_unique = visited_idx
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len();
+                    let retained_json = retained_ids
+                        .iter()
+                        .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let visited_json = visited_idx
+                        .iter()
+                        .filter_map(|&i| retained_ids.get(i))
+                        .map(|&id| format!("\"{}\"", titanium::move_id_to_algebraic(id)))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!(
+                        "{{\"workerId\":{},\"rootValueThresholdPct\":{},\"rootMovesBeforeFilter\":{},\"rootMovesRetained\":{},\"rootMovesRetainedPct\":{:.1},\"rootMovesVisitedUnique\":{},\"retainedMoveIds\":[{}],\"visitedMoveIds\":[{}],\"allowed\":{}}}",
+                        p.worker_id,
+                        p.root_value_threshold_pct,
+                        p.root_moves_before_filter,
+                        p.root_move_count,
+                        p.root_moves_retained_pct(),
+                        visited_unique,
+                        retained_json,
+                        visited_json,
+                        // Deprecated: kept only for backward compatibility with any
+                        // existing consumer of this field. Now always equals
+                        // rootMovesRetained -- it no longer re-applies the heat
+                        // threshold as a bogus move-count percentage.
+                        p.allowed_root_moves(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let root_score_text = score_text(info.score);
+            let book_json = info
+                .opening_book
+                .as_ref()
+                .map(titanium::opening_book::diagnostics_json)
+                .unwrap_or_else(|| "null".to_string());
+            let root_defense_json =
+                titanium::titanium::format_root_defense_diag_json(&info.root_defense_diag);
+            eprintln!(
+                "info json {{\"engine\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"mainThreadNodes\":{},\"helperNodes\":[{}],\"totalNodes\":{},\"mainCompletedDepth\":{},\"helperCompletedDepths\":[{}],\"rootWidths\":[{}],\"depthLog\":[{}],\"openingBook\":{},\"rootDefense\":{}}}",
+                label, label, info.depth, info.nodes, info.score,
+                root_score_text,
+                info.white_dist, info.black_dist, info.ms,
+                info.main_thread_nodes,
+                helper_nodes,
+                info.total_nodes,
+                info.main_completed_depth,
+                helper_depths,
+                root_widths,
+                depth_json,
+                book_json,
+                root_defense_json
             );
-            return;
+            println!("bestmove {}", algebraic);
         }
-        let nodes = r.nodes.unwrap_or(0);
-        let secs = r.elapsed_ms as f64 / 1000.0;
-        let nps = if secs > 0.0 { nodes as f64 / secs } else { 0.0 };
-        println!(
-            "  {:12} nodes={} time={:.3}s nps={:.0}",
-            r.label, nodes, secs, nps
-        );
-    }
-
-    println!(
-        "ace-perft depth={} timeout={}s (oracle perft_fast + TT vs ACE v7 wall_legal)",
-        depth, timeout_secs
-    );
-
-    let ti = titanium::ace::perft_titanium_timed(depth, timeout);
-    print_line(&ti);
-
-    let ace_ti = titanium::ace::perft_ace_ti_timed(depth, timeout);
-    print_line(&ace_ti);
-
-    let ace = titanium::ace::perft_ace_timed(depth, timeout);
-    print_line(&ace);
-
-    if let Some(exp) = titanium::ace::oracle_nodes(depth) {
-        println!("  oracle depth{}={}", depth, exp);
-        println!(
-            "  perft_fast_ok={} ace_ti_ok={} ace_native_ok={}",
-            ti.nodes == Some(exp),
-            ace_ti.nodes == Some(exp),
-            ace.nodes == Some(exp)
-        );
-        if let (Some(ti_n), Some(ati_n)) = (ti.nodes, ace_ti.nodes) {
-            if ti_n == ati_n {
-                let ratio = ace_ti.elapsed_ms as f64 / ti.elapsed_ms.max(1) as f64;
-                println!("  ace_ti vs perft_fast: {:.2}x (1.0 = same speed)", ratio);
-            }
-        }
-        if ace.timed_out {
-            println!(
-                "  ace-v7-native: TIMEOUT — ported wall_legal path unusable at depth {}",
-                depth
-            );
-        } else if let (Some(an), Some(ati_n)) = (ace.nodes, ace_ti.nodes) {
-            if an == ati_n {
-                let ratio = ace.elapsed_ms as f64 / ace_ti.elapsed_ms.max(1) as f64;
-                println!("  ace_ti vs ace-v7-native: {:.2}x faster", ratio);
-            }
-        }
-    }
-
-    if ace_ti.timed_out || (ace.nodes.is_some() && ace.nodes != ace_ti.nodes) {
-        std::process::exit(1);
+        None => println!("bestmove (none)"),
     }
 }

@@ -25,30 +25,43 @@
 //!   pawn  m = (8 - row) * 9 + col
 //!   wall  m = dense base + (7 - row) * 8 + col   (81 = h, 145 = v)
 
-pub mod cert_bridge;
-pub mod certify;
-pub mod dataset_state;
-pub mod dist;
-pub mod field_planes;
-pub mod fields_viz;
-pub mod game;
+// Layered façades (architecture v1.0). Compatibility aliases keep `titanium::race`
+// etc. stable — public API ≠ ownership.
+pub mod endgame;
+pub mod eval;
+pub mod opening;
+pub mod position;
+pub mod research;
+pub mod search;
+pub mod timeman;
+pub mod uci;
+
 pub mod ka_policy;
 pub mod lazy_seal;
-pub mod net;
-pub mod opening_book;
-pub mod opening_book_embedded;
-pub mod oracle;
-pub mod packed_state;
 pub mod perft;
-pub mod race;
 pub mod reduction_sidecar;
-pub mod search;
-pub mod session;
-pub mod session_v15;
-pub mod time_alloc;
-pub mod wall_ignore_cert;
-pub mod wall_ignore_cert_tests;
-pub mod wall_ignore_corridor;
+
+// Compatibility module paths (ownership lives under façades above).
+pub use endgame::cert_bridge;
+pub use endgame::certify;
+pub use endgame::exact_dp;
+pub use endgame::race;
+pub use eval::dist;
+pub use eval::field_planes;
+pub use eval::fields_viz;
+pub use eval::nnue as net;
+pub use opening::opening_book;
+pub use opening::opening_book_embedded;
+pub use position::board_bridge;
+pub use position::dataset_state;
+pub use position::game;
+pub use position::packed_state;
+pub use research::wall_ignore_cert;
+pub use research::wall_ignore_cert_tests;
+pub use research::wall_ignore_corridor;
+pub use timeman::time_alloc;
+pub use uci::session;
+pub use uci::session_v15;
 
 pub use game::GameState;
 pub use packed_state::{

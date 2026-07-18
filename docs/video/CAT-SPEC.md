@@ -117,7 +117,7 @@ Bug fixed: neighbor loops in `gap_play_zone_mask` must use `0..=8`, not `0..=9` 
 | `build_corridor_attention`                   | `engine/src/cat/build.rs`                   |
 | `collect_search_moves`, `wall_should_search` | `engine/src/cat/prune.rs`                   |
 | `cat_snapshot_json`                          | `engine/src/cat/viz.rs`                     |
-| Search consumer                              | `engine/src/search/alphabeta.rs`            |
+| Search consumer                              | `engine/legacy/search/alphabeta.rs`         |
 | Web overlay                                  | `web/src/lib/catHeatmap.js`, `boardView.js` |
 
 ---
