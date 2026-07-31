@@ -97,50 +97,61 @@ impl GoalField {
     /// `goal` is the player's goal-row mask and `pawn` that player's pawn bit,
     /// both in the centered 11-wide flood layout.
     pub fn build(grids: &WallGrids, goal: u128, pawn: u128) -> Self {
-        let mut reached = [0u128; MAX_GOAL_LAYERS];
+        let mut f = Self::empty();
+        f.build_into(grids, goal, pawn);
+        f
+    }
+
+    /// Zeroed field suitable for reuse as a scratch buffer.
+    pub fn empty() -> Self {
+        Self {
+            reached: [0u128; MAX_GOAL_LAYERS],
+            depth: 0,
+            ball: 0,
+            chain_ball: 0,
+            pawn_dist: None,
+        }
+    }
+
+    /// Rebuild in place, overwriting only `reached[0..depth]`.
+    ///
+    /// Hot-path entry point: the 1.3 KB `reached` array is allocated once in a
+    /// long-lived scratch and refilled per node, so wall trials never pay to
+    /// zero it. Entries at or beyond `depth` are stale by design and are never
+    /// read — every accessor is bounded by `depth`.
+    pub fn build_into(&mut self, grids: &WallGrids, goal: u128, pawn: u128) {
         let mut visited = goal & FLOOD_PLAYABLE;
-        reached[0] = visited;
-        let mut depth = 1usize;
+        self.reached[0] = visited;
+        self.depth = 1;
 
         if visited & pawn != 0 {
-            return Self {
-                reached,
-                depth,
-                ball: visited,
-                chain_ball: pawn,
-                pawn_dist: Some(0),
-            };
+            self.ball = visited;
+            self.chain_ball = pawn;
+            self.pawn_dist = Some(0);
+            return;
         }
 
         let mut wave = visited;
-        while wave != 0 && depth < MAX_GOAL_LAYERS {
+        while wave != 0 && self.depth < MAX_GOAL_LAYERS {
             wave = expand_wave(wave, grids) & !visited;
             if wave == 0 {
                 break;
             }
             visited |= wave;
-            reached[depth] = visited;
-            depth += 1;
+            self.reached[self.depth] = visited;
+            self.depth += 1;
             if wave & pawn != 0 {
-                // Chain cells: everything strictly closer to the goal, plus the
-                // pawn itself. `depth >= 2` here, so `reached[depth - 2]` exists.
-                return Self {
-                    reached,
-                    depth,
-                    ball: visited,
-                    chain_ball: reached[depth - 2] | pawn,
-                    pawn_dist: Some((depth - 1) as u8),
-                };
+                // `depth >= 2` here, so `reached[depth - 2]` exists.
+                self.ball = visited;
+                self.chain_ball = self.reached[self.depth - 2] | pawn;
+                self.pawn_dist = Some((self.depth - 1) as u8);
+                return;
             }
         }
 
-        Self {
-            reached,
-            depth,
-            ball: visited,
-            chain_ball: visited,
-            pawn_dist: None,
-        }
+        self.ball = visited;
+        self.chain_ball = visited;
+        self.pawn_dist = None;
     }
 
     /// Shortest distance from the pawn to its goal row in the base position.

@@ -9,6 +9,10 @@ use crate::movegen::pawn_bits::{
 };
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{bff_wall_legal_with_proof, pawn_bit, wall_delta, WallGrids};
+#[cfg(feature = "incremental-l3")]
+use crate::pathfinding::bff::wall::{P1_GOAL_BITS, P2_GOAL_BITS};
+#[cfg(feature = "incremental-l3")]
+use crate::pathfinding::incremental::GoalField;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
@@ -632,6 +636,20 @@ struct WallTrialCtx {
     proof: u128,
     occupied_walls: u128,
     seal_topology: Option<WallSealTopology>,
+    /// Whether the thread-local goal-seeded fields hold this node's topology.
+    #[cfg(feature = "incremental-l3")]
+    fields_built: bool,
+}
+
+/// Persistent P1/P2 goal-seeded fields, allocated once per thread.
+///
+/// These are 1.3 KB each; allocating or zeroing them per node would cost more
+/// than the floods they replace, so they live for the thread's lifetime and are
+/// refilled in place by `build_into` at each node that needs a flood.
+#[cfg(feature = "incremental-l3")]
+thread_local! {
+    static L3_FIELDS: std::cell::RefCell<[GoalField; 2]> =
+        std::cell::RefCell::new([GoalField::empty(), GoalField::empty()]);
 }
 
 impl WallTrialCtx {
@@ -645,6 +663,8 @@ impl WallTrialCtx {
             proof: 0,
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
+            #[cfg(feature = "incremental-l3")]
+            fields_built: false,
         }
     }
 
@@ -674,6 +694,7 @@ impl WallTrialCtx {
         self.wall_keeps_paths_open_exact(row, col, orientation)
     }
 
+    #[cfg(not(feature = "incremental-l3"))]
     #[inline]
     fn wall_keeps_paths_open_exact(
         &mut self,
@@ -688,6 +709,43 @@ impl WallTrialCtx {
         if ok {
             self.proof = proof;
         }
+        ok
+    }
+
+    /// Experimental L3: probe both players against memoized goal-seeded fields
+    /// instead of re-flooding pawn→goal from scratch.
+    ///
+    /// The fields are built from the *base* grids (before `delta` is placed) and
+    /// are immutable across every trial at this node, so one build serves all
+    /// candidates. `self.proof` is never refreshed on this path — the probe does
+    /// not produce a visited union — so the proof shortcut simply stops firing.
+    #[cfg(feature = "incremental-l3")]
+    #[inline]
+    fn wall_keeps_paths_open_exact(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+    ) -> bool {
+        let delta = wall_delta(row, col, orientation);
+        let (p1_bit, p2_bit) = (self.p1_bit, self.p2_bit);
+        if !self.fields_built {
+            let base = self.grids;
+            L3_FIELDS.with(|f| {
+                let mut f = f.borrow_mut();
+                f[0].build_into(&base, P1_GOAL_BITS, p1_bit);
+                f[1].build_into(&base, P2_GOAL_BITS, p2_bit);
+            });
+            self.fields_built = true;
+        }
+        self.grids.place(delta);
+        let grids = self.grids;
+        let ok = L3_FIELDS.with(|f| {
+            let f = f.borrow();
+            f[0].probe(&grids, delta, p1_bit).reaches()
+                && f[1].probe(&grids, delta, p2_bit).reaches()
+        });
+        self.grids.remove(delta);
         ok
     }
 }
