@@ -168,12 +168,90 @@ pub fn wall_incr_cuts_player_dist(d: &[u8; 81], m: i16) -> bool {
     d[a] != d[b2] || d[c2] != d[e2]
 }
 
+/// Does `v` still reach a cell one ring closer to the goal through an open edge?
+///
+/// `masks` must be the topology *after* the wall is placed. If some open
+/// neighbour still sits at `d[v] - 1`, then `d[v]` is unchanged.
+#[inline]
+fn has_descent_support(d: &[u8; 81], masks: DirMasks, v: usize) -> bool {
+    let dv = d[v];
+    if dv == 0 {
+        return true; // goal cell: nothing to descend to
+    }
+    if dv == u8::MAX {
+        return false;
+    }
+    let target = dv - 1;
+    let bit = FLOOD_BIT_BY_SQ[v];
+    (masks.north & bit != 0 && v >= 9 && d[v - 9] == target)
+        || (masks.south & bit != 0 && v + 9 < 81 && d[v + 9] == target)
+        || (masks.west & bit != 0 && v % 9 > 0 && d[v - 1] == target)
+        || (masks.east & bit != 0 && v % 9 < 8 && d[v + 1] == target)
+}
+
+/// Whether cutting edge `(u, v)` can change the goal-distance field.
+///
+/// Equal-distance edges lie on no shortest route, so cutting one changes
+/// nothing. Otherwise the higher-distance endpoint is the one that *depended*
+/// on the other; if it retains any other descent neighbour its distance is
+/// unchanged, and so is every cell routing through it.
+#[inline]
+fn edge_forces_refresh(d: &[u8; 81], masks: DirMasks, u: usize, v: usize) -> bool {
+    let (du, dv) = (d[u], d[v]);
+    if du == dv {
+        return false;
+    }
+    if du == u8::MAX || dv == u8::MAX {
+        return true; // reachability changed shape; be conservative
+    }
+    let down = if du > dv { u } else { v };
+    !has_descent_support(d, masks, down)
+}
+
+/// Support-refined version of [`wall_incr_cuts_player_dist`].
+///
+/// The plain test fires whenever either wall edge joins cells on adjacent
+/// distance rings, which is most edges — it was responsible for 100% of the
+/// 1.27M refloods `refresh_dist` performed in a 10s search. But cutting one
+/// shortest-path edge does not change the field while the affected cell still
+/// has another way in.
+///
+/// A wall's two edges lie at different cell-columns (horizontal) or rows
+/// (vertical), so a single wall can remove at most one descent support from any
+/// one cell. Checking the two downhill endpoints therefore settles the whole
+/// field: if both keep a support, no cell is orphaned and `d` is unchanged.
+#[inline]
+pub fn wall_incr_cuts_player_dist_supported(d: &[u8; 81], masks: DirMasks, m: i16) -> bool {
+    let Some((a, b2, c2, e2)) = wall_incr_probe_squares(m) else {
+        return false;
+    };
+    // Cheap gradient pre-filter first: when it clears the wall, no masks needed.
+    if d[a] == d[b2] && d[c2] == d[e2] {
+        return false;
+    }
+    edge_forces_refresh(d, masks, a, b2) || edge_forces_refresh(d, masks, c2, e2)
+}
+
 /// Per-player incremental refresh flags for a single wall added on top of `d0`/`d1`.
 #[inline]
 pub fn wall_incr_refresh_flags(d0: &[u8; 81], d1: &[u8; 81], m: i16) -> (bool, bool) {
     (
         wall_incr_cuts_player_dist(d0, m),
         wall_incr_cuts_player_dist(d1, m),
+    )
+}
+
+/// [`wall_incr_refresh_flags`] using the support-refined per-player test.
+#[inline]
+pub fn wall_incr_refresh_flags_supported(
+    d0: &[u8; 81],
+    d1: &[u8; 81],
+    masks: DirMasks,
+    m: i16,
+) -> (bool, bool) {
+    (
+        wall_incr_cuts_player_dist_supported(d0, masks, m),
+        wall_incr_cuts_player_dist_supported(d1, masks, m),
     )
 }
 
@@ -764,5 +842,166 @@ mod tests {
             contested.iter().any(|&v| v == 16),
             "startpos has fully contested corridor cells"
         );
+    }
+}
+
+#[cfg(test)]
+mod support_refresh_tests {
+    use super::*;
+    use crate::core::board::{Board, Move, Player, WallOrientation};
+    use crate::movegen::legal::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+    use crate::pathfinding::bfs::layers::fill_dist_to_goal_row;
+    use crate::pathfinding::masks::DirMasks;
+    use crate::pathfinding::BfsScratch;
+    use crate::titanium::{MOVE_HW_BASE, MOVE_VW_BASE};
+    use crate::util::grid::{has_wall, set_wall};
+
+    /// Soundness obligation: whenever the refined test says "no refresh", the
+    /// recomputed field must be bit-identical to the pre-wall field. A false
+    /// "no refresh" silently corrupts every distance-derived eval term.
+    #[test]
+    fn no_refresh_implies_field_unchanged() {
+        let mut seed = 0x51ED_270B_C77A_1234u64;
+        let (mut trials, mut skipped, mut refreshed) = (0usize, 0usize, 0usize);
+
+        for _game in 0..80 {
+            let mut board = Board::new();
+            for _ply in 0..40 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                for player in [Player::One, Player::Two] {
+                    let masks_before = DirMasks::from_board(&board);
+                    let mut d_before = [0u8; 81];
+                    fill_dist_to_goal_row(player, masks_before, &mut d_before);
+
+                    for orientation in [WallOrientation::Horizontal, WallOrientation::Vertical] {
+                        for row in 0..8u8 {
+                            for col in 0..8u8 {
+                                if has_wall(&board, row, col, WallOrientation::Horizontal)
+                                    || has_wall(&board, row, col, WallOrientation::Vertical)
+                                {
+                                    continue;
+                                }
+                                let slot = (row as i16) * 8 + col as i16;
+                                let m = if orientation == WallOrientation::Horizontal {
+                                    MOVE_HW_BASE + slot
+                                } else {
+                                    MOVE_VW_BASE + slot
+                                };
+
+                                let mut walled = board.clone();
+                                set_wall(&mut walled, row, col, orientation, true);
+                                let masks_after = DirMasks::from_board(&walled);
+                                let mut d_after = [0u8; 81];
+                                fill_dist_to_goal_row(player, masks_after, &mut d_after);
+
+                                let says_refresh = wall_incr_cuts_player_dist_supported(
+                                    &d_before,
+                                    masks_after,
+                                    m,
+                                );
+                                if !says_refresh {
+                                    skipped += 1;
+                                    assert_eq!(
+                                        d_after, d_before,
+                                        "refined test skipped a refresh but the field changed: \
+                                         wall {row},{col},{orientation:?} player={player:?} \
+                                         h={:#x} v={:#x}",
+                                        board.horizontal_walls, board.vertical_walls,
+                                    );
+                                } else {
+                                    refreshed += 1;
+                                }
+                                trials += 1;
+                            }
+                        }
+                    }
+                }
+
+                let mut sc = BfsScratch::new();
+                let mut mv = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut mv, &mut sc);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let _ = board.make_move(mv[(seed as usize) % n]);
+            }
+        }
+
+        eprintln!(
+            "\nrefined refresh trigger: trials={trials} skipped={skipped} ({:.1}%) refreshed={refreshed}",
+            100.0 * skipped as f64 / trials.max(1) as f64
+        );
+        assert!(trials > 100_000, "only {trials} trials");
+    }
+
+    /// The refined test may only ever skip where the old test also would have,
+    /// or strictly more — never fewer. (Old says no-refresh ⇒ new says no-refresh.)
+    #[test]
+    fn refined_test_is_at_least_as_permissive_as_gradient_test() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let (mut old_skip, mut new_skip, mut n) = (0usize, 0usize, 0usize);
+        for _game in 0..40 {
+            let mut board = Board::new();
+            for _ply in 0..40 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let masks_before = DirMasks::from_board(&board);
+                let mut d = [0u8; 81];
+                fill_dist_to_goal_row(Player::One, masks_before, &mut d);
+                for orientation in [WallOrientation::Horizontal, WallOrientation::Vertical] {
+                    for row in 0..8u8 {
+                        for col in 0..8u8 {
+                            if has_wall(&board, row, col, WallOrientation::Horizontal)
+                                || has_wall(&board, row, col, WallOrientation::Vertical)
+                            {
+                                continue;
+                            }
+                            let slot = (row as i16) * 8 + col as i16;
+                            let m = if orientation == WallOrientation::Horizontal {
+                                MOVE_HW_BASE + slot
+                            } else {
+                                MOVE_VW_BASE + slot
+                            };
+                            let mut walled = board.clone();
+                            set_wall(&mut walled, row, col, orientation, true);
+                            let masks_after = DirMasks::from_board(&walled);
+
+                            let old = wall_incr_cuts_player_dist(&d, m);
+                            let new = wall_incr_cuts_player_dist_supported(&d, masks_after, m);
+                            if !old {
+                                assert!(!new, "refined test refreshes where gradient test did not");
+                                old_skip += 1;
+                            }
+                            if !new {
+                                new_skip += 1;
+                            }
+                            n += 1;
+                        }
+                    }
+                }
+                let mut sc = BfsScratch::new();
+                let mut mv = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let c = generate_legal_moves_slice(&mut board, &mut mv, &mut sc);
+                if c == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let _ = board.make_move(mv[(seed as usize) % c]);
+            }
+        }
+        eprintln!(
+            "gradient skip {old_skip}/{n} ({:.1}%) -> refined skip {new_skip}/{n} ({:.1}%)",
+            100.0 * old_skip as f64 / n.max(1) as f64,
+            100.0 * new_skip as f64 / n.max(1) as f64,
+        );
+        assert!(new_skip >= old_skip);
     }
 }
