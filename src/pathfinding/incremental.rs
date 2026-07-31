@@ -232,6 +232,18 @@ impl GoalField {
     /// never traversed them. They are still removed from `walled`, which is what
     /// the continuation floods against.
     pub fn probe(&self, walled: &WallGrids, delta: &WallGrids, pawn: u128) -> Probe {
+        self.probe_with_rings(walled, delta, pawn).0
+    }
+
+    /// [`GoalField::probe`] plus the number of flood rings it burned, so
+    /// benchmarks bill this path in the same unit as a from-scratch flood.
+    /// Single implementation — `probe` delegates here, so the two cannot drift.
+    pub fn probe_with_rings(
+        &self,
+        walled: &WallGrids,
+        delta: &WallGrids,
+        pawn: u128,
+    ) -> (Probe, u32) {
         // Skip test runs against the tight chain set: if no edge of the pawn's
         // own descent chain is cut, that chain survives verbatim. The repair
         // path below still keys `t` / `last_cut` off the full ball, so its
@@ -239,18 +251,12 @@ impl GoalField {
         if self.cut_inside(delta, self.chain_ball) == 0 {
             // Descent chain untouched, so distance cannot have risen; edge
             // removal cannot lower it either. Unchanged.
-            return match self.pawn_dist {
-                Some(d) => Probe::Untouched(d),
-                None => Probe::Severed,
-            };
+            return (self.unchanged(), 0);
         }
 
         let endpoints = self.cut_inside_ball(delta);
         if endpoints == 0 {
-            return match self.pawn_dist {
-                Some(d) => Probe::Untouched(d),
-                None => Probe::Severed,
-            };
+            return (self.unchanged(), 0);
         }
         let (t, last_cut) = self.layer_span(endpoints);
         let (mut visited, mut wave, mut ring) = if t == 0 {
@@ -265,12 +271,10 @@ impl GoalField {
         if visited & pawn != 0 {
             // Pawn sits inside the untouched prefix — its distance is whatever
             // the memoized field said, and the prefix is exact.
-            return match self.pawn_dist {
-                Some(d) => Probe::Untouched(d),
-                None => Probe::Severed,
-            };
+            return (self.unchanged(), 0);
         }
 
+        let mut rings = 0u32;
         while wave != 0 {
             wave = expand_wave(wave, walled) & !visited;
             if wave == 0 {
@@ -278,8 +282,9 @@ impl GoalField {
             }
             visited |= wave;
             ring += 1;
+            rings += 1;
             if wave & pawn != 0 {
-                return Probe::Repaired(ring as u8);
+                return (Probe::Repaired(ring as u8), rings);
             }
             // Re-convergence: the perturbation has healed. Once the walled flood
             // has caught back up to the memoized cumulative set *and* every
@@ -289,13 +294,19 @@ impl GoalField {
             // reached the pawn at ring `depth-1` using only in-ball edges, so
             // that continuation is still valid here: distance is unchanged.
             if ring >= last_cut && ring < self.depth && visited == self.reached[ring] {
-                return match self.pawn_dist {
-                    Some(d) => Probe::Untouched(d),
-                    None => Probe::Severed,
-                };
+                return (self.unchanged(), rings);
             }
         }
-        Probe::Severed
+        (Probe::Severed, rings)
+    }
+
+    /// Verdict when the memoized field is provably still valid for the pawn.
+    #[inline]
+    fn unchanged(&self) -> Probe {
+        match self.pawn_dist {
+            Some(d) => Probe::Untouched(d),
+            None => Probe::Severed,
+        }
     }
 }
 
@@ -499,45 +510,6 @@ mod tests {
         rings
     }
 
-    /// Rings `probe` burns for the same trial.
-    fn probe_rings(field: &GoalField, walled: &WallGrids, delta: &WallGrids, pawn: u128) -> usize {
-        if field.cut_inside(delta, field.chain_ball) == 0 {
-            return 0;
-        }
-        let endpoints = field.cut_inside_ball(delta);
-        if endpoints == 0 {
-            return 0;
-        }
-        let (t, last_cut) = field.layer_span(endpoints);
-        let (mut visited, mut wave, mut ring) = if t == 0 {
-            (field.reached[0], field.reached[0], 0usize)
-        } else {
-            let visited = field.reached[t - 1];
-            let prev = if t >= 2 { field.reached[t - 2] } else { 0 };
-            (visited, visited & !prev, t - 1)
-        };
-        if visited & pawn != 0 {
-            return 0;
-        }
-        let mut rings = 0usize;
-        while wave != 0 {
-            wave = expand_wave(wave, walled) & !visited;
-            if wave == 0 {
-                break;
-            }
-            visited |= wave;
-            rings += 1;
-            ring += 1;
-            if wave & pawn != 0 {
-                break;
-            }
-            if ring >= last_cut && ring < field.depth && visited == field.reached[ring] {
-                break;
-            }
-        }
-        rings
-    }
-
     /// Work comparison against the current from-scratch flood, on wall-heavy
     /// boards. Reports ring counts — the unit both algorithms are billed in.
     #[test]
@@ -573,7 +545,7 @@ mod tests {
                                 let mut walled = base;
                                 walled.place(delta);
                                 base_rings += baseline_rings(pawn, &walled, goal);
-                                let r = probe_rings(&field, &walled, delta, pawn);
+                                let r = field.probe_with_rings(&walled, delta, pawn).1 as usize;
                                 inc_rings += r;
                                 if r == 0 {
                                     skips += 1;

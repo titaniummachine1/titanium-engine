@@ -989,6 +989,170 @@ mod tests {
         }
     }
 
+    /// How much flood work is left for `GoalField` to save *after* the
+    /// production filters have taken their cut.
+    ///
+    /// The standalone bench in `pathfinding::incremental` bills every
+    /// physically legal candidate, but production never floods most of them:
+    /// TOPO accepts off-topology walls outright and `WallSealTopology::can_seal`
+    /// discards anything that cannot close a cycle in the dual barrier graph.
+    /// Only what survives both can be sped up, so that is what this measures.
+    #[test]
+    fn goal_field_saving_on_seal_surviving_candidates() {
+        use crate::pathfinding::bff::wall::{bff_to_goal, goal_bits, pawn_bit};
+        use crate::pathfinding::bff::wall::bff_wall_legal_with_proof;
+        use crate::pathfinding::incremental::GoalField;
+        use crate::util::grid::FLOOD_PLAYABLE;
+
+        /// Rings a from-scratch pawn→goal flood burns — the current L3 cost.
+        fn baseline_rings(start: u128, grids: &WallGrids, goal: u128) -> usize {
+            let mut visited = start & FLOOD_PLAYABLE;
+            if visited & goal != 0 {
+                return 0;
+            }
+            let mut wave = visited;
+            let mut rings = 0usize;
+            loop {
+                wave = crate::pathfinding::bff::wall::expand_wave(wave, grids) & !visited;
+                if wave == 0 {
+                    return rings;
+                }
+                rings += 1;
+                if wave & goal != 0 {
+                    return rings;
+                }
+                visited |= wave;
+            }
+        }
+
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let (mut candidates, mut topo_fast, mut seal_fast) = (0usize, 0usize, 0usize);
+        let (mut proof_fast, mut flooded) = (0usize, 0usize);
+        let (mut base_rings, mut inc_rings, mut setup_rings) = (0usize, 0usize, 0usize);
+        let (mut nodes, mut zero_ring) = (0usize, 0usize);
+
+        for _game in 0..64 {
+            let mut board = Board::new();
+            for _ply in 0..48 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let masks = wall_masks(&board);
+                let seal = WallSealTopology::new(wall_occupied_mask(&board));
+                let base = WallGrids::from_board(&board);
+                let (br1, bc1) = board.pawn(Player::One);
+                let (br2, bc2) = board.pawn(Player::Two);
+                // Preserved proof, reset per node exactly as `WallTrialCtx` does.
+                let mut proof = 0u128;
+
+                // One inverse flood per player per node — the amortized setup.
+                let mut fields = Vec::new();
+                for player in [Player::One, Player::Two] {
+                    let (r, c) = board.pawn(player);
+                    let f = GoalField::build(&base, goal_bits(player), pawn_bit(r, c));
+                    setup_rings += f.pawn_distance().map(|d| d as usize).unwrap_or(0);
+                    fields.push((player, pawn_bit(r, c), goal_bits(player), f));
+                }
+                nodes += 1;
+
+                for (orientation, cands, needs_flood) in [
+                    (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
+                    (WallOrientation::Vertical, masks.l12_v, masks.topo_v),
+                ] {
+                    let mut remaining = cands;
+                    while remaining != 0 {
+                        let slot = remaining.trailing_zeros() as usize;
+                        remaining &= remaining - 1;
+                        candidates += 1;
+
+                        // Production filter 1: TOPO off-topology accept.
+                        if needs_flood & (1u64 << slot) == 0 {
+                            topo_fast += 1;
+                            continue;
+                        }
+                        // Production filter 2: dual-graph cycle test.
+                        let cand = slot
+                            + if orientation == WallOrientation::Horizontal {
+                                0
+                            } else {
+                                64
+                            };
+                        if !seal.can_seal(cand) {
+                            seal_fast += 1;
+                            continue;
+                        }
+
+                        let delta = wall_delta((slot / 8) as u8, (slot % 8) as u8, orientation);
+
+                        // Production filter 3: the preserved-proof skip. `proof`
+                        // is the union of both players' visited sets from the last
+                        // successful trial; a delta missing it cannot invalidate
+                        // that proof. Stateful and order-dependent, so it is
+                        // replayed here in the same order movegen would.
+                        if proof != 0 && !delta.touches(proof) {
+                            proof_fast += 1;
+                            continue;
+                        }
+
+                        // Survivors: these are the walls production actually floods.
+                        flooded += 1;
+                        let mut walled = base;
+                        walled.place(delta);
+                        if let (true, p) =
+                            bff_wall_legal_with_proof(pawn_bit(br1, bc1), pawn_bit(br2, bc2), &walled)
+                        {
+                            proof = p;
+                        }
+
+                        let mut rings_here = 0usize;
+                        for (_, pawn, goal, field) in &fields {
+                            base_rings += baseline_rings(*pawn, &walled, *goal);
+                            let (verdict, rings) = field.probe_with_rings(&walled, delta, *pawn);
+                            rings_here += rings as usize;
+                            // Soundness, on the real production candidate stream.
+                            assert_eq!(
+                                verdict.reaches(),
+                                bff_to_goal(*pawn, &walled, *goal).0,
+                                "probe disagrees with flood on a seal-surviving candidate"
+                            );
+                        }
+                        inc_rings += rings_here;
+                        if rings_here == 0 {
+                            zero_ring += 1;
+                        }
+                    }
+                }
+
+                let mut scratch = BfsScratch::new();
+                let mut moves = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut moves, &mut scratch);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let mv = moves[(seed as usize) % n];
+                let _ = board.make_move(mv);
+            }
+        }
+
+        let total = inc_rings + setup_rings;
+        eprintln!(
+            "nodes={nodes} candidates={candidates} topo_fast={topo_fast} seal_fast={seal_fast} \
+             proof_fast={proof_fast} flooded={flooded} ({:.1}% of candidates, {:.2}/node)",
+            100.0 * flooded as f64 / candidates as f64,
+            flooded as f64 / nodes as f64,
+        );
+        eprintln!(
+            "on survivors only: from_scratch={base_rings} rings | incremental={inc_rings}+setup \
+             {setup_rings}={total} rings | speedup={:.2}x zero_ring={:.1}%",
+            base_rings as f64 / total as f64,
+            100.0 * zero_ring as f64 / flooded.max(1) as f64,
+        );
+        assert!(candidates > 10_000);
+    }
+
     fn replay(moves: &[&str]) -> Board {
         let mut board = Board::new();
         for &mv in moves {
