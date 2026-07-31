@@ -98,8 +98,29 @@ pub fn build_slack_planes(
     to_goal: &DistLayers,
     pawn: u128,
 ) -> SlackPlanes {
+    build_slack_planes_raw(
+        &from_pawn.masks,
+        from_pawn.depth,
+        &to_goal.masks,
+        to_goal.depth,
+        pawn,
+    )
+}
+
+/// Slice form, for callers holding bare layer arrays.
+///
+/// The search already maintains the to-goal layers per player in
+/// `d0_layers`/`d1_layers` (filled by `refresh_dist` and LRU-cached), so it can
+/// pass those straight in and pay only for the from-pawn flood.
+pub fn build_slack_planes_raw(
+    from_masks: &[u128],
+    from_depth: usize,
+    to_masks: &[u128],
+    to_depth: usize,
+    pawn: u128,
+) -> SlackPlanes {
     // `s` = the pawn's own distance to the goal row.
-    let Some(s) = (0..to_goal.depth).find(|&d| to_goal.masks[d] & pawn != 0) else {
+    let Some(s) = (0..to_depth).find(|&d| to_masks[d] & pawn != 0) else {
         return SlackPlanes::default();
     };
 
@@ -107,13 +128,13 @@ pub fn build_slack_planes(
     for (k, plane) in planes.iter_mut().enumerate() {
         // slack k ⇔ i + j == s + k. Walk i and read the matching j.
         let target = s + k;
-        let lo = target.saturating_sub(to_goal.depth.saturating_sub(1));
-        let hi = target.min(from_pawn.depth.saturating_sub(1));
+        let lo = target.saturating_sub(to_depth.saturating_sub(1));
+        let hi = target.min(from_depth.saturating_sub(1));
         let mut acc = 0u128;
         for i in lo..=hi {
             let j = target - i;
-            if j < to_goal.depth {
-                acc |= from_pawn.masks[i] & to_goal.masks[j];
+            if j < to_depth {
+                acc |= from_masks[i] & to_masks[j];
             }
         }
         *plane = acc & FLOOD_PLAYABLE;

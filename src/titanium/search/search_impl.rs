@@ -6103,6 +6103,60 @@ impl TitaniumSearch {
         // atomic route/near/contested planes (so it needn't reconstruct CAT itself).
         if nw.cat_active {
             let _cat_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_cat_heat);
+            // Slack-plane CAT: reuse the to-goal layers `refresh_dist` already
+            // maintains, flood only from each pawn, and score the four binary
+            // planes sparsely. Speed path — the plane semantics differ from the
+            // CATv5 heat arrays, so the live net must be retrained before the
+            // resulting scores mean anything.
+            #[cfg(feature = "cat-slack")]
+            {
+                use crate::cat::slack::{build_slack_planes_raw, SLACK_PLANES};
+                use crate::pathfinding::bfs::layers::fill_dist_layers_from_sq;
+                use crate::pathfinding::bfs::layers::DistLayers;
+                use crate::pathfinding::masks::DirMasks;
+                use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_SQ_BY_BIT};
+
+                let masks = DirMasks::from_ace_game(&self.g);
+                let mut from = DistLayers::default();
+                let mut cat_score = 0.0f64;
+                // Level values stand in for the retired impact_heat curve; a
+                // retrained net folds these into the weights.
+                const LEVEL: [f64; SLACK_PLANES] = [1.0, 0.6, 0.35, 0.2];
+
+                for side in 0..2usize {
+                    let pawn_sq = self.g.pawn[side];
+                    let pawn_bit = FLOOD_BIT_BY_SQ[pawn_sq];
+                    fill_dist_layers_from_sq(pawn_sq as u8, masks, &mut from);
+                    let (to_masks, to_depth) = if side == 0 {
+                        (&self.d0_layers[self.dist0_idx], self.d0_layer_depth[self.dist0_idx])
+                    } else {
+                        (&self.d1_layers[self.dist1_idx], self.d1_layer_depth[self.dist1_idx])
+                    };
+                    let planes = build_slack_planes_raw(
+                        &from.masks,
+                        from.depth,
+                        to_masks.as_slice(),
+                        to_depth,
+                        pawn_bit,
+                    );
+                    let w = if side == me { &nw.cat_raw_me } else { &nw.cat_raw_opp };
+                    for k in 0..SLACK_PLANES {
+                        let mut bits = planes.planes[k];
+                        while bits != 0 {
+                            let bit = bits.trailing_zeros() as usize;
+                            bits &= bits - 1;
+                            let sq = FLOOD_SQ_BY_BIT[bit];
+                            if sq == u8::MAX {
+                                continue;
+                            }
+                            let canon = if me == 0 { sq as usize } else { NET_MIRC[sq as usize] };
+                            cat_score += w[canon] * LEVEL[k];
+                        }
+                    }
+                }
+                out += cat_score;
+            }
+            #[cfg(not(feature = "cat-slack"))]
             if let Some(bridge) = self.bridge.as_ref() {
                 let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
                 let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
