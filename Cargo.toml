@@ -37,6 +37,9 @@ path = "src/bin/search_bench.rs"
 required-features = ["parallel"]
 
 [features]
+incremental-l3 = []
+cat-slack = []
+incremental-l3-pawn = []
 default = ["parallel"]
 # Search measurement, TT-hit profiling, and phase timers are compiled only with
 # --features bench-instrument. Default cargo build --release contains no search

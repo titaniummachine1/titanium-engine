@@ -114,3 +114,48 @@ impl DirMasks {
         self
     }
 }
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+    use crate::core::board::{Board, WallOrientation};
+    use crate::util::grid::set_wall;
+
+    /// `with_ace_wall` is the incremental single-wall update the search relies on
+    /// (`search_impl::current_dir_masks` uses it to avoid rebuilding all 81
+    /// cells). It must agree exactly with a full rebuild of the walled board.
+    #[test]
+    fn with_ace_wall_matches_full_rebuild() {
+        let mut mismatches = Vec::new();
+        for wall_type in 0..2usize {
+            for slot in 0..64usize {
+                let row = (slot / 8) as u8;
+                let col = (slot % 8) as u8;
+                let orientation = if wall_type == 0 {
+                    WallOrientation::Horizontal
+                } else {
+                    WallOrientation::Vertical
+                };
+
+                let base = Board::new();
+                let incr = DirMasks::from_board(&base).with_ace_wall(wall_type, slot);
+
+                let mut walled = Board::new();
+                set_wall(&mut walled, row, col, orientation, true);
+                let full = DirMasks::from_board(&walled);
+
+                if (incr.north, incr.south, incr.east, incr.west)
+                    != (full.north, full.south, full.east, full.west)
+                {
+                    mismatches.push((wall_type, slot, row, col));
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "with_ace_wall disagrees with full rebuild on {} of 128 slots; first few: {:?}",
+            mismatches.len(),
+            &mismatches[..mismatches.len().min(6)]
+        );
+    }
+}

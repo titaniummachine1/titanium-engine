@@ -9,6 +9,14 @@ use crate::movegen::pawn_bits::{
 };
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{bff_wall_legal_with_proof, pawn_bit, wall_delta, WallGrids};
+#[cfg(feature = "incremental-l3")]
+use crate::pathfinding::bff::wall::{P1_GOAL_BITS, P2_GOAL_BITS};
+#[cfg(feature = "incremental-l3")]
+use crate::pathfinding::incremental::GoalField;
+#[cfg(feature = "incremental-l3-pawn")]
+use crate::pathfinding::bff::wall::{P1_GOAL_BITS as PP1, P2_GOAL_BITS as PP2};
+#[cfg(feature = "incremental-l3-pawn")]
+use crate::pathfinding::incremental::PawnField;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
@@ -632,6 +640,29 @@ struct WallTrialCtx {
     proof: u128,
     occupied_walls: u128,
     seal_topology: Option<WallSealTopology>,
+    /// Whether the thread-local goal-seeded fields hold this node's topology.
+    #[cfg(feature = "incremental-l3")]
+    fields_built: bool,
+    #[cfg(feature = "incremental-l3-pawn")]
+    fields_built: bool,
+}
+
+/// Persistent pawn-seeded fields, allocated once per thread and refilled per node.
+#[cfg(feature = "incremental-l3-pawn")]
+thread_local! {
+    static L3_PAWN_FIELDS: std::cell::RefCell<[PawnField; 2]> =
+        std::cell::RefCell::new([PawnField::empty(), PawnField::empty()]);
+}
+
+/// Persistent P1/P2 goal-seeded fields, allocated once per thread.
+///
+/// These are 1.3 KB each; allocating or zeroing them per node would cost more
+/// than the floods they replace, so they live for the thread's lifetime and are
+/// refilled in place by `build_into` at each node that needs a flood.
+#[cfg(feature = "incremental-l3")]
+thread_local! {
+    static L3_FIELDS: std::cell::RefCell<[GoalField; 2]> =
+        std::cell::RefCell::new([GoalField::empty(), GoalField::empty()]);
 }
 
 impl WallTrialCtx {
@@ -645,6 +676,10 @@ impl WallTrialCtx {
             proof: 0,
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
+            #[cfg(feature = "incremental-l3")]
+            fields_built: false,
+            #[cfg(feature = "incremental-l3-pawn")]
+            fields_built: false,
         }
     }
 
@@ -674,6 +709,44 @@ impl WallTrialCtx {
         self.wall_keeps_paths_open_exact(row, col, orientation)
     }
 
+    /// Experimental L3, pawn-seeded: production's flood direction and bit theft,
+    /// with a memoized layer stack so each trial restarts at the ring where the
+    /// wall first bites instead of at the pawn.
+    #[cfg(feature = "incremental-l3-pawn")]
+    #[inline]
+    fn wall_keeps_paths_open_exact(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+    ) -> bool {
+        let delta = wall_delta(row, col, orientation);
+        let (p1_bit, p2_bit) = (self.p1_bit, self.p2_bit);
+        if !self.fields_built {
+            let base = self.grids;
+            L3_PAWN_FIELDS.with(|f| {
+                let mut f = f.borrow_mut();
+                f[0].build_into(&base, p1_bit, PP1);
+                f[1].build_into(&base, p2_bit, PP2);
+            });
+            self.fields_built = true;
+        }
+        self.grids.place(delta);
+        let grids = self.grids;
+        let ok = L3_PAWN_FIELDS.with(|f| {
+            let f = f.borrow();
+            match f[0].probe(&grids, delta, PP1, 0) {
+                None => false,
+                // P1's visited region is the theft pool for P2, exactly as
+                // `bff_wall_legal_with_proof` chains the two floods.
+                Some(pool) => f[1].probe(&grids, delta, PP2, pool).is_some(),
+            }
+        });
+        self.grids.remove(delta);
+        ok
+    }
+
+    #[cfg(not(any(feature = "incremental-l3", feature = "incremental-l3-pawn")))]
     #[inline]
     fn wall_keeps_paths_open_exact(
         &mut self,
@@ -688,6 +761,43 @@ impl WallTrialCtx {
         if ok {
             self.proof = proof;
         }
+        ok
+    }
+
+    /// Experimental L3: probe both players against memoized goal-seeded fields
+    /// instead of re-flooding pawn→goal from scratch.
+    ///
+    /// The fields are built from the *base* grids (before `delta` is placed) and
+    /// are immutable across every trial at this node, so one build serves all
+    /// candidates. `self.proof` is never refreshed on this path — the probe does
+    /// not produce a visited union — so the proof shortcut simply stops firing.
+    #[cfg(feature = "incremental-l3")]
+    #[inline]
+    fn wall_keeps_paths_open_exact(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+    ) -> bool {
+        let delta = wall_delta(row, col, orientation);
+        let (p1_bit, p2_bit) = (self.p1_bit, self.p2_bit);
+        if !self.fields_built {
+            let base = self.grids;
+            L3_FIELDS.with(|f| {
+                let mut f = f.borrow_mut();
+                f[0].build_into(&base, P1_GOAL_BITS, p1_bit);
+                f[1].build_into(&base, P2_GOAL_BITS, p2_bit);
+            });
+            self.fields_built = true;
+        }
+        self.grids.place(delta);
+        let grids = self.grids;
+        let ok = L3_FIELDS.with(|f| {
+            let f = f.borrow();
+            f[0].probe(&grids, delta, p1_bit).reaches()
+                && f[1].probe(&grids, delta, p2_bit).reaches()
+        });
+        self.grids.remove(delta);
         ok
     }
 }
@@ -987,6 +1097,268 @@ mod tests {
                 audit.checked += 1;
             }
         }
+    }
+
+    /// How much flood work is left for `GoalField` to save *after* the
+    /// production filters have taken their cut.
+    ///
+    /// The standalone bench in `pathfinding::incremental` bills every
+    /// physically legal candidate, but production never floods most of them:
+    /// TOPO accepts off-topology walls outright and `WallSealTopology::can_seal`
+    /// discards anything that cannot close a cycle in the dual barrier graph.
+    /// Only what survives both can be sped up, so that is what this measures.
+    #[test]
+    fn goal_field_saving_on_seal_surviving_candidates() {
+        use crate::pathfinding::bff::wall::{bff_to_goal, goal_bits, pawn_bit};
+        use crate::pathfinding::bff::wall::bff_wall_legal_with_proof;
+        use crate::pathfinding::incremental::GoalField;
+        use crate::util::grid::FLOOD_PLAYABLE;
+
+        /// Rings a from-scratch pawn→goal flood burns — the current L3 cost.
+        fn baseline_rings(start: u128, grids: &WallGrids, goal: u128) -> usize {
+            let mut visited = start & FLOOD_PLAYABLE;
+            if visited & goal != 0 {
+                return 0;
+            }
+            let mut wave = visited;
+            let mut rings = 0usize;
+            loop {
+                wave = crate::pathfinding::bff::wall::expand_wave(wave, grids) & !visited;
+                if wave == 0 {
+                    return rings;
+                }
+                rings += 1;
+                if wave & goal != 0 {
+                    return rings;
+                }
+                visited |= wave;
+            }
+        }
+
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let (mut candidates, mut topo_fast, mut seal_fast) = (0usize, 0usize, 0usize);
+        let (mut proof_fast, mut flooded) = (0usize, 0usize);
+        let (mut base_rings, mut inc_rings, mut setup_rings) = (0usize, 0usize, 0usize);
+        let (mut nodes, mut zero_ring) = (0usize, 0usize);
+
+        for _game in 0..64 {
+            let mut board = Board::new();
+            for _ply in 0..48 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let masks = wall_masks(&board);
+                let seal = WallSealTopology::new(wall_occupied_mask(&board));
+                let base = WallGrids::from_board(&board);
+                let (br1, bc1) = board.pawn(Player::One);
+                let (br2, bc2) = board.pawn(Player::Two);
+                // Preserved proof, reset per node exactly as `WallTrialCtx` does.
+                let mut proof = 0u128;
+
+                // One inverse flood per player per node — the amortized setup.
+                let mut fields = Vec::new();
+                for player in [Player::One, Player::Two] {
+                    let (r, c) = board.pawn(player);
+                    let f = GoalField::build(&base, goal_bits(player), pawn_bit(r, c));
+                    setup_rings += f.pawn_distance().map(|d| d as usize).unwrap_or(0);
+                    fields.push((player, pawn_bit(r, c), goal_bits(player), f));
+                }
+                nodes += 1;
+
+                for (orientation, cands, needs_flood) in [
+                    (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
+                    (WallOrientation::Vertical, masks.l12_v, masks.topo_v),
+                ] {
+                    let mut remaining = cands;
+                    while remaining != 0 {
+                        let slot = remaining.trailing_zeros() as usize;
+                        remaining &= remaining - 1;
+                        candidates += 1;
+
+                        // Production filter 1: TOPO off-topology accept.
+                        if needs_flood & (1u64 << slot) == 0 {
+                            topo_fast += 1;
+                            continue;
+                        }
+                        // Production filter 2: dual-graph cycle test.
+                        let cand = slot
+                            + if orientation == WallOrientation::Horizontal {
+                                0
+                            } else {
+                                64
+                            };
+                        if !seal.can_seal(cand) {
+                            seal_fast += 1;
+                            continue;
+                        }
+
+                        let delta = wall_delta((slot / 8) as u8, (slot % 8) as u8, orientation);
+
+                        // Production filter 3: the preserved-proof skip. `proof`
+                        // is the union of both players' visited sets from the last
+                        // successful trial; a delta missing it cannot invalidate
+                        // that proof. Stateful and order-dependent, so it is
+                        // replayed here in the same order movegen would.
+                        if proof != 0 && !delta.touches(proof) {
+                            proof_fast += 1;
+                            continue;
+                        }
+
+                        // Survivors: these are the walls production actually floods.
+                        flooded += 1;
+                        let mut walled = base;
+                        walled.place(delta);
+                        if let (true, p) =
+                            bff_wall_legal_with_proof(pawn_bit(br1, bc1), pawn_bit(br2, bc2), &walled)
+                        {
+                            proof = p;
+                        }
+
+                        let mut rings_here = 0usize;
+                        for (_, pawn, goal, field) in &fields {
+                            base_rings += baseline_rings(*pawn, &walled, *goal);
+                            let (verdict, rings) = field.probe_with_rings(&walled, delta, *pawn);
+                            rings_here += rings as usize;
+                            // Soundness, on the real production candidate stream.
+                            assert_eq!(
+                                verdict.reaches(),
+                                bff_to_goal(*pawn, &walled, *goal).0,
+                                "probe disagrees with flood on a seal-surviving candidate"
+                            );
+                        }
+                        inc_rings += rings_here;
+                        if rings_here == 0 {
+                            zero_ring += 1;
+                        }
+                    }
+                }
+
+                let mut scratch = BfsScratch::new();
+                let mut moves = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut moves, &mut scratch);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let mv = moves[(seed as usize) % n];
+                let _ = board.make_move(mv);
+            }
+        }
+
+        let total = inc_rings + setup_rings;
+        eprintln!(
+            "nodes={nodes} candidates={candidates} topo_fast={topo_fast} seal_fast={seal_fast} \
+             proof_fast={proof_fast} flooded={flooded} ({:.1}% of candidates, {:.2}/node)",
+            100.0 * flooded as f64 / candidates as f64,
+            flooded as f64 / nodes as f64,
+        );
+        eprintln!(
+            "on survivors only: from_scratch={base_rings} rings | incremental={inc_rings}+setup \
+             {setup_rings}={total} rings | speedup={:.2}x zero_ring={:.1}%",
+            base_rings as f64 / total as f64,
+            100.0 * zero_ring as f64 / flooded.max(1) as f64,
+        );
+        assert!(candidates > 10_000);
+    }
+
+    /// Does the shortest-path witness prune the walls that production actually
+    /// floods? Replays the real chain (TOPO, `can_seal`, `proof`) and asks, of
+    /// the survivors, how many miss both players' witness paths — those are
+    /// legal outright with no flood.
+    #[test]
+    fn route_witness_prunes_seal_surviving_candidates() {
+        use crate::pathfinding::bff::wall::{bff_wall_legal, goal_bits, pawn_bit};
+        use crate::pathfinding::incremental::{GoalField, RouteWitness};
+
+        let mut seed = 0xA5A5_1234_DEAD_BEEFu64;
+        let (mut cands, mut topo, mut seal, mut proof_sk, mut flooded) = (0usize, 0, 0, 0, 0);
+        let (mut witness_skip, mut nodes) = (0usize, 0usize);
+
+        for _game in 0..64 {
+            let mut board = Board::new();
+            for _ply in 0..48 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let masks = wall_masks(&board);
+                let sealtop = WallSealTopology::new(wall_occupied_mask(&board));
+                let base = WallGrids::from_board(&board);
+                let (r1, c1) = board.pawn(Player::One);
+                let (r2, c2) = board.pawn(Player::Two);
+                let (p1, p2) = (pawn_bit(r1, c1), pawn_bit(r2, c2));
+                let f1 = GoalField::build(&base, goal_bits(Player::One), p1);
+                let f2 = GoalField::build(&base, goal_bits(Player::Two), p2);
+                let w1 = RouteWitness::from_goal_field(&f1, p1, &base);
+                let w2 = RouteWitness::from_goal_field(&f2, p2, &base);
+                let mut proof = 0u128;
+                nodes += 1;
+
+                for (orientation, cs, needs) in [
+                    (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
+                    (WallOrientation::Vertical, masks.l12_v, masks.topo_v),
+                ] {
+                    let mut rem = cs;
+                    while rem != 0 {
+                        let slot = rem.trailing_zeros() as usize;
+                        rem &= rem - 1;
+                        cands += 1;
+                        if needs & (1u64 << slot) == 0 {
+                            topo += 1;
+                            continue;
+                        }
+                        let cand = slot
+                            + if orientation == WallOrientation::Horizontal { 0 } else { 64 };
+                        if !sealtop.can_seal(cand) {
+                            seal += 1;
+                            continue;
+                        }
+                        let delta = wall_delta((slot / 8) as u8, (slot % 8) as u8, orientation);
+                        if proof != 0 && !delta.touches(proof) {
+                            proof_sk += 1;
+                            continue;
+                        }
+                        flooded += 1;
+
+                        // The proposed filter, on exactly the survivors.
+                        let intact = w1.reaches() && w2.reaches()
+                            && !w1.cut_by(delta) && !w2.cut_by(delta);
+                        let mut walled = base;
+                        walled.place(delta);
+                        let truth = bff_wall_legal(p1, p2, &walled);
+                        if intact {
+                            witness_skip += 1;
+                            assert!(truth, "witness said legal but flood says illegal");
+                        }
+                        if let (true, p) = bff_wall_legal_with_proof(p1, p2, &walled) {
+                            proof = p;
+                        }
+                    }
+                }
+
+                let mut sc = BfsScratch::new();
+                let mut mv = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut mv, &mut sc);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let _ = board.make_move(mv[(seed as usize) % n]);
+            }
+        }
+        eprintln!(
+            "\nnodes={nodes} candidates={cands} topo={topo} seal={seal} proof={proof_sk} flooded={flooded}"
+        );
+        eprintln!(
+            "  witness-path skip on survivors: {witness_skip}/{flooded} = {:.1}%  ({:.2} floods/node -> {:.2})",
+            100.0 * witness_skip as f64 / flooded.max(1) as f64,
+            flooded as f64 / nodes as f64,
+            (flooded - witness_skip) as f64 / nodes as f64,
+        );
+        assert!(cands > 10_000);
     }
 
     fn replay(moves: &[&str]) -> Board {
