@@ -12,6 +12,7 @@ pub mod constants;
 pub mod prune;
 pub mod viz;
 pub mod viz_build;
+pub mod slack;
 
 pub use attention::CorridorAttention;
 pub use build::{build_corridor_attention, corridor_bottleneck_count};
