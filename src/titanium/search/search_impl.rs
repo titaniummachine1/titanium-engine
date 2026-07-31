@@ -3237,6 +3237,12 @@ impl TitaniumSearch {
         self.route_touch_ordering = true;
     }
 
+    /// Classify LMR/LMP walls by shortest-path-DAG contact instead of CAT
+    /// attention share. Gate arm only; production default is off.
+    pub fn enable_dag_lmr(&mut self) {
+        self.dag_lmr = true;
+    }
+
     pub fn enable_cat_path_lmr(&mut self) {
         self.cat_path_lmr = true;
     }

@@ -40,6 +40,7 @@ fn is_grafted_engine(engine_flag: &str) -> bool {
             | "titanium-v17-race2w"
             | "titanium-v17-race2pv"
             | "titanium-v17-race1pv"
+            | "titanium-v18-dag-lmr"
     )
 }
 
@@ -49,8 +50,16 @@ pub fn apply_session_experiment_flags(search: &mut TitaniumSearch, engine_flag: 
 }
 
 fn configure_session_experiments(search: &mut TitaniumSearch, engine_flag: &str) {
+    // The DAG-LMR arm is baseline v17 with one classifier swapped, so it must
+    // inherit every v17 experiment flag — otherwise the gate measures a bundle.
+    let dag_lmr = engine_flag == "titanium-v18-dag-lmr";
+    if dag_lmr {
+        search.enable_dag_lmr();
+    }
     let engine_flag = match engine_flag {
-        "titanium-v16" | "titanium-v16-sfhist" | "titanium-v18" => "titanium-v17",
+        "titanium-v16" | "titanium-v16-sfhist" | "titanium-v18" | "titanium-v18-dag-lmr" => {
+            "titanium-v17"
+        }
         other => other,
     };
     let is_v17 = matches!(
