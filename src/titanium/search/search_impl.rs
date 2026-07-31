@@ -6113,10 +6113,12 @@ impl TitaniumSearch {
                 use crate::cat::slack::{build_slack_planes_raw, SLACK_PLANES};
                 use crate::pathfinding::bfs::layers::fill_dist_layers_from_sq;
                 use crate::pathfinding::bfs::layers::DistLayers;
-                use crate::pathfinding::masks::DirMasks;
                 use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_SQ_BY_BIT};
 
-                let masks = DirMasks::from_ace_game(&self.g);
+                // Reuse the search's topology-keyed mask cache, which also
+                // applies a single wall delta incrementally via `with_ace_wall`
+                // instead of rebuilding all 81 cells.
+                let masks = self.current_dir_masks();
                 let mut from = DistLayers::default();
                 let mut cat_score = 0.0f64;
                 // Level values stand in for the retired impact_heat curve; a
