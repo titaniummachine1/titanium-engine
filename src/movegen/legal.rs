@@ -13,6 +13,10 @@ use crate::pathfinding::bff::wall::{bff_wall_legal_with_proof, pawn_bit, wall_de
 use crate::pathfinding::bff::wall::{P1_GOAL_BITS, P2_GOAL_BITS};
 #[cfg(feature = "incremental-l3")]
 use crate::pathfinding::incremental::GoalField;
+#[cfg(feature = "incremental-l3-pawn")]
+use crate::pathfinding::bff::wall::{P1_GOAL_BITS as PP1, P2_GOAL_BITS as PP2};
+#[cfg(feature = "incremental-l3-pawn")]
+use crate::pathfinding::incremental::PawnField;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
@@ -639,6 +643,15 @@ struct WallTrialCtx {
     /// Whether the thread-local goal-seeded fields hold this node's topology.
     #[cfg(feature = "incremental-l3")]
     fields_built: bool,
+    #[cfg(feature = "incremental-l3-pawn")]
+    fields_built: bool,
+}
+
+/// Persistent pawn-seeded fields, allocated once per thread and refilled per node.
+#[cfg(feature = "incremental-l3-pawn")]
+thread_local! {
+    static L3_PAWN_FIELDS: std::cell::RefCell<[PawnField; 2]> =
+        std::cell::RefCell::new([PawnField::empty(), PawnField::empty()]);
 }
 
 /// Persistent P1/P2 goal-seeded fields, allocated once per thread.
@@ -664,6 +677,8 @@ impl WallTrialCtx {
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
             #[cfg(feature = "incremental-l3")]
+            fields_built: false,
+            #[cfg(feature = "incremental-l3-pawn")]
             fields_built: false,
         }
     }
@@ -694,7 +709,44 @@ impl WallTrialCtx {
         self.wall_keeps_paths_open_exact(row, col, orientation)
     }
 
-    #[cfg(not(feature = "incremental-l3"))]
+    /// Experimental L3, pawn-seeded: production's flood direction and bit theft,
+    /// with a memoized layer stack so each trial restarts at the ring where the
+    /// wall first bites instead of at the pawn.
+    #[cfg(feature = "incremental-l3-pawn")]
+    #[inline]
+    fn wall_keeps_paths_open_exact(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+    ) -> bool {
+        let delta = wall_delta(row, col, orientation);
+        let (p1_bit, p2_bit) = (self.p1_bit, self.p2_bit);
+        if !self.fields_built {
+            let base = self.grids;
+            L3_PAWN_FIELDS.with(|f| {
+                let mut f = f.borrow_mut();
+                f[0].build_into(&base, p1_bit, PP1);
+                f[1].build_into(&base, p2_bit, PP2);
+            });
+            self.fields_built = true;
+        }
+        self.grids.place(delta);
+        let grids = self.grids;
+        let ok = L3_PAWN_FIELDS.with(|f| {
+            let f = f.borrow();
+            match f[0].probe(&grids, delta, PP1, 0) {
+                None => false,
+                // P1's visited region is the theft pool for P2, exactly as
+                // `bff_wall_legal_with_proof` chains the two floods.
+                Some(pool) => f[1].probe(&grids, delta, PP2, pool).is_some(),
+            }
+        });
+        self.grids.remove(delta);
+        ok
+    }
+
+    #[cfg(not(any(feature = "incremental-l3", feature = "incremental-l3-pawn")))]
     #[inline]
     fn wall_keeps_paths_open_exact(
         &mut self,

@@ -579,6 +579,70 @@ mod tests {
         }
     }
 
+    /// Pawn-seeded two-player probe (with bit theft) must agree with the
+    /// production `bff_wall_legal` on every candidate.
+    #[test]
+    fn pawn_field_matches_production_wall_legal() {
+        use crate::pathfinding::bff::wall::bff_wall_legal;
+        let mut rng = Lcg(0x452821E6_38D01377);
+        let (mut trials, mut skips) = (0usize, 0usize);
+
+        for _ in 0..1_200 {
+            let board = random_board(&mut rng, 12);
+            let base = WallGrids::from_board(&board);
+            let (r1, c1) = board.pawn(Player::One);
+            let (r2, c2) = board.pawn(Player::Two);
+            let (p1, p2) = (pawn_bit(r1, c1), pawn_bit(r2, c2));
+
+            let mut f1 = PawnField::empty();
+            let mut f2 = PawnField::empty();
+            f1.build_into(&base, p1, P1_GOAL_BITS);
+            f2.build_into(&base, p2, P2_GOAL_BITS);
+            if !f1.reaches_goal() || !f2.reaches_goal() {
+                continue;
+            }
+
+            for orientation in [WallOrientation::Horizontal, WallOrientation::Vertical] {
+                for row in 0..8u8 {
+                    for col in 0..8u8 {
+                        if has_wall(&board, row, col, WallOrientation::Horizontal)
+                            || has_wall(&board, row, col, WallOrientation::Vertical)
+                        {
+                            continue;
+                        }
+                        let delta = wall_delta(row, col, orientation);
+                        let mut walled = base;
+                        walled.place(delta);
+
+                        let got = match f1.probe(&walled, delta, P1_GOAL_BITS, 0) {
+                            None => false,
+                            Some(pool) => {
+                                f2.probe(&walled, delta, P2_GOAL_BITS, pool).is_some()
+                            }
+                        };
+                        assert_eq!(
+                            got,
+                            bff_wall_legal(p1, p2, &walled),
+                            "pawn-field mismatch at {row},{col},{orientation:?} \
+                             h={:#x} v={:#x}",
+                            board.horizontal_walls,
+                            board.vertical_walls,
+                        );
+                        if f1.cut_inside(delta, f1.chain) == 0 {
+                            skips += 1;
+                        }
+                        trials += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "pawn-field trials={trials} p1_chain_skips={:.1}%",
+            100.0 * skips as f64 / trials as f64
+        );
+        assert!(trials > 100_000, "only {trials} trials");
+    }
+
     /// A wall that fully cages a pawn must be reported `Severed`.
     #[test]
     fn caged_pawn_is_severed() {
@@ -597,5 +661,192 @@ mod tests {
         walled.place(delta);
         assert_eq!(field.probe(&walled, delta, pawn), Probe::Severed);
         assert!(!bff_to_goal(pawn, &walled, P2_GOAL_BITS).0);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pawn-seeded variant: production's flood direction + theft, plus a layer stack
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Memoized **pawn → goal** flood: production's direction, with the cumulative
+/// reached-set recorded per ring so a trial can restart mid-flood.
+///
+/// Differs from [`GoalField`] in three ways that matter:
+///
+/// - **Smaller ball.** The flood is seeded from one cell rather than a 9-cell
+///   goal row, so at equal radius it reaches fewer squares. More walls fall
+///   outside it, so the skip test fires more often.
+/// - **Bit theft survives.** Both players still flood toward their own goal in
+///   the same graph, so P2 can annex P1's visited region exactly as
+///   [`bff_to_goal_cached`] does — [`PawnField::probe`] takes and returns a pool.
+/// - **Not pawn-independent.** The seed *is* the pawn, so unlike `GoalField`
+///   this is invalidated by pawn moves and cannot be persisted across a search
+///   path. It is a per-node structure only.
+///
+/// [`bff_to_goal_cached`]: crate::pathfinding::bff::wall::bff_to_goal_cached
+#[derive(Clone)]
+pub struct PawnField {
+    reached: [u128; MAX_GOAL_LAYERS],
+    depth: usize,
+    /// `reached[depth-1]` — everything within `d[goal]` of the pawn.
+    ball: u128,
+    /// `reached[depth-2] | (final ring ∩ goal)`: the cells an ascent path from
+    /// the pawn to its first goal contact can occupy. Tighter than `ball`, which
+    /// also carries final-ring cells that miss the goal entirely.
+    chain: u128,
+    reaches: bool,
+}
+
+impl PawnField {
+    pub fn empty() -> Self {
+        Self {
+            reached: [0u128; MAX_GOAL_LAYERS],
+            depth: 0,
+            ball: 0,
+            chain: 0,
+            reaches: false,
+        }
+    }
+
+    /// Whether the pawn reached its goal row in the base position.
+    #[inline]
+    pub fn reaches_goal(&self) -> bool {
+        self.reaches
+    }
+
+    /// Flood pawn → goal in place, stopping at first goal contact.
+    pub fn build_into(&mut self, grids: &WallGrids, pawn: u128, goal: u128) {
+        let mut visited = pawn & FLOOD_PLAYABLE;
+        self.reached[0] = visited;
+        self.depth = 1;
+
+        if visited & goal != 0 {
+            self.ball = visited;
+            self.chain = visited;
+            self.reaches = true;
+            return;
+        }
+
+        let mut wave = visited;
+        while wave != 0 && self.depth < MAX_GOAL_LAYERS {
+            wave = expand_wave(wave, grids) & !visited;
+            if wave == 0 {
+                break;
+            }
+            visited |= wave;
+            self.reached[self.depth] = visited;
+            self.depth += 1;
+            if wave & goal != 0 {
+                self.ball = visited;
+                // Only the goal-touching cells of the final ring can end a path.
+                self.chain = self.reached[self.depth - 2] | (wave & goal);
+                self.reaches = true;
+                return;
+            }
+        }
+
+        self.ball = visited;
+        self.chain = visited;
+        self.reaches = false;
+    }
+
+    #[inline]
+    fn cut_inside(&self, delta: &WallGrids, region: u128) -> u128 {
+        const S: u32 = FLOOD_STRIDE;
+        let b = region;
+        (delta.south & b & (b >> S))
+            | (delta.north & b & (b << S))
+            | (delta.east & b & (b >> 1))
+            | (delta.west & b & (b << 1))
+    }
+
+    #[inline]
+    fn layer_of(&self, cell: u128) -> usize {
+        let (mut lo, mut hi) = (0usize, self.depth - 1);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if self.reached[mid] & cell != 0 {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        lo
+    }
+
+    #[inline]
+    fn min_layer(&self, mut cells: u128) -> usize {
+        let mut best = self.depth - 1;
+        while cells != 0 {
+            let cell = cells & cells.wrapping_neg();
+            cells &= cells - 1;
+            best = best.min(self.layer_of(cell));
+            if best == 0 {
+                break;
+            }
+        }
+        best
+    }
+
+    /// Speculative trial. Returns the visited region on success (usable as the
+    /// next player's theft pool) or `None` if the pawn is cut off.
+    ///
+    /// `pool` is the previous player's visited region for bit theft; pass 0 for
+    /// the first player.
+    pub fn probe(
+        &self,
+        walled: &WallGrids,
+        delta: &WallGrids,
+        goal: u128,
+        pool: u128,
+    ) -> Option<u128> {
+        if !self.reaches {
+            return None;
+        }
+
+        // Skip: no edge of the pawn's own ascent path is cut, so that path
+        // survives verbatim. `chain` has no cut internal edge, so its induced
+        // subgraph is unchanged — still connected, still touching goal — which
+        // makes it a sound theft pool for the next player.
+        if self.cut_inside(delta, self.chain) == 0 {
+            return Some(self.chain);
+        }
+        let endpoints = self.cut_inside(delta, self.ball);
+        if endpoints == 0 {
+            return Some(self.chain);
+        }
+
+        let t = self.min_layer(endpoints);
+        let (mut visited, mut wave) = if t == 0 {
+            (self.reached[0], self.reached[0])
+        } else {
+            let v = self.reached[t - 1];
+            let prev = if t >= 2 { self.reached[t - 2] } else { 0 };
+            (v, v & !prev)
+        };
+        if visited & goal != 0 {
+            return Some(visited);
+        }
+
+        let mut pool = pool & !visited;
+        while wave != 0 {
+            if wave & pool != 0 {
+                visited |= pool;
+                wave |= pool;
+                pool = 0;
+                if visited & goal != 0 {
+                    return Some(visited);
+                }
+            }
+            wave = expand_wave(wave, walled) & !visited;
+            if wave == 0 {
+                break;
+            }
+            visited |= wave;
+            if wave & goal != 0 {
+                return Some(visited);
+            }
+        }
+        None
     }
 }

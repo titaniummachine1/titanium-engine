@@ -38,6 +38,7 @@ required-features = ["parallel"]
 
 [features]
 incremental-l3 = []
+incremental-l3-pawn = []
 default = ["parallel"]
 # Search measurement, TT-hit profiling, and phase timers are compiled only with
 # --features bench-instrument. Default cargo build --release contains no search
