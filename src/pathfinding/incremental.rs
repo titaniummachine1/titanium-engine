@@ -850,3 +850,110 @@ impl PawnField {
         None
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fused route witness: one Lee-wave pass → distance + shortest path + step mask
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One goal-seeded Lee-wave BFF pass yielding everything the engine currently
+/// computes with three separate floods:
+///
+/// - **distance to victory** (`dist`) — what `refresh_dist` re-floods for,
+/// - **one shortest path** (`path`) — what CATv5's first witness path re-derives,
+/// - **the path's directed steps** (`steps`) — an edge-level wall filter.
+///
+/// The filter is the point. A wall is legal for this player the moment its
+/// blocked-step delta misses every step of the witness path, because the path
+/// then survives verbatim and still reaches the goal. That is exact and
+/// one-sided: a miss proves legality, a hit proves nothing and falls through.
+///
+/// It is strictly tighter than `WallTrialCtx`'s existing `proof` test, which
+/// asks whether the wall touches any *square* of a whole visited region. Here
+/// the comparison is against ~`dist` directed edges, in the same four-direction
+/// layout as [`WallGrids`], so the test is four ANDs.
+#[derive(Clone)]
+pub struct RouteWitness {
+    /// Shortest distance to the goal row; `u8::MAX` when unreachable.
+    pub dist: u8,
+    /// Cells on the chosen shortest path, including pawn and goal square.
+    pub path: u128,
+    /// Directed steps the path takes, keyed exactly like [`WallGrids`]: a bit in
+    /// `south` at cell `u` means the path steps from `u` to `u + STRIDE`.
+    pub steps: WallGrids,
+}
+
+impl RouteWitness {
+    /// Whether `delta` cuts any step of the witness path.
+    ///
+    /// `false` ⇒ the path is intact ⇒ this player still reaches the goal.
+    #[inline]
+    pub fn cut_by(&self, delta: &WallGrids) -> bool {
+        ((delta.north & self.steps.north)
+            | (delta.south & self.steps.south)
+            | (delta.east & self.steps.east)
+            | (delta.west & self.steps.west))
+            != 0
+    }
+
+    #[inline]
+    pub fn reaches(&self) -> bool {
+        self.dist != u8::MAX
+    }
+
+    /// Build from a goal-seeded field by descending rings from the pawn.
+    ///
+    /// The field already holds the full ring decomposition, so recovering a path
+    /// is a walk down `dist` rings with no queue, parent table, or second flood.
+    pub fn from_goal_field(field: &GoalField, pawn: u128, grids: &WallGrids) -> Self {
+        let Some(dist) = field.pawn_dist else {
+            return Self {
+                dist: u8::MAX,
+                path: 0,
+                steps: WallGrids::ZERO,
+            };
+        };
+
+        const S: u32 = FLOOD_STRIDE;
+        let mut steps = WallGrids::ZERO;
+        let mut path = pawn;
+        let mut cur = pawn;
+
+        for d in (1..=dist as usize).rev() {
+            // Ring d-1 cells adjacent to `cur`, reachable through an open edge.
+            let prev = field.reached[d - 1] & !if d >= 2 { field.reached[d - 2] } else { 0 };
+            // Try each direction; record the step in the same layout as WallGrids.
+            let north = ((cur & !grids.north) >> S) & prev;
+            let south = ((cur & !grids.south) << S) & prev;
+            let east = ((cur & !grids.east) << 1) & prev;
+            let west = ((cur & !grids.west) >> 1) & prev;
+
+            let (next, dir) = if north != 0 {
+                (north & north.wrapping_neg(), 0u8)
+            } else if south != 0 {
+                (south & south.wrapping_neg(), 1)
+            } else if east != 0 {
+                (east & east.wrapping_neg(), 2)
+            } else if west != 0 {
+                (west & west.wrapping_neg(), 3)
+            } else {
+                debug_assert!(false, "ring {d} has no open predecessor");
+                break;
+            };
+
+            match dir {
+                0 => steps.north |= cur,
+                1 => steps.south |= cur,
+                2 => steps.east |= cur,
+                _ => steps.west |= cur,
+            }
+            path |= next;
+            cur = next;
+        }
+
+        Self {
+            dist,
+            path,
+            steps,
+        }
+    }
+}

@@ -1263,6 +1263,104 @@ mod tests {
         assert!(candidates > 10_000);
     }
 
+    /// Does the shortest-path witness prune the walls that production actually
+    /// floods? Replays the real chain (TOPO, `can_seal`, `proof`) and asks, of
+    /// the survivors, how many miss both players' witness paths — those are
+    /// legal outright with no flood.
+    #[test]
+    fn route_witness_prunes_seal_surviving_candidates() {
+        use crate::pathfinding::bff::wall::{bff_wall_legal, goal_bits, pawn_bit};
+        use crate::pathfinding::incremental::{GoalField, RouteWitness};
+
+        let mut seed = 0xA5A5_1234_DEAD_BEEFu64;
+        let (mut cands, mut topo, mut seal, mut proof_sk, mut flooded) = (0usize, 0, 0, 0, 0);
+        let (mut witness_skip, mut nodes) = (0usize, 0usize);
+
+        for _game in 0..64 {
+            let mut board = Board::new();
+            for _ply in 0..48 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let masks = wall_masks(&board);
+                let sealtop = WallSealTopology::new(wall_occupied_mask(&board));
+                let base = WallGrids::from_board(&board);
+                let (r1, c1) = board.pawn(Player::One);
+                let (r2, c2) = board.pawn(Player::Two);
+                let (p1, p2) = (pawn_bit(r1, c1), pawn_bit(r2, c2));
+                let f1 = GoalField::build(&base, goal_bits(Player::One), p1);
+                let f2 = GoalField::build(&base, goal_bits(Player::Two), p2);
+                let w1 = RouteWitness::from_goal_field(&f1, p1, &base);
+                let w2 = RouteWitness::from_goal_field(&f2, p2, &base);
+                let mut proof = 0u128;
+                nodes += 1;
+
+                for (orientation, cs, needs) in [
+                    (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
+                    (WallOrientation::Vertical, masks.l12_v, masks.topo_v),
+                ] {
+                    let mut rem = cs;
+                    while rem != 0 {
+                        let slot = rem.trailing_zeros() as usize;
+                        rem &= rem - 1;
+                        cands += 1;
+                        if needs & (1u64 << slot) == 0 {
+                            topo += 1;
+                            continue;
+                        }
+                        let cand = slot
+                            + if orientation == WallOrientation::Horizontal { 0 } else { 64 };
+                        if !sealtop.can_seal(cand) {
+                            seal += 1;
+                            continue;
+                        }
+                        let delta = wall_delta((slot / 8) as u8, (slot % 8) as u8, orientation);
+                        if proof != 0 && !delta.touches(proof) {
+                            proof_sk += 1;
+                            continue;
+                        }
+                        flooded += 1;
+
+                        // The proposed filter, on exactly the survivors.
+                        let intact = w1.reaches() && w2.reaches()
+                            && !w1.cut_by(delta) && !w2.cut_by(delta);
+                        let mut walled = base;
+                        walled.place(delta);
+                        let truth = bff_wall_legal(p1, p2, &walled);
+                        if intact {
+                            witness_skip += 1;
+                            assert!(truth, "witness said legal but flood says illegal");
+                        }
+                        if let (true, p) = bff_wall_legal_with_proof(p1, p2, &walled) {
+                            proof = p;
+                        }
+                    }
+                }
+
+                let mut sc = BfsScratch::new();
+                let mut mv = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut mv, &mut sc);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let _ = board.make_move(mv[(seed as usize) % n]);
+            }
+        }
+        eprintln!(
+            "\nnodes={nodes} candidates={cands} topo={topo} seal={seal} proof={proof_sk} flooded={flooded}"
+        );
+        eprintln!(
+            "  witness-path skip on survivors: {witness_skip}/{flooded} = {:.1}%  ({:.2} floods/node -> {:.2})",
+            100.0 * witness_skip as f64 / flooded.max(1) as f64,
+            flooded as f64 / nodes as f64,
+            (flooded - witness_skip) as f64 / nodes as f64,
+        );
+        assert!(cands > 10_000);
+    }
+
     fn replay(moves: &[&str]) -> Board {
         let mut board = Board::new();
         for &mv in moves {
