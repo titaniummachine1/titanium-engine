@@ -722,6 +722,101 @@ mod tests {
     use crate::core::board::WallOrientation;
     use crate::util::grid::set_wall;
 
+    /// Decompose `build_catv5_heatmaps` so we know which parts a D*-style
+    /// incremental scheme could even reach. Reports ns per full build.
+    #[test]
+    fn catv5_build_cost_decomposition() {
+        use crate::core::board::Move;
+        use crate::movegen::legal::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
+        use std::time::Instant;
+
+        // Realistic wall-heavy midgames from random legal play.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut corpus = Vec::new();
+        for _ in 0..40 {
+            let mut board = Board::new();
+            for _ in 0..30 {
+                if board.is_terminal().is_some() {
+                    break;
+                }
+                let mut sc = BfsScratch::new();
+                let mut mv = [Move::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+                let n = generate_legal_moves_slice(&mut board, &mut mv, &mut sc);
+                if n == 0 {
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let _ = board.make_move(mv[(seed as usize) % n]);
+            }
+            corpus.push(board);
+        }
+
+        const REPS: u32 = 200;
+        let (mut t_masks, mut t_paths, mut t_wit, mut t_flood, mut t_wave) = (0u128, 0u128, 0u128, 0u128, 0u128);
+        let mut builds = 0u32;
+
+        for _ in 0..REPS {
+            for board in &corpus {
+                let t0 = Instant::now();
+                let masks = std::hint::black_box(DirMasks::from_board(board));
+                t_masks += t0.elapsed().as_nanos();
+
+                let t1 = Instant::now();
+                let (paths0, count0) = catv5_witness_paths(board, Player::One, masks);
+                let (paths1, count1) = catv5_witness_paths(board, Player::Two, masks);
+                std::hint::black_box((&paths0, &paths1));
+                t_paths += t1.elapsed().as_nanos();
+
+                let t2 = Instant::now();
+                let mut w0 = [0u8; 81];
+                let mut w1 = [0u8; 81];
+                add_catv5_witness_heat(&paths0, count0, &mut w0);
+                add_catv5_witness_heat(&paths1, count1, &mut w1);
+                std::hint::black_box((&w0, &w1));
+                t_wit += t2.elapsed().as_nanos();
+
+                // The distance flood inside add_catv5_propagated_heat — the part a
+                // goal-seeded incremental field could replace.
+                let t3 = Instant::now();
+                for player in [Player::One, Player::Two] {
+                    let mut to_goal = DistLayers::default();
+                    fill_dist_layers_to_goal_row(player, masks, &mut to_goal);
+                    std::hint::black_box(to_goal.depth);
+                }
+                t_flood += t3.elapsed().as_nanos();
+
+                // Everything else in propagation (wave loops + scatter).
+                let t4 = Instant::now();
+                let mut h0 = [0u16; 81];
+                let mut h1 = [0u16; 81];
+                add_catv5_propagated_heat(board, Player::One, masks, &paths0, count0, &mut h0);
+                add_catv5_propagated_heat(board, Player::Two, masks, &paths1, count1, &mut h1);
+                std::hint::black_box((&h0, &h1));
+                t_wave += t4.elapsed().as_nanos();
+
+                builds += 1;
+            }
+        }
+
+        let per = |x: u128| x as f64 / builds as f64;
+        // t_wave includes its own internal flood, so subtract it for the net share.
+        let wave_net = per(t_wave) - per(t_flood);
+        let total = per(t_masks) + per(t_paths) + per(t_wit) + per(t_flood) + wave_net;
+        eprintln!("\n=== build_catv5_heatmaps decomposition ({builds} builds) ===");
+        for (name, v) in [
+            ("DirMasks::from_board", per(t_masks)),
+            ("catv5_witness_paths x2", per(t_paths)),
+            ("witness_heat scatter x2", per(t_wit)),
+            ("dist layers to goal x2", per(t_flood)),
+            ("wave propagation x2", wave_net),
+        ] {
+            eprintln!("  {name:26} {v:8.0} ns  {:5.1}%", 100.0 * v / total);
+        }
+        eprintln!("  {:26} {total:8.0} ns", "TOTAL");
+    }
+
     #[test]
     fn precise_witness_paths_are_deterministic_and_only_share_first_ply() {
         let board = Board::new();
