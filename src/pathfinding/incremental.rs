@@ -82,6 +82,11 @@ pub struct GoalField {
     /// `reached[depth-1]`: the ball of radius `d[pawn]` around the goal row.
     /// When the pawn is unreachable this is the goal row's whole component.
     ball: u128,
+    /// `reached[depth-2] | pawn` — the only cells a descent chain from the pawn
+    /// can visit. Strictly tighter than `ball`, which also carries every *other*
+    /// cell of the final ring; those can never sit on the pawn's own chain, so
+    /// counting them only forces needless revalidation. Used for the skip test.
+    chain_ball: u128,
     /// Distance from the pawn to the goal row; `None` when unreachable.
     pawn_dist: Option<u8>,
 }
@@ -102,6 +107,7 @@ impl GoalField {
                 reached,
                 depth,
                 ball: visited,
+                chain_ball: pawn,
                 pawn_dist: Some(0),
             };
         }
@@ -116,10 +122,13 @@ impl GoalField {
             reached[depth] = visited;
             depth += 1;
             if wave & pawn != 0 {
+                // Chain cells: everything strictly closer to the goal, plus the
+                // pawn itself. `depth >= 2` here, so `reached[depth - 2]` exists.
                 return Self {
                     reached,
                     depth,
                     ball: visited,
+                    chain_ball: reached[depth - 2] | pawn,
                     pawn_dist: Some((depth - 1) as u8),
                 };
             }
@@ -129,6 +138,7 @@ impl GoalField {
             reached,
             depth,
             ball: visited,
+            chain_ball: visited,
             pawn_dist: None,
         }
     }
@@ -154,8 +164,14 @@ impl GoalField {
     /// Zero means the wall cuts no edge the descent chain could use.
     #[inline]
     pub fn cut_inside_ball(&self, delta: &WallGrids) -> u128 {
+        self.cut_inside(delta, self.ball)
+    }
+
+    /// Cells of `region` that lose a step to another `region` cell under `delta`.
+    #[inline]
+    fn cut_inside(&self, delta: &WallGrids, region: u128) -> u128 {
         const S: u32 = FLOOD_STRIDE;
-        let b = self.ball;
+        let b = region;
         // Bit `u` survives iff the wall blocks `u`'s step in that direction AND
         // both `u` and the neighbour it would step to are inside the ball.
         (delta.south & b & (b >> S))
@@ -216,8 +232,11 @@ impl GoalField {
     /// never traversed them. They are still removed from `walled`, which is what
     /// the continuation floods against.
     pub fn probe(&self, walled: &WallGrids, delta: &WallGrids, pawn: u128) -> Probe {
-        let endpoints = self.cut_inside_ball(delta);
-        if endpoints == 0 {
+        // Skip test runs against the tight chain set: if no edge of the pawn's
+        // own descent chain is cut, that chain survives verbatim. The repair
+        // path below still keys `t` / `last_cut` off the full ball, so its
+        // restart-exactness argument is unchanged.
+        if self.cut_inside(delta, self.chain_ball) == 0 {
             // Descent chain untouched, so distance cannot have risen; edge
             // removal cannot lower it either. Unchanged.
             return match self.pawn_dist {
@@ -226,6 +245,13 @@ impl GoalField {
             };
         }
 
+        let endpoints = self.cut_inside_ball(delta);
+        if endpoints == 0 {
+            return match self.pawn_dist {
+                Some(d) => Probe::Untouched(d),
+                None => Probe::Severed,
+            };
+        }
         let (t, last_cut) = self.layer_span(endpoints);
         let (mut visited, mut wave, mut ring) = if t == 0 {
             let seed = self.reached[0];
@@ -475,6 +501,9 @@ mod tests {
 
     /// Rings `probe` burns for the same trial.
     fn probe_rings(field: &GoalField, walled: &WallGrids, delta: &WallGrids, pawn: u128) -> usize {
+        if field.cut_inside(delta, field.chain_ball) == 0 {
+            return 0;
+        }
         let endpoints = field.cut_inside_ball(delta);
         if endpoints == 0 {
             return 0;
