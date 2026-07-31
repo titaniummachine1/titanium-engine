@@ -6,7 +6,8 @@ use crate::titanium::dist::{
     fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
     fill_ace_dist_to_goal_with_masks_p0, fill_ace_dist_to_goal_with_masks_p1, fill_choke_points,
     fill_contested, fill_corridor_delta, fill_sparse_route_masks, materialize_distance_layers,
-    shortest_route_bits, wall_incr_refresh_flags, width_in_layers,
+    dag_cells_from_pawn, shortest_route_bits, wall_cuts_player_dag, wall_incr_refresh_flags,
+    width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_vwall_move, is_wall_move, move_id_to_board, wall_slot,
@@ -15,6 +16,26 @@ use crate::titanium::{
 use crate::util::clock::{Duration, Instant};
 
 use super::cat_index_lmr::apply_lmr_path_correction;
+
+/// A/B toggle for the shortest-path-DAG LMR/LMP classifier.
+///
+/// Off by default: production keeps the CAT-attention tail cut until this wins
+/// a gate. Cached once — the search must not read the environment per node.
+fn dag_lmr_from_env() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(|| {
+            std::env::var("TITANIUM_DAG_LMR")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+    }
+}
 use super::v16_lmr::{
     plan_v16_pawn_lmr, plan_v16_wall_lmr, V16HardOverride, ACE_LMR_AFTER_MOVE, ACE_LMR_MIN_DEPTH,
 };
@@ -2757,6 +2778,9 @@ pub struct TitaniumSearch {
     cat_walls: bool,
     /// Historical field name for the production v17 CAT-graduated LMR.
     cat_lmr_v16: bool,
+    /// A/B: classify LMR/LMP walls by shortest-path-DAG contact ("tight edges")
+    /// instead of by CAT attention share. Only takes effect alongside cat_lmr_v16.
+    dag_lmr: bool,
     cat_lmr_ceiling: u16,
     cat_lmr_fringe_pct: u16,
     /// Experimental: small ordering bonus for walls touching either
@@ -3080,6 +3104,7 @@ impl TitaniumSearch {
             ti_movegen: false,
             cat_walls: false,
             cat_lmr_v16: false,
+            dag_lmr: false,
             cat_lmr_ceiling: crate::cat::CAT_V16_LMR_CEILING_DEFAULT,
             cat_lmr_fringe_pct: crate::cat::CAT_V16_FRINGE_PCT_DEFAULT,
             route_touch_ordering: false,
@@ -3534,6 +3559,7 @@ impl TitaniumSearch {
     ) -> Box<Self> {
         let mut search = Self::grafted_with_weights(g, tt_bits, weights);
         search.cat_lmr_v16 = true;
+        search.dag_lmr = dag_lmr_from_env();
         search.cat_lmr_ceiling = if crate::cat::CAT_V16_LMR_CEILINGS.contains(&ceiling) {
             ceiling
         } else {
@@ -3999,6 +4025,7 @@ impl TitaniumSearch {
         worker.ti_movegen = self.ti_movegen;
         worker.cat_walls = self.cat_walls;
         worker.cat_lmr_v16 = self.cat_lmr_v16;
+        worker.dag_lmr = self.dag_lmr;
         worker.cat_lmr_ceiling = self.cat_lmr_ceiling;
         worker.cat_lmr_fringe_pct = self.cat_lmr_fringe_pct;
         worker.route_touch_ordering = self.route_touch_ordering;
@@ -7327,6 +7354,25 @@ impl TitaniumSearch {
             cat_heats[i] = heat_by_id[moves[i] as usize];
         }
 
+        // Both players' shortest-path DAG cells for this node. Costs no flood:
+        // it descends the goal-distance fields `refresh_dist` already maintains.
+        // Position-pure across the move loop, so it is built once per node.
+        // One byte per move, built once here rather than per visit in the move
+        // loop — the DAG is position-pure, so the classification cannot change
+        // while we iterate.
+        let dag_lmr_active = self.dag_lmr && cat_lmr_active;
+        let mut dag_tight = [false; 160];
+        if dag_lmr_active {
+            let dag0 = dag_cells_from_pawn(&self.g, self.g.pawn[0], &self.d0[self.dist0_idx]);
+            let dag1 = dag_cells_from_pawn(&self.g, self.g.pawn[1], &self.d1[self.dist1_idx]);
+            let (f0, f1) = (&self.d0[self.dist0_idx], &self.d1[self.dist1_idx]);
+            for i in 0..n {
+                let m = moves[i];
+                dag_tight[i] = is_wall_move(m)
+                    && (wall_cuts_player_dag(dag0, f0, m) || wall_cuts_player_dag(dag1, f1, m));
+            }
+        }
+
         let lazy_walls_active =
             ply > 0 && !(self.ti_movegen && !self.cat_walls && !self.dead_zone_prune);
         let lazy_seal_mode = crate::titanium::lazy_seal::LazySealMode::from_env();
@@ -7453,7 +7499,14 @@ impl TitaniumSearch {
                 && is_wall_move(m)
                 && m != tt_move
             {
-                let attention_ratio = if cat_lmr_active && max_wall_impact > 0 {
+                // Single-variable A/B. Feeding 0.0 / 1.0 through the existing
+                // v16 plan reuses every downstream rule unchanged: 0.0 is below
+                // CAT_ATTENTION_TAIL_CUTOFF so a DAG-missing wall takes the same
+                // hard tail cut, and 1.0 yields `cat_pressure == 0` so a tight
+                // wall gets the plain ACE base with no extra reduction.
+                let attention_ratio = if dag_lmr_active {
+                    if dag_tight[i] { 1.0 } else { 0.0 }
+                } else if cat_lmr_active && max_wall_impact > 0 {
                     cat_heats[i].max(0) as f64 / max_wall_impact as f64
                 } else {
                     1.0

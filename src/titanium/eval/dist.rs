@@ -168,6 +168,79 @@ pub fn wall_incr_cuts_player_dist(d: &[u8; 81], m: i16) -> bool {
     d[a] != d[b2] || d[c2] != d[e2]
 }
 
+/// Cells on this player's shortest-path DAG: every square reachable from the
+/// pawn by strictly descending the goal-distance gradient. Bit `i` = ACE square
+/// `i` (81 bits, low-order).
+///
+/// This is the union of all of the player's shortest routes — the same object as
+/// `slack == 0` in the slack-plane formulation, and strictly more information
+/// than a sample of node-disjoint witness paths. Computed by one descent BFS
+/// over `d`, which `refresh_dist` already maintains, so it costs no flood.
+pub fn dag_cells_from_pawn(g: &GameState, pawn: usize, d: &[u8; 81]) -> u128 {
+    if pawn >= 81 || d[pawn] == u8::MAX {
+        return 0;
+    }
+    let mut seen = 1u128 << pawn;
+    let mut stack = [0u8; 81];
+    let mut top = 1usize;
+    stack[0] = pawn as u8;
+    while top > 0 {
+        top -= 1;
+        let u = stack[top] as usize;
+        let du = d[u];
+        if du == 0 {
+            continue;
+        }
+        for dir in 0..4usize {
+            if !g.can_step(u, dir) {
+                continue;
+            }
+            let v = (u as i16 + crate::titanium::game::DELTA[dir]) as usize;
+            if d[v] != du - 1 || (seen >> v) & 1 == 1 {
+                continue;
+            }
+            seen |= 1u128 << v;
+            stack[top] = v as u8;
+            top += 1;
+        }
+    }
+    seen
+}
+
+/// True when the wall blocks an edge of this player's shortest-path DAG.
+///
+/// This is the reference engine's LMR/LMP "tight edge" classifier. An edge
+/// `(u, v)` lies on a shortest route iff its endpoints sit on adjacent distance
+/// rings and the deeper endpoint is itself reachable by descent from the pawn —
+/// checking that endpoint suffices, because descending through it necessarily
+/// puts the shallower endpoint on the DAG too.
+///
+/// Walls whose two blocked edges both miss the DAG cannot change this player's
+/// distance at all, which is what makes them safe to reduce hard.
+#[inline]
+pub fn wall_cuts_player_dag(dag: u128, d: &[u8; 81], m: i16) -> bool {
+    let Some((a, b2, c2, e2)) = wall_incr_probe_squares(m) else {
+        return false;
+    };
+    dag_edge(dag, d, a, b2) || dag_edge(dag, d, c2, e2)
+}
+
+#[inline]
+fn dag_edge(dag: u128, d: &[u8; 81], u: usize, v: usize) -> bool {
+    let (du, dv) = (d[u], d[v]);
+    if du == u8::MAX || dv == u8::MAX {
+        return false;
+    }
+    // Equal rings lie on no shortest route; otherwise test the deeper endpoint.
+    if du == dv + 1 {
+        (dag >> u) & 1 == 1
+    } else if dv == du + 1 {
+        (dag >> v) & 1 == 1
+    } else {
+        false
+    }
+}
+
 /// Per-player incremental refresh flags for a single wall added on top of `d0`/`d1`.
 #[inline]
 pub fn wall_incr_refresh_flags(d0: &[u8; 81], d1: &[u8; 81], m: i16) -> (bool, bool) {
@@ -635,6 +708,91 @@ mod tests {
                 assert_eq!(route[i] & flank[i], 0);
             }
         }
+    }
+
+    #[test]
+    fn dag_untouched_wall_cannot_change_that_players_distance_oracle() {
+        use crate::titanium::game::GameState;
+
+        fn lcg(state: &mut u64) -> u64 {
+            *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *state
+        }
+
+        let mut rng = 0x51ED_2701_A33Fu64;
+        let mut trials = 0usize;
+        let mut untouched = 0usize;
+        let mut tight = 0usize;
+
+        for _ in 0..600 {
+            let mut g = GameState::new();
+            let plies = 4 + (lcg(&mut rng) % 30) as usize;
+            for _ in 0..plies {
+                let mut moves = [0i16; 160];
+                let mut n = g.gen_pawn_moves(&mut moves, 0);
+                for wt in 0..2usize {
+                    for slot in 0..64usize {
+                        if g.wall_legal(wt, slot) {
+                            moves[n] = (if wt == 0 {
+                                crate::titanium::MOVE_HW_BASE
+                            } else {
+                                crate::titanium::MOVE_VW_BASE
+                            }) + slot as i16;
+                            n += 1;
+                        }
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+                g.make_move(moves[(lcg(&mut rng) as usize) % n]);
+            }
+
+            let mut d = [[0u8; 81]; 2];
+            fill_ace_dist_to_goal(&g, 0, &mut d[0]);
+            fill_ace_dist_to_goal(&g, 1, &mut d[1]);
+            let dag = [
+                dag_cells_from_pawn(&g, g.pawn[0], &d[0]),
+                dag_cells_from_pawn(&g, g.pawn[1], &d[1]),
+            ];
+            let pre = [d[0][g.pawn[0]], d[1][g.pawn[1]]];
+
+            for wt in 0..2usize {
+                for slot in 0..64usize {
+                    if !g.wall_legal(wt, slot) {
+                        continue;
+                    }
+                    let m = (if wt == 0 {
+                        crate::titanium::MOVE_HW_BASE
+                    } else {
+                        crate::titanium::MOVE_VW_BASE
+                    }) + slot as i16;
+                    trials += 1;
+                    let mut g2 = g.clone();
+                    g2.make_move(m);
+                    for side in 0..2usize {
+                        if wall_cuts_player_dag(dag[side], &d[side], m) {
+                            tight += 1;
+                            continue;
+                        }
+                        untouched += 1;
+                        let mut post = [0u8; 81];
+                        fill_ace_dist_to_goal(&g2, side, &mut post);
+                        assert_eq!(
+                            post[g2.pawn[side]], pre[side],
+                            "wall {m} missed side {side}'s DAG but changed its distance                              ({} -> {})",
+                            pre[side], post[g2.pawn[side]]
+                        );
+                    }
+                }
+            }
+        }
+
+        assert!(trials > 5_000, "too few wall trials: {trials}");
+        assert!(untouched > 1_000, "classifier never fired: {untouched}");
+        eprintln!(
+            "dag classifier: {trials} walls, {untouched} DAG-untouched (sound), {tight} tight"
+        );
     }
 
     #[test]
