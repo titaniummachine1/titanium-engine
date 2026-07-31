@@ -6,8 +6,7 @@ use crate::titanium::dist::{
     fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
     fill_ace_dist_to_goal_with_masks_p0, fill_ace_dist_to_goal_with_masks_p1, fill_choke_points,
     fill_contested, fill_corridor_delta, fill_sparse_route_masks, materialize_distance_layers,
-    dag_cells_from_pawn, shortest_route_bits, wall_cuts_player_dag, wall_incr_refresh_flags,
-    width_in_layers,
+    pawn_shortest_edges, shortest_route_bits, wall_incr_refresh_flags, width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_vwall_move, is_wall_move, move_id_to_board, wall_slot,
@@ -7363,13 +7362,11 @@ impl TitaniumSearch {
         let dag_lmr_active = self.dag_lmr && cat_lmr_active;
         let mut dag_tight = [false; 160];
         if dag_lmr_active {
-            let dag0 = dag_cells_from_pawn(&self.g, self.g.pawn[0], &self.d0[self.dist0_idx]);
-            let dag1 = dag_cells_from_pawn(&self.g, self.g.pawn[1], &self.d1[self.dist1_idx]);
-            let (f0, f1) = (&self.d0[self.dist0_idx], &self.d1[self.dist1_idx]);
+            let dag0 = pawn_shortest_edges(&self.g, self.g.pawn[0], &self.d0[self.dist0_idx]);
+            let dag1 = pawn_shortest_edges(&self.g, self.g.pawn[1], &self.d1[self.dist1_idx]);
             for i in 0..n {
                 let m = moves[i];
-                dag_tight[i] = is_wall_move(m)
-                    && (wall_cuts_player_dag(dag0, f0, m) || wall_cuts_player_dag(dag1, f1, m));
+                dag_tight[i] = dag0.touched_by(m) || dag1.touched_by(m);
             }
         }
 

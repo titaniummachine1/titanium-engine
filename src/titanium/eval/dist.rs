@@ -168,77 +168,114 @@ pub fn wall_incr_cuts_player_dist(d: &[u8; 81], m: i16) -> bool {
     d[a] != d[b2] || d[c2] != d[e2]
 }
 
-/// Cells on this player's shortest-path DAG: every square reachable from the
-/// pawn by strictly descending the goal-distance gradient. Bit `i` = ACE square
-/// `i` (81 bits, low-order).
+/// Wall slots touching an edge of this player's shortest-path DAG.
 ///
-/// This is the union of all of the player's shortest routes — the same object as
-/// `slack == 0` in the slack-plane formulation, and strictly more information
-/// than a sample of node-disjoint witness paths. Computed by one descent BFS
-/// over `d`, which `refresh_dist` already maintains, so it costs no flood.
-pub fn dag_cells_from_pawn(g: &GameState, pawn: usize, d: &[u8; 81]) -> u128 {
-    if pawn >= 81 || d[pawn] == u8::MAX {
-        return 0;
+/// Bit `slot` set means a wall in that slot blocks at least one edge lying on
+/// some shortest route from the pawn to its goal. Walls absent from both masks
+/// cannot change this player's distance at all, which is what makes them safe
+/// to reduce hard.
+///
+/// Emitting slot masks rather than a cell set is what makes the classifier free
+/// at the point of use: one bit test per move instead of re-deriving the edge
+/// endpoints. Built in the same descent pass, over the goal-distance field
+/// `refresh_dist` already maintains, so it costs no flood.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PawnShortestEdges {
+    pub h_touch: u64,
+    pub v_touch: u64,
+}
+
+impl PawnShortestEdges {
+    /// Whether this wall move blocks an edge of the DAG.
+    #[inline]
+    pub fn touched_by(&self, m: i16) -> bool {
+        if !crate::titanium::is_wall_move(m) {
+            return false;
+        }
+        let bit = 1u64 << crate::titanium::wall_slot(m);
+        if crate::titanium::is_hwall_move(m) {
+            self.h_touch & bit != 0
+        } else {
+            self.v_touch & bit != 0
+        }
+    }
+}
+
+/// Wall slots blocked by cutting the north edge out of `cell` (dense slot ids).
+#[inline]
+fn ud_edge_wall_touches(cell: usize) -> u64 {
+    let (row, col) = (cell / 9, cell % 9);
+    let mut touches = 0u64;
+    if col < 8 {
+        touches |= 1u64 << (row * 8 + col);
+    }
+    if col > 0 {
+        touches |= 1u64 << (row * 8 + col - 1);
+    }
+    touches
+}
+
+/// Wall slots blocked by cutting the east edge out of `cell`.
+#[inline]
+fn lr_edge_wall_touches(cell: usize) -> u64 {
+    let (row, col) = (cell / 9, cell % 9);
+    let mut touches = 0u64;
+    if row < 8 {
+        touches |= 1u64 << (row * 8 + col);
+    }
+    if row > 0 {
+        touches |= 1u64 << ((row - 1) * 8 + col);
+    }
+    touches
+}
+
+/// Union of the edges on every shortest route from `pawn`, as wall-slot masks.
+///
+/// Distances strictly decrease along the traversal, so it is a DAG and every
+/// marked edge has a shortest prefix from the pawn and a shortest suffix to the
+/// goal. Conversely every shortest route follows only such edges, so all are
+/// visited.
+pub fn pawn_shortest_edges(g: &GameState, pawn: usize, d: &[u8; 81]) -> PawnShortestEdges {
+    let mut out = PawnShortestEdges::default();
+    if pawn >= 81 || d[pawn] == u8::MAX || d[pawn] == 0 {
+        return out;
     }
     let mut seen = 1u128 << pawn;
-    let mut stack = [0u8; 81];
-    let mut top = 1usize;
-    stack[0] = pawn as u8;
-    while top > 0 {
-        top -= 1;
-        let u = stack[top] as usize;
-        let du = d[u];
+    let mut queue = [0u8; 81];
+    queue[0] = pawn as u8;
+    let (mut head, mut tail) = (0usize, 1usize);
+
+    while head < tail {
+        let cur = queue[head] as usize;
+        head += 1;
+        let du = d[cur];
         if du == 0 {
             continue;
         }
+        let next = du - 1;
         for dir in 0..4usize {
-            if !g.can_step(u, dir) {
+            if !g.can_step(cur, dir) {
                 continue;
             }
-            let v = (u as i16 + crate::titanium::game::DELTA[dir]) as usize;
-            if d[v] != du - 1 || (seen >> v) & 1 == 1 {
+            let v = (cur as i16 + crate::titanium::game::DELTA[dir]) as usize;
+            if d[v] != next {
                 continue;
             }
-            seen |= 1u128 << v;
-            stack[top] = v as u8;
-            top += 1;
+            // DELTA is [-9, +9, -1, +1]: north/south cut a ud edge, east/west an lr edge.
+            if dir < 2 {
+                out.h_touch |= ud_edge_wall_touches(cur.min(v));
+            } else {
+                out.v_touch |= lr_edge_wall_touches(cur.min(v));
+            }
+            let bit = 1u128 << v;
+            if seen & bit == 0 {
+                seen |= bit;
+                queue[tail] = v as u8;
+                tail += 1;
+            }
         }
     }
-    seen
-}
-
-/// True when the wall blocks an edge of this player's shortest-path DAG.
-///
-/// This is the reference engine's LMR/LMP "tight edge" classifier. An edge
-/// `(u, v)` lies on a shortest route iff its endpoints sit on adjacent distance
-/// rings and the deeper endpoint is itself reachable by descent from the pawn —
-/// checking that endpoint suffices, because descending through it necessarily
-/// puts the shallower endpoint on the DAG too.
-///
-/// Walls whose two blocked edges both miss the DAG cannot change this player's
-/// distance at all, which is what makes them safe to reduce hard.
-#[inline]
-pub fn wall_cuts_player_dag(dag: u128, d: &[u8; 81], m: i16) -> bool {
-    let Some((a, b2, c2, e2)) = wall_incr_probe_squares(m) else {
-        return false;
-    };
-    dag_edge(dag, d, a, b2) || dag_edge(dag, d, c2, e2)
-}
-
-#[inline]
-fn dag_edge(dag: u128, d: &[u8; 81], u: usize, v: usize) -> bool {
-    let (du, dv) = (d[u], d[v]);
-    if du == u8::MAX || dv == u8::MAX {
-        return false;
-    }
-    // Equal rings lie on no shortest route; otherwise test the deeper endpoint.
-    if du == dv + 1 {
-        (dag >> u) & 1 == 1
-    } else if dv == du + 1 {
-        (dag >> v) & 1 == 1
-    } else {
-        false
-    }
+    out
 }
 
 /// Per-player incremental refresh flags for a single wall added on top of `d0`/`d1`.
@@ -752,8 +789,8 @@ mod tests {
             fill_ace_dist_to_goal(&g, 0, &mut d[0]);
             fill_ace_dist_to_goal(&g, 1, &mut d[1]);
             let dag = [
-                dag_cells_from_pawn(&g, g.pawn[0], &d[0]),
-                dag_cells_from_pawn(&g, g.pawn[1], &d[1]),
+                pawn_shortest_edges(&g, g.pawn[0], &d[0]),
+                pawn_shortest_edges(&g, g.pawn[1], &d[1]),
             ];
             let pre = [d[0][g.pawn[0]], d[1][g.pawn[1]]];
 
@@ -771,7 +808,7 @@ mod tests {
                     let mut g2 = g.clone();
                     g2.make_move(m);
                     for side in 0..2usize {
-                        if wall_cuts_player_dag(dag[side], &d[side], m) {
+                        if dag[side].touched_by(m) {
                             tight += 1;
                             continue;
                         }
