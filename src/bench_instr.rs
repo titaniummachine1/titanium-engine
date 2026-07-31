@@ -170,6 +170,13 @@ pub struct BenchInstr {
     pub cat_no_edge_skip: u64,
     /// Shared edge-cut probe invocations at the CAT path-LMR site.
     pub cat_edge_test_calls: u64,
+    /// refresh_dist fell through to a full reflood because cached_stamp > stamp
+    /// (walked back up the tree past a wall move).
+    pub reflood_backtrack: u64,
+    /// ... because cached_stamp < stamp - 1 (jumped more than one wall forward).
+    pub reflood_jump: u64,
+    /// ... forward by exactly one wall (the incremental path's own reflood).
+    pub reflood_forward1: u64,
     search_t0: Option<Instant>,
     measured_ns: u128,
 }
@@ -324,7 +331,7 @@ impl BenchInstr {
 
         let dist_layer_depth_samples: u64 = self.dist_layer_depth_hist.iter().sum();
         format!(
-            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","dist_topo_entry_bytes":{},"dist_topo_scalar_bytes":{},"dist_topo_layer_bytes":{},"dist_lru_layer_copy_bytes":{},"dist_layer_depth_hist":{{"0_4":{},"5_8":{},"9_12":{},"13_16":{},"17_32":{},"33_plus":{}}},"dist_layer_depth_samples":{},"dist_layer_depth_max":{},"refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
+            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","dist_topo_entry_bytes":{},"dist_topo_scalar_bytes":{},"dist_topo_layer_bytes":{},"dist_lru_layer_copy_bytes":{},"dist_layer_depth_hist":{{"0_4":{},"5_8":{},"9_12":{},"13_16":{},"17_32":{},"33_plus":{}}},"dist_layer_depth_samples":{},"dist_layer_depth_max":{},"refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{},"reflood_backtrack":{},"reflood_jump":{},"reflood_forward1":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
             self.stop_reason,
             dist_topo_entry_bytes,
             dist_topo_scalar_bytes,
@@ -349,6 +356,9 @@ impl BenchInstr {
             self.cat_incr_no_edge_cut,
             self.cat_no_edge_skip,
             self.cat_edge_test_calls,
+            self.reflood_backtrack,
+            self.reflood_jump,
+            self.reflood_forward1,
             parts.join(","),
             site_rows.join(","),
         )

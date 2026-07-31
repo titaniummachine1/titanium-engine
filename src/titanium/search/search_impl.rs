@@ -5065,6 +5065,19 @@ impl TitaniumSearch {
 
     fn refresh_dist_inner(&mut self, ply: usize) {
         let stamp = self.g.wall_stamp;
+        // Classify why a refresh cannot take the cheap or one-wall-forward path.
+        #[cfg(feature = "bench-instrument")]
+        {
+            if self.cached_stamp != stamp {
+                if self.cached_stamp > stamp {
+                    crate::bench_instr::bump_u64(|b| &mut b.reflood_backtrack);
+                } else if self.cached_stamp < stamp - 1 {
+                    crate::bench_instr::bump_u64(|b| &mut b.reflood_jump);
+                } else {
+                    crate::bench_instr::bump_u64(|b| &mut b.reflood_forward1);
+                }
+            }
+        }
         if self.cached_stamp == stamp {
             crate::bench_instr::refresh_site_path(0);
             return; // refs already valid for these walls
