@@ -378,20 +378,16 @@ mod lazy_smp_tests {
     }
 
     #[test]
-    fn lazy_topn_flag_defaults_off_and_propagates_to_workers() {
-        let mut search = fresh();
-        assert!(!search.lazy_topn_enabled());
-        search.enable_lazy_topn();
+    fn lazy_topn_is_on_in_production_and_propagates_to_workers() {
+        let search = fresh();
         assert!(search.lazy_topn_enabled());
         let worker = search.fork_lazy_worker(&search.g);
         assert!(worker.lazy_topn_enabled());
     }
 
     #[test]
-    fn ace_lmp_defaults_off_and_propagates_to_workers() {
-        let mut search = fresh();
-        assert!(!search.ace_lmp_enabled());
-        search.set_ace_lmp(true);
+    fn ace_lmp_is_on_in_production_and_propagates_to_workers() {
+        let search = fresh();
         assert!(search.ace_lmp_enabled());
         let worker = search.fork_lazy_worker(&search.g);
         assert!(worker.ace_lmp_enabled());

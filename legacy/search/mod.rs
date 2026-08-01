@@ -12,7 +12,6 @@ pub mod lmr_profile;
 pub mod lmr_viz;
 pub mod move_pack;
 pub mod pipeline;
-pub mod rollout;
 pub mod runtime;
 pub mod search_tt;
 pub mod session;
