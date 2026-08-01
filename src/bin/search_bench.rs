@@ -21,32 +21,15 @@ use titanium::core::board::Board;
 use titanium::movegen::prewarm;
 use titanium::titanium::lazy_seal::{dump_lazy_seal_stats, reset_lazy_seal_stats};
 use titanium::titanium::net::live_weights_sha256;
-use titanium::titanium::session::apply_session_experiment_flags;
+
 use titanium::titanium::{move_id_to_algebraic, GameState, ThinkResult, TitaniumSearch};
 
-/// Reported + logged engine label. The actual search mode is selected in
-/// `fresh_search` (TITANIUM_BENCH_V16=1 → v17 CAT-LMR), so the label must
-/// follow the same env var or profiles get misattributed.
+/// Reported + logged engine label. There is exactly one engine, so this is a
+/// constant and cannot drift from what `fresh_search` builds. It previously
+/// returned "titanium-v17" unconditionally while `fresh_search` defaulted to
+/// `grafted()` (v15), silently mislabeling every default profile.
 fn engine_mode() -> &'static str {
-    let base = if let Ok(flag) = std::env::var("TITANIUM_BENCH_ENGINE") {
-        flag
-    } else if std::env::var("TITANIUM_BENCH_V16").as_deref() == Ok("1") {
-        "titanium-v17".into()
-    } else {
-        "titanium-v17".into()
-    };
-    let lazy = std::env::var("TITANIUM_BENCH_LAZY_WALLS").as_deref() == Ok("1");
-    let seal_mode = std::env::var("TITANIUM_LAZY_SEAL_MODE").unwrap_or_default();
-    if lazy {
-        let seal = if seal_mode.is_empty() {
-            "deferred"
-        } else {
-            &seal_mode
-        };
-        Box::leak(format!("{base}-lazy-{seal}").into_boxed_str())
-    } else {
-        Box::leak(base.into_boxed_str())
-    }
+    "titanium-v18"
 }
 const TT_BITS: usize = 20;
 const MAX_DEPTH: i32 = 30;
@@ -181,29 +164,9 @@ fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
         Some(raw) if !raw.trim().is_empty() => load_position_from_moves(raw),
         _ => load_position(position),
     };
-    let lazy_walls = std::env::var("TITANIUM_BENCH_LAZY_WALLS").as_deref() == Ok("1");
-    if let Ok(flag) = std::env::var("TITANIUM_BENCH_ENGINE") {
-        let mut search = if lazy_walls {
-            TitaniumSearch::grafted_v17_lazy_walls_for_bench(g, Some(TT_BITS), 1000)
-        } else {
-            TitaniumSearch::grafted_v17_with_ceiling(g, Some(TT_BITS), 1000)
-        };
-        apply_session_experiment_flags(search.as_mut(), &flag);
-        return search;
-    }
-    // TITANIUM_BENCH_V16=1 profiles the v17 CAT-LMR engine (default ceiling 1000)
-    // so we can A/B the CAT cost vs the v15 baseline on identical positions.
-    if std::env::var("TITANIUM_BENCH_V16").as_deref() == Ok("1") {
-        if lazy_walls {
-            TitaniumSearch::grafted_v17_lazy_walls_for_bench(g, Some(TT_BITS), 1000)
-        } else {
-            TitaniumSearch::grafted_v17_with_ceiling(g, Some(TT_BITS), 1000)
-        }
-    } else if lazy_walls {
-        TitaniumSearch::grafted_lazy_walls_for_bench(g, Some(TT_BITS))
-    } else {
-        TitaniumSearch::grafted(g, Some(TT_BITS))
-    }
+    // The one production engine — same object the site and the match harness get.
+    // This used to default to `grafted()` (v15) while reporting "titanium-v17".
+    TitaniumSearch::grafted_v17_with_ceiling(g, Some(TT_BITS), 1000)
 }
 
 fn run_think(

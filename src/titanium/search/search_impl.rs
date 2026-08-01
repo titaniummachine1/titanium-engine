@@ -3539,6 +3539,20 @@ impl TitaniumSearch {
         } else {
             crate::cat::CAT_V16_LMR_CEILING_DEFAULT
         };
+        // The production feature set, previously applied out-of-band by
+        // `apply_session_experiment_flags("titanium-v18")`. Constructing it here
+        // makes the site, the bench and the match harness the same engine by
+        // construction — they used to diverge by ~1.8x node count because only
+        // the session path switched these on.
+        search.set_sf_history(true);
+        search.enable_q_search();
+        search.enable_cat_path_lmr();
+        search.enable_cat_no_edge_skip();
+        search.enable_lazy_topn();
+        search.set_ace_lmp(true);
+        search.set_ace_rfp(true);
+        search.set_remaining_wall_race_layers(true, true);
+        search.set_two_wall_race_pv_only(true);
         search
     }
 
