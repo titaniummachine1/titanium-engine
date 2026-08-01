@@ -232,23 +232,10 @@ pub fn titanium_genmove(
     if g.winner() >= 0 {
         return None;
     }
-    let mut search = match engine_label {
-        "titanium-v15" | "titanium-v14" | "ace-v13-grafted" => TitaniumSearch::grafted(g, None),
-        "titanium-v16" | "titanium-v17" => TitaniumSearch::grafted_v17(g, None),
-        "titanium-v15-medium" => TitaniumSearch::grafted_medium(g, None),
-        "titanium-v15-frozen" => TitaniumSearch::grafted_frozen(g, None),
-        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
-            TitaniumSearch::grafted_no_raceproof(g, None)
-        }
-        "ace-v13-ti-pure" => TitaniumSearch::with_ti_movegen_pure(g),
-        _ if params.ti_movegen && params.cat => TitaniumSearch::with_ti_movegen_and_cat(g),
-        _ if params.ti_movegen => TitaniumSearch::with_ti_movegen(g),
-        _ if params.cat => TitaniumSearch::with_cat(g),
-        _ => TitaniumSearch::new(g),
-    };
-    if params.eme {
-        search.enable_eme();
-    }
+    // One engine. The label and the ti_movegen/cat/eme params are accepted for
+    // wire compatibility but no longer select a configuration -- that two-layer
+    // setup let the site, the bench and the match harness diverge.
+    let mut search = TitaniumSearch::grafted_v17(g, None);
     search.set_multipv(params.multipv as u32);
     search.set_root_scores(params.root_scores);
     #[cfg(not(target_arch = "wasm32"))]

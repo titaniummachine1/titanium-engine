@@ -7153,7 +7153,11 @@ impl TitaniumSearch {
                     .unwrap_or(i);
                 self.lazy_root_visits.push(original_idx);
             }
-            let probe_parent_hash: Option<(u32, u32)> = None;
+            let probe_parent_hash = if self.reduction_probe_enabled {
+                Some((self.g.hash_lo, self.g.hash_hi))
+            } else {
+                None
+            };
             let mover = self.g.turn;
             let pre_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
             let pre_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
@@ -7288,7 +7292,14 @@ impl TitaniumSearch {
                     self.reduction_shadow_stats.inference_nanos +=
                         started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                 }
-                let probe_ordinal: Option<u64> = None;
+                let probe_ordinal =
+                    if self.reduction_probe_enabled && depth >= self.reduction_probe_min_depth {
+                        let ordinal = self.reduction_probe_next;
+                        self.reduction_probe_next += 1;
+                        Some(ordinal)
+                    } else {
+                        None
+                    };
                 let extra_reduction = probe_ordinal
                     .is_some_and(|ordinal| self.reduction_probe_target == Some(ordinal));
                 let rd = (child_depth_used - i32::from(extra_reduction)).max(0);
