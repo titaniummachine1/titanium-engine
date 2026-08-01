@@ -57,21 +57,9 @@ enum Reply {
 
 // ── Search daemon ─────────────────────────────────────────────────────────────
 
-fn build_search(engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
-    let mut search = match engine_flag {
-        "ace-v13-pure" => TitaniumSearch::new(g),
-        "ace-v13-ti-pure" => TitaniumSearch::with_ti_movegen_pure(g),
-        "titanium-v15-frozen" => TitaniumSearch::grafted_frozen(g, None),
-        "titanium-v16" | "titanium-v17" => TitaniumSearch::grafted_v17(g, None),
-        "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
-            TitaniumSearch::grafted_no_raceproof(g, None)
-        }
-        _ => TitaniumSearch::grafted(g, None),
-    };
-    if engine_flag.contains("pmc") {
-        search.enable_eme();
-    }
-    search
+fn build_search(_engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
+    // One engine; the label no longer selects a configuration.
+    TitaniumSearch::grafted_v17(g, None)
 }
 
 fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {

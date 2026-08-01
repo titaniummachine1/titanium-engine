@@ -2513,7 +2513,6 @@ pub struct TitaniumSearch {
     sf_history: bool,
     /// Conservative reduced-depth fail-high verification. Off by default and
     /// exposed only as an explicit A/B experiment.
-    probcut: bool,
     hist_sf: [[i32; HIST_SPAN]; 2],
     /// SF batch 2 (branch build, unconditional): corrected static eval per
     /// ply, for the `improving` flag (i32::MIN = never written).
@@ -2592,9 +2591,7 @@ pub struct TitaniumSearch {
     /// Mirrored Titanium board (movegen and/or CAT).
     bridge: Option<Box<TiBridge>>,
     /// Use Titanium `generate_legal_moves_slice` instead of ACE `wall_legal`.
-    ti_movegen: bool,
     /// CAT-filter walls at inner nodes (requires `bridge`).
-    cat_walls: bool,
     /// Historical field name for the production v17 CAT-graduated LMR.
     cat_lmr_v16: bool,
     cat_lmr_ceiling: u16,
@@ -2602,7 +2599,6 @@ pub struct TitaniumSearch {
     /// Experimental: small ordering bonus for walls touching either
     /// player's shortest-route cell set (see ROUTE_TOUCH_ORDER_BONUS).
     /// Off by default; only takes effect alongside cat_lmr_v16.
-    route_touch_ordering: bool,
     /// Opt-in CAT path-aware correction for the wall-LMR branch only. The
     /// correction can only reduce v16's existing reduction by one ply.
     cat_path_lmr: bool,
@@ -2628,13 +2624,11 @@ pub struct TitaniumSearch {
     ace_rfp: bool,
     /// At roots allotted at most 200 ms, allow the ACE RFP rule at depth four
     /// on null-window nodes. Fixed-depth and longer searches remain depth three.
-    rfp_tc_adaptive: bool,
     ace_rfp_max_depth: i32,
     /// SOUND dead-zone wall prune at inner nodes (requires `bridge`): drop only
     /// walls in an unreachable void / sealed interior — provably irrelevant (they
     /// change no path and only burn inventory, never the best move). NPS-only;
     /// cannot cost Elo. Distinct from `cat_walls` (heat filter, which can).
-    dead_zone_prune: bool,
     /// Grafted-engine flag: in the hands-empty endgame, use Titanium's cheap
     /// path-aware tempo classifier ([`cert_bridge::hands_empty_race`]) instead of
     /// the full recursive `certify`. Same result, a fraction of the nodes — frees
@@ -2658,7 +2652,6 @@ pub struct TitaniumSearch {
     /// Cached `TITANIUM_RACE_ONE_WALL` decision.
     one_wall_race_resolved: Option<bool>,
     /// Restrict the one-wall proof to PV/full-window nodes.
-    one_wall_race_pv_only: bool,
     /// Cached `TITANIUM_RACE_TWO_WALL` decision. The experiment is deliberately
     /// default-off until its proof audit and strength gate both pass.
     two_wall_race_resolved: Option<bool>,
@@ -2666,7 +2659,6 @@ pub struct TitaniumSearch {
     /// remains available throughout the tree.
     two_wall_race_pv_only: bool,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
-    eme: bool,
     pub nodes: u64,
     deadline: Instant,
     root_best: i16,
@@ -2840,7 +2832,7 @@ fn race_candidate_definitely_best(
 
 impl TitaniumSearch {
     pub fn new(g: GameState) -> Box<Self> {
-        Box::new(Self {
+        let mut search = Box::new(Self {
             g,
             tt_key_hi: vec![0; TT_SIZE],
             tt_key_lo: vec![0; TT_SIZE],
@@ -2870,7 +2862,6 @@ impl TitaniumSearch {
             // Titanium stays on the legacy history table unless a caller enables
             // the experiment with `set_sf_history(true)`.
             sf_history: false,
-            probcut: false,
             hist_sf: [[0; HIST_SPAN]; 2],
             eval_stack: [i32::MIN; MAX_PLY],
             corr_hist: [[0; CORR_SIZE]; 2],
@@ -2917,12 +2908,9 @@ impl TitaniumSearch {
             np_b1v: -1,
             net: net(),
             bridge: None,
-            ti_movegen: false,
-            cat_walls: false,
             cat_lmr_v16: false,
             cat_lmr_ceiling: crate::cat::CAT_V16_LMR_CEILING_DEFAULT,
             cat_lmr_fringe_pct: crate::cat::CAT_V16_FRINGE_PCT_DEFAULT,
-            route_touch_ordering: false,
             cat_path_lmr: false,
             cat_no_edge_skip: false,
             q_search: false,
@@ -2932,18 +2920,14 @@ impl TitaniumSearch {
             ace_lmp: false,
             use_predict_stop: true,
             ace_rfp: false,
-            rfp_tc_adaptive: false,
             ace_rfp_max_depth: 3,
-            dead_zone_prune: false,
             cheap_cert: false,
             cert_eval_leaves_only: false,
             wall_ignore_cert_override: None,
             wall_ignore_cert_resolved: None,
             one_wall_race_resolved: None,
-            one_wall_race_pv_only: false,
             two_wall_race_resolved: None,
             two_wall_race_pv_only: false,
-            eme: false,
             nodes: 0,
             deadline: Instant::now(),
             root_best: crate::titanium::TITANIUM_NO_MOVE,
@@ -3017,7 +3001,12 @@ impl TitaniumSearch {
             wasm_progress: Vec::new(),
             #[cfg(feature = "wasm")]
             wasm_progress_cb: None,
-        })
+        });
+        // The Titanium legal-movegen bridge is mandatory: gen_moves_inner has no
+        // other path. It used to be opt-in via with_ti_movegen(), which left
+        // TitaniumSearch::new() with bridge == None.
+        search.bridge = Some(TiBridge::from_game(&search.g));
+        search
     }
 
     #[cfg(feature = "wasm")]
@@ -3044,15 +3033,6 @@ impl TitaniumSearch {
         std::mem::take(&mut self.wasm_progress)
     }
 
-    /// Enable Early Move Extensions — same gates/tuning as graduated LMR, early indices.
-    pub fn enable_eme(&mut self) {
-        self.eme = true;
-    }
-
-    pub fn enable_route_touch_ordering(&mut self) {
-        self.route_touch_ordering = true;
-    }
-
     pub fn enable_cat_path_lmr(&mut self) {
         self.cat_path_lmr = true;
     }
@@ -3075,11 +3055,6 @@ impl TitaniumSearch {
         self.q_max = Q_SEARCH_MAX_DEFAULT;
         self.q_swing_cp = Q_SWING_CP_DEFAULT;
     }
-
-    pub fn route_touch_ordering_enabled(&self) -> bool {
-        self.route_touch_ordering
-    }
-
     pub fn q_search_enabled(&self) -> bool {
         self.q_search
     }
@@ -3122,11 +3097,6 @@ impl TitaniumSearch {
     pub fn set_ace_rfp(&mut self, on: bool) {
         self.ace_rfp = on;
     }
-
-    pub fn set_rfp_tc_adaptive(&mut self, on: bool) {
-        self.rfp_tc_adaptive = on;
-    }
-
     /// Select the proven remaining-wall race layers used by an engine variant.
     pub fn set_remaining_wall_race_layers(&mut self, one_wall: bool, two_wall: bool) {
         self.one_wall_race_resolved = Some(one_wall);
@@ -3136,11 +3106,6 @@ impl TitaniumSearch {
     pub fn set_two_wall_race_pv_only(&mut self, on: bool) {
         self.two_wall_race_pv_only = on;
     }
-
-    pub fn set_one_wall_race_pv_only(&mut self, on: bool) {
-        self.one_wall_race_pv_only = on;
-    }
-
     #[cfg(test)]
     pub fn remaining_wall_race_layers(&self) -> (bool, bool) {
         (
@@ -3154,18 +3119,8 @@ impl TitaniumSearch {
         self.two_wall_race_pv_only
     }
 
-    #[cfg(test)]
-    pub fn one_wall_race_pv_only(&self) -> bool {
-        self.one_wall_race_pv_only
-    }
-
     pub fn ace_rfp_enabled(&self) -> bool {
         self.ace_rfp
-    }
-
-    #[cfg(test)]
-    pub fn rfp_tc_adaptive_enabled(&self) -> bool {
-        self.rfp_tc_adaptive
     }
 
     pub fn set_opening_book(
@@ -3239,11 +3194,9 @@ impl TitaniumSearch {
     }
 
     /// Titanium movegen on a mirrored board — same legal set, much faster than `wall_legal`.
+    /// Compatibility alias -- legal movegen is unconditional now.
     pub fn with_ti_movegen(g: GameState) -> Box<Self> {
-        let mut search = Self::new(g);
-        search.bridge = Some(TiBridge::from_game(&search.g));
-        search.ti_movegen = true;
-        search
+        Self::new(g)
     }
 
     /// ACE v13 reference tier with Titanium movegen acceleration, pinned to the
@@ -3259,21 +3212,6 @@ impl TitaniumSearch {
     pub fn with_ti_movegen_pure(g: GameState) -> Box<Self> {
         let mut search = Self::with_ti_movegen_frozen(g);
         search.pure_mode = true;
-        search
-    }
-
-    /// CAT hybrid: walls at inner nodes must pass `wall_should_search`.
-    pub fn with_cat(g: GameState) -> Box<Self> {
-        let mut search = Self::new(g);
-        search.bridge = Some(TiBridge::from_game(&search.g));
-        search.cat_walls = true;
-        search
-    }
-
-    /// Fast Titanium movegen + CAT wall filter.
-    pub fn with_ti_movegen_and_cat(g: GameState) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
-        search.cat_walls = true;
         search
     }
 
@@ -3314,13 +3252,6 @@ impl TitaniumSearch {
     pub fn grafted_no_raceproof(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
         let mut search = Self::grafted(g, tt_bits);
         search.race_proof = false;
-        search
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn grafted_lazy_walls_for_bench(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        let mut search = Self::grafted(g, tt_bits);
-        search.ti_movegen = false;
         search
     }
 
@@ -3393,71 +3324,6 @@ impl TitaniumSearch {
         search.set_ace_rfp(true);
         search.set_remaining_wall_race_layers(true, true);
         search.set_two_wall_race_pv_only(true);
-        search
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn grafted_v17_lazy_walls_for_bench(
-        g: GameState,
-        tt_bits: Option<usize>,
-        ceiling: u16,
-    ) -> Box<Self> {
-        let mut search = Self::grafted_v17_with_ceiling(g, tt_bits, ceiling);
-        search.ti_movegen = false;
-        search
-    }
-
-    /// Compatibility alias for the retired Titanium v16 product label.
-    #[inline]
-    pub fn grafted_v16(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        Self::grafted_v17(g, tt_bits)
-    }
-
-    /// Compatibility alias for the retired Titanium v16 product label.
-    #[inline]
-    pub fn grafted_v16_with_ceiling(
-        g: GameState,
-        tt_bits: Option<usize>,
-        ceiling: u16,
-    ) -> Box<Self> {
-        Self::grafted_v17_with_ceiling(g, tt_bits, ceiling)
-    }
-
-    /// Compatibility alias for the retired Titanium v16 product label.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline]
-    pub fn grafted_v16_lazy_walls_for_bench(
-        g: GameState,
-        tt_bits: Option<usize>,
-        ceiling: u16,
-    ) -> Box<Self> {
-        Self::grafted_v17_lazy_walls_for_bench(g, tt_bits, ceiling)
-    }
-
-    /// gen13 net search + O1 movegen + cheap hands-empty cert, but **no CAT**.
-    /// Isolates the certificate contribution from CAT wall-pruning.
-    pub fn with_ti_movegen_cheap_cert(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
-        search.cheap_cert = true;
-        if let Some(bits) = tt_bits {
-            search.resize_tt(bits);
-        }
-        search
-    }
-
-    /// gen13 net search + O1 movegen + adaptive cache-tier TT (no CAT, no cert).
-    /// Isolates the TT-growth contribution.
-    pub fn with_ti_movegen_adaptive_tt(g: GameState) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
-        search.enable_adaptive_tt();
-        search
-    }
-
-    /// gen13 net search + O1 movegen + SOUND dead-zone wall prune (no CAT heat).
-    /// Isolates the dead-zone pruner's contribution (NPS-only, can't cost Elo).
-    pub fn with_ti_movegen_deadzone(g: GameState) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
-        search.dead_zone_prune = true;
         search
     }
 
@@ -3606,13 +3472,6 @@ impl TitaniumSearch {
 
     pub fn sf_history_enabled(&self) -> bool {
         self.sf_history
-    }
-
-    /// Enable the conservative ProbCut experiment. Disabled by default: it
-    /// trades a shallow verification search for a speculative beta cutoff and
-    /// must be measured separately before any broader use.
-    pub fn set_probcut(&mut self, on: bool) {
-        self.probcut = on;
     }
 
     /// Full-action history as seen by ordering/pruning: the side-split gravity
@@ -3843,19 +3702,15 @@ impl TitaniumSearch {
         let mut worker = Self::new(root.clone());
         worker.history_tbl = self.history_tbl;
         worker.sf_history = self.sf_history;
-        worker.probcut = self.probcut;
         worker.hist_sf = self.hist_sf;
         worker.corr_hist = self.corr_hist;
         worker.cont_hist = self.cont_hist.clone();
         worker.cm = self.cm;
         worker.killers = self.killers;
         worker.net = self.net;
-        worker.ti_movegen = self.ti_movegen;
-        worker.cat_walls = self.cat_walls;
         worker.cat_lmr_v16 = self.cat_lmr_v16;
         worker.cat_lmr_ceiling = self.cat_lmr_ceiling;
         worker.cat_lmr_fringe_pct = self.cat_lmr_fringe_pct;
-        worker.route_touch_ordering = self.route_touch_ordering;
         worker.cat_path_lmr = self.cat_path_lmr;
         worker.cat_no_edge_skip = self.cat_no_edge_skip;
         worker.q_search = self.q_search;
@@ -3865,17 +3720,13 @@ impl TitaniumSearch {
         worker.ace_lmp = self.ace_lmp;
         worker.use_predict_stop = self.use_predict_stop;
         worker.ace_rfp = self.ace_rfp;
-        worker.rfp_tc_adaptive = self.rfp_tc_adaptive;
         worker.ace_rfp_max_depth = self.ace_rfp_max_depth;
-        worker.dead_zone_prune = self.dead_zone_prune;
         worker.cheap_cert = self.cheap_cert;
         worker.cert_eval_leaves_only = self.cert_eval_leaves_only;
         worker.wall_ignore_cert_override = self.wall_ignore_cert_override;
         worker.one_wall_race_resolved = self.one_wall_race_resolved;
-        worker.one_wall_race_pv_only = self.one_wall_race_pv_only;
         worker.two_wall_race_resolved = self.two_wall_race_resolved;
         worker.two_wall_race_pv_only = self.two_wall_race_pv_only;
-        worker.eme = self.eme;
         worker.use_partial_iter = self.use_partial_iter;
         worker.pure_mode = self.pure_mode;
         worker.race_proof = self.race_proof;
