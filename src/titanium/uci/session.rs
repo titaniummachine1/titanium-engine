@@ -263,133 +263,27 @@ mod session_tests {
     use super::*;
     use crate::titanium::game::GameState;
 
+    /// There is exactly one engine. The wire label is accepted for
+    /// compatibility but must never select a configuration again -- that
+    /// two-layer setup made the site, the bench and the match harness run
+    /// materially different searches.
     #[test]
-    fn v17_route_touch_session_enables_experiments() {
-        let search = build_search("titanium-v17-route-touch", GameState::new());
-        assert!(search.route_touch_ordering_enabled());
-        assert!(!search.q_search_enabled());
-    }
-
-    #[test]
-    fn v17_session_enables_qsearch_without_route_touch() {
-        let search = build_search("titanium-v17", GameState::new());
-        assert!(search.q_search_enabled());
-        assert!(!search.route_touch_ordering_enabled());
-    }
-
-    #[test]
-    fn v17_qsearch_session_enables_experiments() {
-        let search = build_search("titanium-v17-qsearch", GameState::new());
-        assert!(search.q_search_enabled());
-        assert!(!search.route_touch_ordering_enabled());
-    }
-
-    #[test]
-    fn v17_cat_path_lmr_inherits_v17_and_only_enables_path_flag() {
-        let search = build_search("titanium-v17-cat-path-lmr", GameState::new());
-        assert!(search.q_search_enabled());
-        assert!(search.cat_path_lmr_enabled());
-        assert!(!search.route_touch_ordering_enabled());
-        assert!(search.sf_history_enabled());
-    }
-
-    #[test]
-    fn default_v17_enables_cat_path_lmr() {
-        let search = build_search("titanium-v17", GameState::new());
-        assert!(search.cat_path_lmr_enabled());
-        assert!(search.cat_no_edge_skip_enabled());
-    }
-
-    #[test]
-    fn v17_lazy_topn_inherits_v17_and_only_enables_lazy_topn() {
-        let search = build_search("titanium-v17-lazy-topn", GameState::new());
-        assert!(search.sf_history_enabled());
-        assert!(search.q_search_enabled());
-        assert!(search.cat_path_lmr_enabled());
-        assert!(search.lazy_topn_enabled());
-        assert!(!search.route_touch_ordering_enabled());
-    }
-
-    #[test]
-    fn default_v17_enables_lazy_topn() {
-        let search = build_search("titanium-v17", GameState::new());
-        assert!(search.lazy_topn_enabled());
-    }
-
-    #[test]
-    fn v17_defaults_to_ace_lmp_and_compatibility_label_matches() {
-        let candidate = build_search("titanium-v17-lmp-ace", GameState::new());
-        let default = build_search("titanium-v17", GameState::new());
-        assert!(candidate.sf_history_enabled());
-        assert!(candidate.q_search_enabled());
-        assert!(candidate.cat_path_lmr_enabled());
-        assert!(candidate.lazy_topn_enabled());
-        assert!(candidate.ace_lmp_enabled());
-        assert!(default.ace_lmp_enabled());
-    }
-
-    #[test]
-    fn v17_no_partial_iter_disables_only_partial_iteration() {
-        let candidate = build_search("titanium-v17-no-partial-iter", GameState::new());
-        let default = build_search("titanium-v17", GameState::new());
-        assert!(!candidate.partial_iter_enabled());
-        assert!(candidate.predict_stop_enabled());
-        assert!(default.partial_iter_enabled());
-        assert!(default.predict_stop_enabled());
-    }
-
-    #[test]
-    fn v17_no_predict_stop_disables_only_predictive_stop() {
-        let candidate = build_search("titanium-v17-no-predict-stop", GameState::new());
-        assert!(candidate.partial_iter_enabled());
-        assert!(!candidate.predict_stop_enabled());
-    }
-
-    #[test]
-    fn v17_no_partial_no_predict_disables_both_controls() {
-        let candidate = build_search("titanium-v17-no-partial-no-predict", GameState::new());
-        assert!(!candidate.partial_iter_enabled());
-        assert!(!candidate.predict_stop_enabled());
-    }
-
-    #[test]
-    fn v17_default_enables_ace_rfp() {
-        let default = build_search("titanium-v17", GameState::new());
-        let explicit = build_search("titanium-v17-rfp-ace", GameState::new());
-        assert!(default.ace_rfp_enabled());
-        assert!(explicit.ace_rfp_enabled());
-    }
-
-    #[test]
-    fn remaining_wall_race_variants_preserve_all_v17_defaults() {
-        let default = build_search("titanium-v17", GameState::new());
-        let one = build_search("titanium-v17-race1w", GameState::new());
-        let both = build_search("titanium-v17-race2w", GameState::new());
-        let pv_only = build_search("titanium-v17-race2pv", GameState::new());
-        let rfp_tc = build_search("titanium-v17-rfp-tc-d4", GameState::new());
-        let race1_pv = build_search("titanium-v17-race1pv", GameState::new());
-        for search in [&one, &both] {
-            assert!(search.sf_history_enabled());
-            assert!(search.q_search_enabled());
-            assert!(search.cat_path_lmr_enabled());
-            assert!(search.cat_no_edge_skip_enabled());
-            assert!(search.lazy_topn_enabled());
-            assert!(search.ace_lmp_enabled());
-            assert!(search.ace_rfp_enabled());
+    fn every_label_builds_the_same_production_engine() {
+        for label in [
+            "titanium-v18",
+            "titanium-v17",
+            "titanium-v15",
+            "ace-v13-grafted",
+            "totally-unknown-label",
+        ] {
+            let search = build_search(label, GameState::new());
+            assert!(search.q_search_enabled(), "{label}");
+            assert!(search.sf_history_enabled(), "{label}");
+            assert!(search.cat_path_lmr_enabled(), "{label}");
+            assert!(search.cat_no_edge_skip_enabled(), "{label}");
+            assert!(search.lazy_topn_enabled(), "{label}");
+            assert!(search.ace_lmp_enabled(), "{label}");
+            assert!(search.ace_rfp_enabled(), "{label}");
         }
-        assert_eq!(default.remaining_wall_race_layers(), (true, true));
-        assert_eq!(one.remaining_wall_race_layers(), (true, false));
-        assert_eq!(both.remaining_wall_race_layers(), (true, true));
-        assert_eq!(pv_only.remaining_wall_race_layers(), (true, true));
-        assert!(default.two_wall_race_pv_only());
-        assert!(!both.two_wall_race_pv_only());
-        assert!(pv_only.two_wall_race_pv_only());
-        assert!(rfp_tc.ace_rfp_enabled());
-        assert!(rfp_tc.rfp_tc_adaptive_enabled());
-        assert_eq!(rfp_tc.remaining_wall_race_layers(), (true, true));
-        assert!(rfp_tc.two_wall_race_pv_only());
-        assert!(race1_pv.one_wall_race_pv_only());
-        assert!(race1_pv.two_wall_race_pv_only());
-        assert_eq!(race1_pv.remaining_wall_race_layers(), (true, true));
     }
 }

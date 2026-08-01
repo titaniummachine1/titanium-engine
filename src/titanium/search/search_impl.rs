@@ -113,17 +113,7 @@ fn cat_lmr_tuning_percent() -> i32 {
 /// Late-move reduction plies — re-exported for LMR vision (`legacy_search::lmr_viz`).
 pub use super::v16_lmr::ace_graduated_lmr_reduction;
 
-/// EME extends only the first ordered wall moves after the TT/best move.
-/// Index 0 (TT move) already gets full depth; extending more siblings
-/// compounds multiplicatively down the tree and explodes the node count.
-const ACE_EME_TOP_MOVES: usize = 2;
 
-/// Flat move-ordering bonus for a wall touching either player's shortest-
-/// route cell set (see `route_touch_ordering`). Small relative to typical
-/// CAT impact-heat magnitudes -- a cold-start nudge among otherwise-similar
-/// moves, not a signal meant to override a strong CAT read or distort
-/// iterative deepening.
-const ROUTE_TOUCH_ORDER_BONUS: i32 = 20;
 
 /// Default quiescence extension cap (Ka-AB `qMax`).
 const Q_SEARCH_MAX_DEFAULT: i32 = 4;
@@ -155,68 +145,6 @@ const CORR_SIZE: usize = 1 << 14;
 /// beyond ±256 means the static eval is systematically wrong by more than a
 /// wall's worth — cap it rather than let one bucket dominate.
 const CORR_MAX: i32 = 256;
-
-/// Opt-in ProbCut is deliberately narrow: static eval must already exceed the
-/// null-window beta by this many centipawns before it may spend a shallow
-/// verification search. A 200cp margin keeps this experimental cutoff well
-/// away from ordinary evaluation noise.
-const PROBCUT_STATIC_MARGIN: i32 = 200;
-/// The verification search is four plies shallower than the full node. This
-/// leaves at least two plies at the minimum eligible depth (six).
-const PROBCUT_REDUCTION: i32 = 4;
-const PROBCUT_MIN_DEPTH: i32 = 6;
-/// ProbCut is only meaningful for ordinary net-evaluation windows. Keeping it
-/// inside this band excludes mate, race, and certificate score conventions.
-const PROBCUT_MAX_ABS_BETA: i32 = 2_000;
-
-/// Pure eligibility gate for the opt-in ProbCut experiment. `ply > 0` keeps
-/// root search exact, the one-point window excludes PV nodes, and `allow_null`
-/// prevents the verification itself from recursively launching another
-/// speculative cutoff search.
-#[inline]
-fn probcut_is_eligible(
-    depth: i32,
-    alpha: i32,
-    beta: i32,
-    ply: usize,
-    allow_null: bool,
-    static_ev: i32,
-) -> bool {
-    depth >= PROBCUT_MIN_DEPTH
-        && ply > 0
-        && allow_null
-        && beta.saturating_sub(alpha) == 1
-        && beta.abs() < PROBCUT_MAX_ABS_BETA
-        && static_ev >= beta.saturating_add(PROBCUT_STATIC_MARGIN)
-}
-
-/// Pure predicate, factored out for direct unit testing: does this wall
-/// touch a cell on either player's shortest-route set? `route0`/`route1`
-/// are the 81-cell boolean masks from `fill_sparse_route_masks`.
-fn wall_touches_route(
-    row: u8,
-    col: u8,
-    orientation: crate::core::board::WallOrientation,
-    route0: &[u8; 81],
-    route1: &[u8; 81],
-) -> bool {
-    crate::util::grid::wall_touch_squares(row, col, orientation)
-        .iter()
-        .any(|&(r, c)| {
-            let sq = (r as usize) * 9 + c as usize;
-            route0[sq] != 0 || route1[sq] != 0
-        })
-}
-
-/// Early Move Extension — +1 ply for the top ordered walls; +2 only for
-/// the very first non-TT wall when there is real depth left to spend.
-fn ace_graduated_eme_extension(move_index: usize, depth: i32) -> i32 {
-    if move_index == 1 && depth >= 8 {
-        2
-    } else {
-        1
-    }
-}
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod lazy_smp_tests {
@@ -670,63 +598,6 @@ mod route_touch_tests {
     }
 
     #[test]
-    fn wall_touching_route_cell_is_detected() {
-        // Horizontal wall at (row=3, col=4) touches cells
-        // (3,4) (3,5) (4,4) (4,5). Put a route cell at one of them.
-        let route0 = mask_with(&[(4, 5)]);
-        let route1 = [0u8; 81];
-        assert!(wall_touches_route(
-            3,
-            4,
-            WallOrientation::Horizontal,
-            &route0,
-            &route1
-        ));
-    }
-
-    #[test]
-    fn wall_touching_neither_players_route_is_not_detected() {
-        let route0 = mask_with(&[(0, 0)]);
-        let route1 = mask_with(&[(8, 8)]);
-        assert!(!wall_touches_route(
-            3,
-            4,
-            WallOrientation::Horizontal,
-            &route0,
-            &route1
-        ));
-    }
-
-    #[test]
-    fn wall_touching_either_players_route_counts() {
-        let route0 = [0u8; 81];
-        let route1 = mask_with(&[(3, 4)]); // top-left corner of the wall's 4 cells
-        assert!(wall_touches_route(
-            3,
-            4,
-            WallOrientation::Vertical,
-            &route0,
-            &route1
-        ));
-    }
-
-    #[test]
-    fn route_touch_ordering_flag_defaults_off() {
-        let g = GameState::new();
-        let search = TitaniumSearch::with_ti_movegen(g);
-        assert!(!search.route_touch_ordering);
-    }
-
-    #[test]
-    fn enable_route_touch_ordering_sets_flag_and_propagates_to_workers() {
-        let mut search = TitaniumSearch::with_ti_movegen(GameState::new());
-        search.enable_route_touch_ordering();
-        assert!(search.route_touch_ordering);
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.route_touch_ordering);
-    }
-
-    #[test]
     fn q_search_defaults_off_and_has_an_explicit_setter() {
         let search = TitaniumSearch::with_ti_movegen(GameState::new());
         assert!(!search.q_search_enabled());
@@ -745,10 +616,13 @@ mod route_touch_tests {
     }
 
     #[test]
-    fn ace_rfp_defaults_off_and_propagates_to_workers() {
-        let mut search = TitaniumSearch::grafted_v17(GameState::new(), None);
-        assert!(!search.ace_rfp_enabled());
-        search.set_ace_rfp(true);
+    /// ace_rfp is part of the production feature set and propagates to LazySMP
+    /// workers. This used to assert it defaulted *off* -- true of the bare
+    /// constructor, but production switched it on out-of-band through the
+    /// session-flag layer, so the assertion encoded the very divergence it
+    /// should have caught.
+    fn ace_rfp_is_on_in_production_and_propagates_to_workers() {
+        let search = TitaniumSearch::grafted_v17(GameState::new(), None);
         assert!(search.ace_rfp_enabled());
         let worker = search.fork_lazy_worker(&search.g);
         assert!(worker.ace_rfp_enabled());
@@ -1976,22 +1850,6 @@ mod score_label_tests {
     }
 
     #[test]
-    fn probcut_defaults_off_and_has_an_explicit_setter() {
-        let mut search = TitaniumSearch::new(crate::titanium::game::GameState::new());
-        assert!(!search.probcut);
-        search.set_probcut(true);
-        assert!(search.probcut);
-    }
-
-    #[test]
-    fn sf_history_defaults_off_and_has_an_explicit_setter() {
-        let mut search = TitaniumSearch::new(crate::titanium::game::GameState::new());
-        assert!(!search.sf_history);
-        search.set_sf_history(true);
-        assert!(search.sf_history);
-    }
-
-    #[test]
     fn dense_history_codes_cover_all_move_ids() {
         for m in [0, 80, 81, 144, 145, 208] {
             assert!(is_pawn_move(m) || is_wall_move(m));
@@ -2025,24 +1883,6 @@ mod score_label_tests {
         assert_eq!(search.move_hist(0, pawn_destination), 17);
         search.set_sf_history(true);
         assert_eq!(search.move_hist(0, pawn_destination), -29);
-    }
-
-    #[test]
-    fn probcut_gate_requires_a_safe_non_root_fail_high_plausibility() {
-        assert!(probcut_is_eligible(6, 99, 100, 1, true, 300));
-        assert!(!probcut_is_eligible(5, 99, 100, 1, true, 300));
-        assert!(!probcut_is_eligible(6, 99, 100, 0, true, 300));
-        assert!(!probcut_is_eligible(6, 99, 100, 1, false, 300));
-        assert!(!probcut_is_eligible(6, 98, 100, 1, true, 300));
-        assert!(!probcut_is_eligible(
-            6,
-            PROBCUT_MAX_ABS_BETA - 1,
-            PROBCUT_MAX_ABS_BETA,
-            1,
-            true,
-            2_300
-        ));
-        assert!(!probcut_is_eligible(6, 99, 100, 1, true, 299));
     }
 
     #[test]
@@ -6500,58 +6340,18 @@ impl TitaniumSearch {
 
     fn gen_moves_inner(
         &mut self,
-        ply: usize,
-        depth: i32,
-        tt_move: i16,
+        _ply: usize,
+        _depth: i32,
+        _tt_move: i16,
         out: &mut [i16; 160],
     ) -> usize {
-        let check_legal = ply == 0;
         // MoveGen+ : Titanium legal movegen at EVERY node (perft-parity search).
-        // Fully legal walls — no lazy seal checks needed downstream, and inner
+        // Fully legal walls -- no lazy seal checks needed downstream, and inner
         // nodes can never search (or suggest via TT) a Titanium-illegal move.
-        // The CAT hybrid keeps its own filtered path at inner nodes.
-        if self.ti_movegen && (check_legal || (!self.cat_walls && !self.dead_zone_prune)) {
-            return self
-                .bridge
-                .as_mut()
-                .expect("ti movegen needs bridge")
-                .gen_legal_ace(out);
-        }
-        let mut n = self.g.gen_pawn_moves(out, 0);
-        if self.g.wl[self.g.turn] <= 0 {
-            return n;
-        }
-        if self.cat_walls && !check_legal {
-            return self.gen_walls_cat_filtered(depth, tt_move, out, n);
-        }
-        if self.dead_zone_prune && !check_legal {
-            return self.gen_walls_deadzone_filtered(out, n);
-        }
-        for slot in 0..64 {
-            if check_legal {
-                if self.g.wall_legal(0, slot) {
-                    out[n] = MOVE_HW_BASE + slot as i16;
-                    n += 1;
-                }
-                if self.g.wall_legal(1, slot) {
-                    out[n] = MOVE_VW_BASE + slot as i16;
-                    n += 1;
-                }
-            } else {
-                // lazy: geometry only; path-seal checked when the move is searched
-                if self.g.wall_fits(0, slot) {
-                    crate::titanium::lazy_seal::lazy_seal_record_wall_generated();
-                    out[n] = MOVE_HW_BASE + slot as i16;
-                    n += 1;
-                }
-                if self.g.wall_fits(1, slot) {
-                    crate::titanium::lazy_seal::lazy_seal_record_wall_generated();
-                    out[n] = MOVE_VW_BASE + slot as i16;
-                    n += 1;
-                }
-            }
-        }
-        n
+        self.bridge
+            .as_mut()
+            .expect("ti movegen needs bridge")
+            .gen_legal_ace(out)
     }
 
     /// Hybrid wall generation: lazy geometry + CAT relevance filter.
@@ -6972,7 +6772,7 @@ impl TitaniumSearch {
                 | RaceBound::Unknown => {}
             }
         }
-        if self.g.wl[0] + self.g.wl[1] == 1 && (!self.one_wall_race_pv_only || pv_node) {
+        if self.g.wl[0] + self.g.wl[1] == 1 {
             match self.one_wall_race_bound() {
                 RaceBound::Lower(value) if value >= beta => return Ok(beta),
                 RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
@@ -7169,21 +6969,6 @@ impl TitaniumSearch {
         // to verify the fail-high. The verification reuses this position (no
         // make/unmake is needed), disables `allow_null` to prevent recursion,
         // and propagates TimeUp normally. Never run this at the root/PV node.
-        if self.probcut && probcut_is_eligible(depth, alpha, beta, ply, allow_null, static_ev) {
-            let verified = self.ab(
-                depth - PROBCUT_REDUCTION,
-                beta - 1,
-                beta,
-                ply,
-                false,
-                prev_move,
-                q_left,
-            )?;
-            if verified >= beta {
-                return Ok(beta); // fail-hard: never leak the speculative score
-            }
-        }
-
         // null move
         if allow_null && depth >= 3 && ply > 0 {
             let ev = static_ev;
@@ -7268,46 +7053,6 @@ impl TitaniumSearch {
             // enough (ROUTE_TOUCH_ORDER_BONUS) to nudge otherwise-similar
             // moves earlier without overriding a strong CAT signal or
             // distorting iterative deepening.
-            if self.route_touch_ordering {
-                let d0f = self.d0[self.dist0_idx];
-                let d1f = self.d1[self.dist1_idx];
-                let mut route0 = [0u8; 81];
-                let mut route1 = [0u8; 81];
-                let mut flank_scratch = [0u8; 81];
-                fill_sparse_route_masks(
-                    &self.g,
-                    self.g.pawn[0],
-                    &d0f,
-                    &mut route0,
-                    &mut flank_scratch,
-                );
-                fill_sparse_route_masks(
-                    &self.g,
-                    self.g.pawn[1],
-                    &d1f,
-                    &mut route1,
-                    &mut flank_scratch,
-                );
-                for i in 0..n {
-                    if is_pawn_move(moves[i]) {
-                        continue; // pawn moves -- route-touch only makes sense for walls
-                    }
-                    if let crate::core::board::Move::Wall {
-                        row,
-                        col,
-                        orientation,
-                    } = move_id_to_board(moves[i])
-                    {
-                        if wall_touches_route(row, col, orientation, &route0, &route1) {
-                            heat_by_id[moves[i] as usize] += ROUTE_TOUCH_ORDER_BONUS;
-                            max_move_impact =
-                                max_move_impact.max(heat_by_id[moves[i] as usize].max(0) as u32);
-                            max_wall_impact =
-                                max_wall_impact.max(heat_by_id[moves[i] as usize].max(0) as u32);
-                        }
-                    }
-                }
-            }
         }
         let cat_order_prior = if cat_lmr_active && max_move_impact > 0 {
             Some((&heat_by_id, max_move_impact))
@@ -7341,8 +7086,7 @@ impl TitaniumSearch {
             cat_heats[i] = heat_by_id[moves[i] as usize];
         }
 
-        let lazy_walls_active =
-            ply > 0 && !(self.ti_movegen && !self.cat_walls && !self.dead_zone_prune);
+        let lazy_walls_active = false;
         let lazy_seal_mode = crate::titanium::lazy_seal::LazySealMode::from_env();
         let mut lazy_seal = if lazy_walls_active {
             Some(crate::titanium::lazy_seal::LazySealNode::from_game(
@@ -7409,11 +7153,7 @@ impl TitaniumSearch {
                     .unwrap_or(i);
                 self.lazy_root_visits.push(original_idx);
             }
-            let probe_parent_hash = if self.reduction_probe_enabled {
-                Some((self.g.hash_lo, self.g.hash_hi))
-            } else {
-                None
-            };
+            let probe_parent_hash: Option<(u32, u32)> = None;
             let mover = self.g.turn;
             let pre_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
             let pre_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
@@ -7449,18 +7189,6 @@ impl TitaniumSearch {
             let new_depth = depth - 1;
             let result = if ply == 0 && self.multipv > 1 {
                 self.ab(new_depth, -INF, INF, ply + 1, true, m, q_left)
-                    .map(|s| -s)
-            } else if self.eme
-                && i > 0
-                && i <= ACE_EME_TOP_MOVES
-                && depth >= ACE_LMR_MIN_DEPTH
-                && is_wall_move(m)
-                && m != tt_move
-            {
-                // EME — extend only the top ordered walls (see ACE_EME_TOP_MOVES)
-                let ext = ace_graduated_eme_extension(i, depth);
-                let ed = new_depth + ext;
-                self.ab(ed, -beta, -alpha, ply + 1, true, m, q_left)
                     .map(|s| -s)
             } else if i >= ACE_LMR_AFTER_MOVE
                 && depth >= ACE_LMR_MIN_DEPTH
@@ -7560,14 +7288,7 @@ impl TitaniumSearch {
                     self.reduction_shadow_stats.inference_nanos +=
                         started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                 }
-                let probe_ordinal =
-                    if self.reduction_probe_enabled && depth >= self.reduction_probe_min_depth {
-                        let ordinal = self.reduction_probe_next;
-                        self.reduction_probe_next += 1;
-                        Some(ordinal)
-                    } else {
-                        None
-                    };
+                let probe_ordinal: Option<u64> = None;
                 let extra_reduction = probe_ordinal
                     .is_some_and(|ordinal| self.reduction_probe_target == Some(ordinal));
                 let rd = (child_depth_used - i32::from(extra_reduction)).max(0);
@@ -8759,7 +8480,7 @@ impl TitaniumSearch {
     ) -> ThinkResult {
         let t0 = Instant::now();
         crate::bench_instr::begin_search();
-        self.ace_rfp_max_depth = rfp_depth_for_budget(self.rfp_tc_adaptive, time_ms);
+        self.ace_rfp_max_depth = rfp_depth_for_budget(false, time_ms);
         let rc_hits_at_start = self.rc_hits;
         let rc_solves_at_start = self.rc_solves;
         // pathfix/RaceProof(b): reserve the commitment gate's worst-case cost
