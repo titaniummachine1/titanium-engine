@@ -304,7 +304,6 @@ impl WasmEngine {
             crate::titanium::net::net_v17(),
         );
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
-        crate::titanium::session::apply_session_experiment_flags(&mut search, "titanium-v17");
         WasmEngine {
             search,
             engine_label: "titanium-v17".to_string(),
@@ -331,7 +330,6 @@ impl WasmEngine {
             crate::titanium::net::net(),
         );
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
-        crate::titanium::session::apply_session_experiment_flags(&mut search, "titanium-v18");
         WasmEngine {
             search,
             engine_label: "titanium-v18".to_string(),
