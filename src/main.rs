@@ -749,7 +749,8 @@ fn run_eval(args: &[String]) {
     // and overrides the net score, which the Python HalfPW trainer does NOT model.
     // This command's purpose is the PURE NET eval (see doc above), so disable cert
     // to keep py↔engine parity exact for training.
-    let mut s = TitaniumSearch::grafted_no_raceproof(g, None);
+    let mut s = TitaniumSearch::production(g, None);
+    s.set_race_proof(false);
     if args.iter().any(|a| a == "--parity-trace") {
         println!("{}", s.eval_parity_trace_json());
     } else if args.iter().any(|a| a == "--json") {
@@ -1433,8 +1434,8 @@ fn run_match(args: &[String]) {
     let mut threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    let mut engine_a = MatchEngine::TitaniumCert;
-    let mut engine_b = MatchEngine::TitaniumPlain;
+    let mut engine_a = MatchEngine::Live;
+    let mut engine_b = MatchEngine::Frozen;
     let mut tt_bits: Option<usize> = None;
     let mut early_stop = true;
     let mut book_openings = false;
@@ -1822,189 +1823,69 @@ fn match_book_opening(seed: u64, diverge: u32) -> Vec<String> {
     out
 }
 
-/// A selectable engine for either side of a match.
+/// Which weight blob a match seat plays with. There is one engine; only the
+/// net differs, because weights are data. `frozen` is the fixed reference
+/// opponent -- keep it so new work always has something to be measured against.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MatchEngine {
-    /// Titanium αβ + endgame certificate (distance eval).
-    TitaniumCert,
-    /// Titanium αβ, certificate disabled.
-    TitaniumPlain,
-    /// gen13 net search, O1 movegen only (the strong baseline).
-    AceV13,
-    /// gen13 net search + cheap hands-empty cert ONLY (no CAT). Isolates the
-    /// certificate contribution from CAT pruning.
-    AceV13Cert,
-    /// gen13 net search + adaptive cache-tier TT ONLY. Isolates TT growth.
-    AceV13AdaptiveTt,
-    /// gen13 net search + SOUND dead-zone wall prune ONLY. Isolates that pruner.
-    AceV13DeadZone,
-    /// Production graft: gen13 net + cheap hands-empty cert + adaptive cache-tier
-    /// TT (NO CAT — measured −25 Elo on the net engine).
-    AceV13Grafted,
-    /// Grafted + Lague partial-iteration (keep best move from a time-aborted
-    /// deepest iteration). A/B target vs plain grafted to measure the trick.
-    AceV13GraftedPartial,
-    /// Grafted + frozen v13 HalfPW (A/B vs titanium-v15 training weights).
-    AceV13GraftedFrozen,
-    /// Production graft with RaceProof/cert gates disabled. Experimental A/B only.
-    AceV13GraftedNoRaceProof,
-    /// Titanium v15 experimental — wall-ignorance loss certificate (frozen net).
-    AceV13GraftedWallIgnore,
+    Live,
+    Frozen,
 }
 
 impl MatchEngine {
     fn parse(s: &str) -> Option<MatchEngine> {
         match s {
-            "titanium" | "titanium-cert" => Some(MatchEngine::TitaniumCert),
-            "titanium-plain" => Some(MatchEngine::TitaniumPlain),
-            // Titanium v15 = gen13 net + O1 movegen + cheap-cert + adaptive-TT + partial-iter.
-            // v14 / ace-v13-grafted are legacy aliases for the same build.
-            "titanium-v15" | "titanium-v14" | "ace-v13-grafted" | "grafted" => {
-                Some(MatchEngine::AceV13Grafted)
-            }
-            "titanium-v15-frozen" => Some(MatchEngine::AceV13GraftedFrozen),
-            "titanium-v15-no-raceproof" | "ace-v13-grafted-no-raceproof" => {
-                Some(MatchEngine::AceV13GraftedNoRaceProof)
-            }
-            "titanium-v15-wall-ignore-experimental" | "grafted-wall-ignore" => {
-                Some(MatchEngine::AceV13GraftedWallIgnore)
-            }
-            "ace-v13" => Some(MatchEngine::AceV13),
-            "ace-v13-cert" => Some(MatchEngine::AceV13Cert),
-            "ace-v13-att" | "ace-v13-adaptive-tt" => Some(MatchEngine::AceV13AdaptiveTt),
-            "ace-v13-dz" | "ace-v13-deadzone" => Some(MatchEngine::AceV13DeadZone),
-            "ace-v13-grafted-partial" | "grafted-partial" => {
-                Some(MatchEngine::AceV13GraftedPartial)
-            }
-            _ => None,
+            "frozen" | "titanium-frozen" | "titanium-v15-frozen" => Some(MatchEngine::Frozen),
+            // Every historical label plays the current production engine now.
+            _ => Some(MatchEngine::Live),
         }
     }
+
     fn label(self) -> &'static str {
         match self {
-            MatchEngine::TitaniumCert => "Titanium+cert",
-            MatchEngine::TitaniumPlain => "plain Titanium",
-            MatchEngine::AceV13 => "ace-v13 (O1 movegen)",
-            MatchEngine::AceV13Cert => "ace-v13 + cheap-cert (no CAT)",
-            MatchEngine::AceV13AdaptiveTt => "ace-v13 + adaptive cache-tier TT",
-            MatchEngine::AceV13DeadZone => "ace-v13 + dead-zone wall prune",
-            MatchEngine::AceV13Grafted => {
-                "Titanium v15 (gen13 + O1 movegen + cert + adaptive-TT + partial-iter)"
-            }
-            MatchEngine::AceV13GraftedPartial => "ace-v13 grafted + Lague partial-iteration",
-            MatchEngine::AceV13GraftedFrozen => {
-                "Titanium v15 frozen (gen13 + O1 movegen + cert + adaptive-TT, v13 HalfPW)"
-            }
-            MatchEngine::AceV13GraftedNoRaceProof => "Titanium v15 without RaceProof/cert gates",
-            MatchEngine::AceV13GraftedWallIgnore => {
-                "Titanium v15 experimental — wall-ignorance loss certificate (frozen net)"
-            }
+            MatchEngine::Live => "Titanium (live weights)",
+            MatchEngine::Frozen => "Titanium (frozen v13 HalfPW reference)",
+        }
+    }
+
+    fn weights(self) -> &'static titanium::titanium::eval::nnue::Net {
+        match self {
+            MatchEngine::Live => titanium::titanium::net::net(),
+            MatchEngine::Frozen => titanium::titanium::net::net_frozen(),
         }
     }
 }
 
 /// One side's warm engine state (TT/killers/history persist across the game).
-enum Seat {
-    Titanium {
-        session: titanium::GameSearchSession,
-        cert: bool,
-    },
-    Ace {
-        search: Box<titanium::TitaniumSearch>,
-    },
+struct Seat {
+    search: Box<titanium::TitaniumSearch>,
 }
 
 impl Seat {
     fn new(engine: MatchEngine, opening: &[String], tt_bits: Option<usize>) -> Seat {
         use titanium::{algebraic_to_move_id, GameState, TitaniumSearch};
-        match engine {
-            MatchEngine::TitaniumCert => Seat::Titanium {
-                session: titanium::GameSearchSession::new(),
-                cert: true,
-            },
-            MatchEngine::TitaniumPlain => Seat::Titanium {
-                session: titanium::GameSearchSession::new(),
-                cert: false,
-            },
-            MatchEngine::AceV13
-            | MatchEngine::AceV13Cert
-            | MatchEngine::AceV13AdaptiveTt
-            | MatchEngine::AceV13DeadZone
-            | MatchEngine::AceV13Grafted
-            | MatchEngine::AceV13GraftedPartial
-            | MatchEngine::AceV13GraftedFrozen
-            | MatchEngine::AceV13GraftedNoRaceProof
-            | MatchEngine::AceV13GraftedWallIgnore => {
-                let mut g = GameState::new();
-                for m in opening {
-                    g.make_move(algebraic_to_move_id(m));
-                }
-                let search = match engine {
-                    MatchEngine::AceV13Grafted => TitaniumSearch::production(g, tt_bits),
-                    MatchEngine::AceV13GraftedFrozen => TitaniumSearch::grafted_frozen(g, tt_bits),
-                    MatchEngine::AceV13GraftedNoRaceProof => {
-                        TitaniumSearch::grafted_no_raceproof(g, tt_bits)
-                    }
-                    MatchEngine::AceV13GraftedWallIgnore => {
-                        TitaniumSearch::grafted_wall_ignore_experimental(g, tt_bits)
-                    }
-                    MatchEngine::AceV13GraftedPartial => {
-                        let mut s = TitaniumSearch::production(g, tt_bits);
-                        s.set_partial_iter(true);
-                        s
-                    }
-                    MatchEngine::AceV13Cert => {
-                        TitaniumSearch::with_ti_movegen_cheap_cert(g, tt_bits)
-                    }
-                    MatchEngine::AceV13AdaptiveTt => TitaniumSearch::with_ti_movegen_adaptive_tt(g),
-                    MatchEngine::AceV13DeadZone => TitaniumSearch::with_ti_movegen_deadzone(g),
-                    _ => {
-                        // Plain ace-v13 — but still honor --tt-bits so a pure TT-size
-                        // experiment (ace-v13 @ N bits vs ace-v13 default) is possible.
-                        let mut s = TitaniumSearch::with_ti_movegen_frozen(g);
-                        if let Some(bits) = tt_bits {
-                            s.resize_tt(bits);
-                        }
-                        s
-                    }
-                };
-                Seat::Ace { search }
-            }
+        let mut g = GameState::new();
+        for m in opening {
+            g.make_move(algebraic_to_move_id(m));
+        }
+        let ceiling = titanium::cat::CAT_V16_LMR_CEILING_DEFAULT;
+        Seat {
+            search: TitaniumSearch::build(g, tt_bits, ceiling, engine.weights()),
         }
     }
 
     /// Pick a move for the current position (`moves` = full move list so far).
-    fn pick(&mut self, moves: &[String], time_ms: u64) -> Option<String> {
-        use titanium::{SearchConfig, DEFAULT_MAX_NODES};
-        match self {
-            Seat::Titanium { session, cert } => {
-                session.set_position(moves).ok()?;
-                let config = SearchConfig {
-                    time_ms,
-                    max_nodes: DEFAULT_MAX_NODES,
-                    log: false,
-                    book_hint: None,
-                    cert_enabled: Some(*cert),
-                    ..SearchConfig::default()
-                };
-                let report = run_search(session, config)?;
-                Some(format_move(report.best_move))
-            }
-            Seat::Ace { search } => {
-                let r = search.think(time_ms, 128, false, false, "match");
-                if r.mv == titanium::TITANIUM_NO_MOVE {
-                    return None;
-                }
-                Some(titanium::move_id_to_algebraic(r.mv))
-            }
+    fn pick(&mut self, _moves: &[String], time_ms: u64) -> Option<String> {
+        let r = self.search.think(time_ms, 128, false, false, "match");
+        if r.mv == titanium::TITANIUM_NO_MOVE {
+            return None;
         }
+        Some(titanium::move_id_to_algebraic(r.mv))
     }
 
-    /// Advance incremental state by one applied move (Ace keeps its TT warm; the
-    /// Titanium seat re-syncs from the move list each `pick`, so it's a no-op).
+    /// Advance incremental state by one applied move (keeps the TT warm).
     fn observe(&mut self, alg: &str) {
-        if let Seat::Ace { search } = self {
-            search.apply_move(titanium::algebraic_to_move_id(alg));
-        }
+        self.search.apply_move(titanium::algebraic_to_move_id(alg));
     }
 }
 

@@ -3220,6 +3220,14 @@ impl TitaniumSearch {
     /// The production engine with the live deployed weights. `weights` is data,
     /// not configuration -- to run a frozen/reference net, call `build` with a
     /// different blob rather than adding a constructor.
+    /// Disable the RaceProof/certificate floor. Only for the `eval` parity
+    /// command: the floor overrides the net score on cert-eligible races, which
+    /// the Python HalfPW trainer does not model, so py<->engine parity needs it
+    /// off. Not a play-strength option.
+    pub fn set_race_proof(&mut self, on: bool) {
+        self.race_proof = on;
+    }
+
     pub fn production(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
         #[cfg(not(target_arch = "wasm32"))]
         let ceiling = crate::cat::cat_v16_lmr_ceiling_from_env();
