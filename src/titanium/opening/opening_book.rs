@@ -818,11 +818,11 @@ mod tests {
             eprintln!("skip: opening dag missing");
             return;
         }
-        let mut off = TitaniumSearch::grafted(GameState::new(), Some(18));
+        let mut off = TitaniumSearch::production(GameState::new(), Some(18));
         off.set_opening_book(OpeningBookMode::Off, Some(db.clone()));
         let r_off = off.think(50, 8, true, false, "book-test-off");
 
-        let mut on = TitaniumSearch::grafted(GameState::new(), Some(18));
+        let mut on = TitaniumSearch::production(GameState::new(), Some(18));
         on.set_opening_book(OpeningBookMode::Off, None);
         let r_on = on.think(50, 8, true, false, "book-test-off");
 

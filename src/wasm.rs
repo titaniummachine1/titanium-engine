@@ -276,7 +276,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::grafted_v17_with_ceiling(g, None, ceiling);
+        let mut search = TitaniumSearch::build(g, None, ceiling, crate::titanium::net::net());
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,
@@ -297,7 +297,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::grafted_v17_with_ceiling_and_weights(
+        let mut search = TitaniumSearch::build(
             g,
             None,
             ceiling,
@@ -323,7 +323,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::grafted_v17_with_ceiling_and_weights(
+        let mut search = TitaniumSearch::build(
             g,
             None,
             ceiling,

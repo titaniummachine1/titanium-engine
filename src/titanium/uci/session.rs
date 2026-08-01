@@ -20,7 +20,7 @@ fn reply_error(stdout: &mut io::Stdout, message: &str) {
 fn build_search(_engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
     // One engine. The label is accepted for wire compatibility but no longer
     // selects a configuration -- experiments belong on a branch, not a flag.
-    TitaniumSearch::grafted_v17(g, None)
+    TitaniumSearch::production(g, None)
 }
 
 

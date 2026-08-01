@@ -59,7 +59,7 @@ enum Reply {
 
 fn build_search(_engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
     // One engine; the label no longer selects a configuration.
-    TitaniumSearch::grafted_v17(g, None)
+    TitaniumSearch::production(g, None)
 }
 
 fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {

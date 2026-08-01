@@ -235,7 +235,7 @@ pub fn titanium_genmove(
     // One engine. The label and the ti_movegen/cat/eme params are accepted for
     // wire compatibility but no longer select a configuration -- that two-layer
     // setup let the site, the bench and the match harness diverge.
-    let mut search = TitaniumSearch::grafted_v17(g, None);
+    let mut search = TitaniumSearch::production(g, None);
     search.set_multipv(params.multipv as u32);
     search.set_root_scores(params.root_scores);
     #[cfg(not(target_arch = "wasm32"))]
@@ -292,7 +292,7 @@ pub fn reduction_counterfactual_probe(
     if g.winner() >= 0 {
         return None;
     }
-    let mut search = TitaniumSearch::grafted(g, Some(18));
+    let mut search = TitaniumSearch::production(g, Some(18));
     search.enable_reduction_probe(target_ordinal, event_limit, min_event_depth);
     let result = search.think(3_600_000, depth, true, false, "reduction-probe");
     Some((result, search.reduction_probe_events().to_vec()))
@@ -311,7 +311,7 @@ pub fn reduction_shadow_probe(
     if g.winner() >= 0 {
         return Err("terminal position".into());
     }
-    let mut search = TitaniumSearch::grafted(g, Some(18));
+    let mut search = TitaniumSearch::production(g, Some(18));
     search.enable_reduction_shadow(sidecar_path)?;
     let result = search.think(3_600_000, depth, true, false, "reduction-shadow");
     Ok((result, search.reduction_shadow_stats()))
@@ -499,7 +499,7 @@ mod tests {
         for mv in &moves {
             g.make_move(algebraic_to_move_id(mv));
         }
-        let mut baseline = TitaniumSearch::grafted(g, Some(18));
+        let mut baseline = TitaniumSearch::production(g, Some(18));
         let expected = baseline.think(3_600_000, 4, true, false, "baseline");
 
         let path = std::env::temp_dir().join(format!(

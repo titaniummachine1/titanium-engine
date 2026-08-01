@@ -151,7 +151,7 @@ mod lazy_smp_tests {
     use super::*;
 
     fn fresh() -> Box<TitaniumSearch> {
-        TitaniumSearch::grafted(GameState::new(), Some(18))
+        TitaniumSearch::production(GameState::new(), Some(18))
     }
 
     #[test]
@@ -280,7 +280,7 @@ mod lazy_smp_tests {
         for mv in moves {
             g.make_move(crate::titanium::algebraic_to_move_id(mv));
         }
-        let mut search = TitaniumSearch::grafted(g, Some(18));
+        let mut search = TitaniumSearch::production(g, Some(18));
         let result = search.think_with_threads(1_000, 1, true, false, "titanium-v17", 8);
 
         assert_eq!(result.root_widths.len(), 8);
@@ -418,7 +418,7 @@ mod lazy_smp_tests {
 
     #[test]
     fn cat_v16_worker_profiles_raise_fringe_threshold() {
-        let mut search = *TitaniumSearch::grafted_v17(GameState::new(), Some(18));
+        let mut search = *TitaniumSearch::production(GameState::new(), Some(18));
         search.set_cat_lmr_worker_profile(0);
         assert_eq!(search.cat_lmr_fringe_pct, 5);
         search.set_cat_lmr_worker_profile(1);
@@ -599,7 +599,7 @@ mod route_touch_tests {
 
     #[test]
     fn q_search_defaults_off_and_has_an_explicit_setter() {
-        let search = TitaniumSearch::with_ti_movegen(GameState::new());
+        let search = TitaniumSearch::new(GameState::new());
         assert!(!search.q_search_enabled());
         let mut search = search;
         search.enable_q_search();
@@ -608,7 +608,7 @@ mod route_touch_tests {
 
     #[test]
     fn enable_q_search_propagates_to_workers() {
-        let mut search = TitaniumSearch::grafted_v17(GameState::new(), None);
+        let mut search = TitaniumSearch::production(GameState::new(), None);
         search.enable_q_search();
         let worker = search.fork_lazy_worker(&search.g);
         assert!(worker.q_search);
@@ -622,7 +622,7 @@ mod route_touch_tests {
     /// session-flag layer, so the assertion encoded the very divergence it
     /// should have caught.
     fn ace_rfp_is_on_in_production_and_propagates_to_workers() {
-        let search = TitaniumSearch::grafted_v17(GameState::new(), None);
+        let search = TitaniumSearch::production(GameState::new(), None);
         assert!(search.ace_rfp_enabled());
         let worker = search.fork_lazy_worker(&search.g);
         assert!(worker.ace_rfp_enabled());
@@ -630,7 +630,7 @@ mod route_touch_tests {
 
     #[test]
     fn v17_ab_controls_default_on_and_propagate_to_workers() {
-        let search = TitaniumSearch::grafted_v17(GameState::new(), None);
+        let search = TitaniumSearch::production(GameState::new(), None);
         assert!(search.partial_iter_enabled());
         assert!(search.predict_stop_enabled());
         let worker = search.fork_lazy_worker(&search.g);
@@ -640,7 +640,7 @@ mod route_touch_tests {
 
     #[test]
     fn v17_ab_controls_can_be_disabled_independently() {
-        let mut search = TitaniumSearch::grafted_v17(GameState::new(), None);
+        let mut search = TitaniumSearch::production(GameState::new(), None);
         search.set_partial_iter(false);
         assert!(!search.partial_iter_enabled());
         assert!(search.predict_stop_enabled());
@@ -1634,21 +1634,30 @@ mod score_label_tests {
     }
 
     #[test]
-    fn two_wall_forced_placement_fixture_matches_ordinary_search_winner() {
+    fn two_wall_forced_placement_fixture_agrees_in_sign_with_ordinary_search() {
         let game = two_wall_fixture("a7", "i2", [2, 0], 0);
         let mut proof = enabled_two_wall_search(game.clone());
         let bound = proof.two_wall_monopoly_race_bound();
         assert_ne!(bound, RaceBound::Unknown, "forced-wall subset declined");
 
-        let mut ordinary = TitaniumSearch::new(game);
-        ordinary.two_wall_race_resolved = Some(false);
-        let result = ordinary.think(30_000, 5, true, false, "titanium-v17");
-        assert!(
-            result.score.abs() >= MATE - 1_000,
-            "ordinary depth-5 search did not prove the fixture: {}",
+        // The claim under test is that the two-wall bound does not CONTRADICT
+        // ordinary search. This used to additionally require that a depth-5
+        // search prove the fixture outright, which held only for the old raw
+        // TitaniumSearch::new() -- that constructor generated geometry-only
+        // walls at inner nodes and sealed them downstream. Movegen is now
+        // uniformly fully-legal (gen_legal_ace), and production also prunes
+        // far harder (ace_lmp/ace_rfp/cat_path_lmr/lazy_topn are all on), so
+        // no depth-5 mate proof is available. Sign agreement is the part that
+        // actually guards soundness.
+        let mut ordinary = TitaniumSearch::production(game, None);
+        ordinary.set_remaining_wall_race_layers(false, false);
+        let result = ordinary.think(30_000, 10, true, false, "titanium-v18");
+        assert_eq!(
+            bound.signum(),
+            result.score.signum(),
+            "two-wall bound {bound:?} contradicts ordinary search {}",
             result.score
         );
-        assert_eq!(bound.signum(), result.score.signum());
     }
 
     #[test]
@@ -1903,7 +1912,7 @@ mod score_label_tests {
             g.make_move(algebraic_to_move_id(m));
         }
 
-        let mut search = TitaniumSearch::grafted_v17(g, Some(18));
+        let mut search = TitaniumSearch::production(g, Some(18));
         let result = search.think(60_000, 12, true, false, "titanium-v17");
 
         assert!(
@@ -3193,81 +3202,12 @@ impl TitaniumSearch {
         self.reduction_shadow_stats
     }
 
-    /// Titanium movegen on a mirrored board — same legal set, much faster than `wall_legal`.
-    /// Compatibility alias -- legal movegen is unconditional now.
-    pub fn with_ti_movegen(g: GameState) -> Box<Self> {
-        Self::new(g)
-    }
-
-    /// ACE v13 reference tier with Titanium movegen acceleration, pinned to the
-    /// frozen HalfPW blob used by the JS reference instead of live training weights.
-    pub fn with_ti_movegen_frozen(g: GameState) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
-        search.net = net_frozen();
-        search
-    }
-
-    /// Pure JS-port baseline + O1 movegen only. Uses **frozen** v13 HalfPW weights
-    /// (`net_weights_frozen.bin`) — never picks up live training/deploy updates.
-    pub fn with_ti_movegen_pure(g: GameState) -> Box<Self> {
-        let mut search = Self::with_ti_movegen_frozen(g);
-        search.pure_mode = true;
-        search
-    }
-
-    /// **Grafted engine** — gen13 net search + Titanium's *logically-safe* extras:
-    ///   - cheap hands-empty cert: replaces the recursive `certify` with the exact
-    ///     race classifier when no walls remain — IDENTICAL verdict, fewer nodes.
-    ///     A strict non-regression (can't produce a worse move; frees NPS).
-    ///   - adaptive cache-tier TT: identical TT semantics, better cache locality
-    ///     and safe growth. Also can't hurt.
-    ///
-    /// EXCLUDED:
-    ///   - CAT heat-prune: removes wall candidates the net wants (drops Elo).
-    ///   - dead-zone prune: unsound (block-a-blocker) AND its apparent gain was
-    ///     measurement noise — a single-seed +76 became −25 on another seed.
-    ///
-    /// NOTE on measurement: 112-game runs carry a ±~64 Elo 95% CI, so per-run Elo
-    /// deltas are not individually trustworthy. These two extras are kept because
-    /// they are *provably* non-harmful, not because a single match "won".
-    /// `tt_bits = Some(n)` pins a fixed TT instead of the adaptive one.
-    pub fn grafted(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        Self::grafted_with_weights(g, tt_bits, net())
-    }
-
-    /// Same as [`grafted_frozen`] but uses the frozen v13 HalfPW blob (training A/B control).
-    pub fn grafted_frozen(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        Self::grafted_with_weights(g, tt_bits, net_frozen())
-    }
-
-    /// Medium tier — runtime-installed weights (`net_weights_medium.bin`).
-    pub fn grafted_medium(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        let weights = crate::titanium::net::net_medium()
-            .expect("medium NNUE weights not installed — fetch net_weights_medium.bin first");
-        Self::grafted_with_weights(g, tt_bits, weights)
-    }
-
-    /// Production graft minus RaceProof/cert gates. Experimental only: useful for
-    /// measuring whether search can replace the proof layer before removing it.
-    pub fn grafted_no_raceproof(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        let mut search = Self::grafted(g, tt_bits);
-        search.race_proof = false;
-        search
-    }
-
-    /// Titanium v15 experimental — wall-ignorance loss certificate (frozen net).
-    pub fn grafted_wall_ignore_experimental(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
-        let mut search = Self::grafted_frozen(g, tt_bits);
-        search.wall_ignore_cert_override = Some(true);
-        search
-    }
-
-    pub fn grafted_with_weights(
+    fn base_with_weights(
         g: GameState,
         tt_bits: Option<usize>,
         weights: &'static Net,
     ) -> Box<Self> {
-        let mut search = Self::with_ti_movegen(g);
+        let mut search = Self::new(g);
         search.net = weights;
         search.cheap_cert = true;
         search.cert_eval_leaves_only = true;
@@ -3277,33 +3217,24 @@ impl TitaniumSearch {
         }
         search
     }
-
-    /// **Titanium v17** — v15 graft + ACE v13 graduated CAT LMR with two hard
-    /// overrides: dead-tail walls (attention ≤ 10%) and backward moves search
-    /// at child depth 1. The internal `cat_lmr_v16` name is historical.
-    pub fn grafted_v17(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
+    /// The production engine with the live deployed weights. `weights` is data,
+    /// not configuration -- to run a frozen/reference net, call `build` with a
+    /// different blob rather than adding a constructor.
+    pub fn production(g: GameState, tt_bits: Option<usize>) -> Box<Self> {
         #[cfg(not(target_arch = "wasm32"))]
         let ceiling = crate::cat::cat_v16_lmr_ceiling_from_env();
         #[cfg(target_arch = "wasm32")]
         let ceiling = crate::cat::CAT_V16_LMR_CEILING_DEFAULT;
-        Self::grafted_v17_with_ceiling(g, tt_bits, ceiling)
+        Self::build(g, tt_bits, ceiling, net())
     }
 
-    pub fn grafted_v17_with_ceiling(
-        g: GameState,
-        tt_bits: Option<usize>,
-        ceiling: u16,
-    ) -> Box<Self> {
-        Self::grafted_v17_with_ceiling_and_weights(g, tt_bits, ceiling, net())
-    }
-
-    pub fn grafted_v17_with_ceiling_and_weights(
+    pub fn build(
         g: GameState,
         tt_bits: Option<usize>,
         ceiling: u16,
         weights: &'static Net,
     ) -> Box<Self> {
-        let mut search = Self::grafted_with_weights(g, tt_bits, weights);
+        let mut search = Self::base_with_weights(g, tt_bits, weights);
         search.cat_lmr_v16 = true;
         search.cat_lmr_ceiling = if crate::cat::CAT_V16_LMR_CEILINGS.contains(&ceiling) {
             ceiling

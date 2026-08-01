@@ -807,7 +807,7 @@ fn run_eval_batch() {
         for tok in line.split_whitespace() {
             g.make_move(algebraic_to_move_id(tok));
         }
-        let mut s = TitaniumSearch::grafted(g, None);
+        let mut s = TitaniumSearch::production(g, None);
         println!("{}", s.eval_dump_json());
     }
 }
@@ -913,7 +913,7 @@ fn run_eval_packed_batch() {
         .par_iter()
         .map(|(row, packed)| match titanium_game_from_packed(packed) {
             Ok(g) => {
-                let mut s = TitaniumSearch::grafted(g, None);
+                let mut s = TitaniumSearch::production(g, None);
                 s.eval_dump_json_packed(*row)
             }
             Err(err) => format!(
@@ -938,7 +938,7 @@ fn run_cat_packed_batch() {
         .par_iter()
         .map(|(row, packed)| match titanium_game_from_packed(packed) {
             Ok(g) => {
-                let s = TitaniumSearch::grafted(g, None);
+                let s = TitaniumSearch::production(g, None);
                 s.cat_dump_json_packed(*row)
             }
             Err(err) => format!(
@@ -1939,7 +1939,7 @@ impl Seat {
                     g.make_move(algebraic_to_move_id(m));
                 }
                 let search = match engine {
-                    MatchEngine::AceV13Grafted => TitaniumSearch::grafted(g, tt_bits),
+                    MatchEngine::AceV13Grafted => TitaniumSearch::production(g, tt_bits),
                     MatchEngine::AceV13GraftedFrozen => TitaniumSearch::grafted_frozen(g, tt_bits),
                     MatchEngine::AceV13GraftedNoRaceProof => {
                         TitaniumSearch::grafted_no_raceproof(g, tt_bits)
@@ -1948,7 +1948,7 @@ impl Seat {
                         TitaniumSearch::grafted_wall_ignore_experimental(g, tt_bits)
                     }
                     MatchEngine::AceV13GraftedPartial => {
-                        let mut s = TitaniumSearch::grafted(g, tt_bits);
+                        let mut s = TitaniumSearch::production(g, tt_bits);
                         s.set_partial_iter(true);
                         s
                     }

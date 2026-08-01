@@ -166,7 +166,7 @@ fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
     };
     // The one production engine — same object the site and the match harness get.
     // This used to default to `grafted()` (v15) while reporting "titanium-v17".
-    TitaniumSearch::grafted_v17_with_ceiling(g, Some(TT_BITS), 1000)
+    TitaniumSearch::build(g, Some(TT_BITS), 1000, titanium::titanium::net::net())
 }
 
 fn run_think(
