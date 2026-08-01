@@ -6754,11 +6754,6 @@ impl TitaniumSearch {
             }
         }
 
-        // Opt-in ProbCut: when the cheap static eval is already comfortably
-        // above an ordinary beta, ask a four-ply-shallower null-window search
-        // to verify the fail-high. The verification reuses this position (no
-        // make/unmake is needed), disables `allow_null` to prevent recursion,
-        // and propagates TimeUp normally. Never run this at the root/PV node.
         // null move
         if allow_null && depth >= 3 && ply > 0 {
             let ev = static_ev;
