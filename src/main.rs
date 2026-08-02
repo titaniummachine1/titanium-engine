@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use titanium::{
     both_players_reach_goals, cat_snapshot_json, format_move, generate_legal_moves,
-    genmove_algebraic, lmr_snapshot_json, perft_divide, perft_fast_anchor_baseline,
+    genmove_algebraic, perft_divide, perft_fast_anchor_baseline,
     perft_no_tt_anchor_baseline, run_search, run_session_stdio, Board, Engine, GameSearchSession,
     GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
     MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
@@ -71,8 +71,6 @@ fn main() {
         "path-scan" => run_path_scan(),
         "cat-packed-batch" => run_cat_packed_batch(),
         "score-out" => run_score_out(&args),
-        "reduction-probe" => run_reduction_probe(&args),
-        "reduction-shadow" => run_reduction_shadow(&args),
         "fields" => run_fields(&args),
         "match" => run_match(&args),
         "uci" => titanium::run_uci_stdio(),
@@ -135,118 +133,6 @@ fn print_usage() {
     println!(
         "  titanium fields [moves...] [--check]  — ASCII distance/corridor field grids + invariants"
     );
-}
-
-fn run_reduction_probe(args: &[String]) {
-    let mut depth = 5i32;
-    let mut target = None;
-    let mut limit = 64usize;
-    let mut min_event_depth = 0i32;
-    let mut moves = Vec::new();
-    let mut i = 2usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--depth" => {
-                depth = args
-                    .get(i + 1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(depth);
-                i += 2;
-            }
-            "--target" => {
-                target = args.get(i + 1).and_then(|v| v.parse().ok());
-                i += 2;
-            }
-            "--limit" => {
-                limit = args
-                    .get(i + 1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(limit);
-                i += 2;
-            }
-            "--min-event-depth" => {
-                min_event_depth = args
-                    .get(i + 1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(min_event_depth);
-                i += 2;
-            }
-            value if looks_like_algebraic_move(value) => {
-                moves.push(value.to_string());
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    let Some((result, events)) =
-        titanium::reduction_counterfactual_probe(&moves, depth, target, limit, min_event_depth)
-    else {
-        println!("{{\"schema\":\"reduction-probe-v1\",\"status\":\"terminal\"}}");
-        return;
-    };
-    for event in events {
-        let hidden = event
-            .hidden
-            .iter()
-            .map(|v| format!("{v:.9}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        println!(
-            "{{\"schema\":\"reduction-probe-event-v1\",\"ordinal\":{},\"parent_hash\":\"{:08x}{:08x}\",\"child_hash\":\"{:08x}{:08x}\",\"move\":\"{}\",\"depth\":{},\"ply\":{},\"alpha\":{},\"beta\":{},\"move_index\":{},\"base_reduction\":{},\"extra_reduction\":{},\"verification_triggered\":{},\"score\":{},\"nodes\":{},\"total_legal_moves\":{},\"history_score\":{},\"hidden\":[{}]}}",
-            event.ordinal, event.parent_hash_hi, event.parent_hash_lo,
-            event.child_hash_hi, event.child_hash_lo,
-            titanium::move_id_to_algebraic(event.mv), event.depth, event.ply,
-            event.alpha, event.beta, event.move_index, event.base_reduction,
-            event.applied_extra_reduction, event.verification_triggered,
-            event.score, event.nodes, event.total_legal_moves, event.history_score, hidden,
-        );
-    }
-    println!(
-        "{{\"schema\":\"reduction-probe-root-v1\",\"target\":{},\"bestmove\":\"{}\",\"score\":{},\"depth\":{},\"nodes\":{},\"elapsed_ms\":{}}}",
-        target.map_or_else(|| "null".to_string(), |v| v.to_string()),
-        titanium::move_id_to_algebraic(result.mv), result.score, result.depth, result.nodes,
-        result.ms,
-    );
-}
-
-fn run_reduction_shadow(args: &[String]) {
-    let mut depth = 5i32;
-    let mut sidecar = None;
-    let mut moves = Vec::new();
-    let mut i = 2usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--depth" => {
-                depth = args
-                    .get(i + 1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(depth);
-                i += 2;
-            }
-            "--sidecar" => {
-                sidecar = args.get(i + 1).map(std::path::PathBuf::from);
-                i += 2;
-            }
-            value if looks_like_algebraic_move(value) => {
-                moves.push(value.to_string());
-                i += 1;
-            }
-            _ => i += 1,
-        }
-    }
-    let Some(sidecar) = sidecar else {
-        eprintln!("reduction-shadow requires --sidecar PATH");
-        return;
-    };
-    match titanium::reduction_shadow_probe(&moves, depth, &sidecar) {
-        Ok((result, stats)) => println!(
-            "{{\"schema\":\"reduction-shadow-v1\",\"runtime_changed\":false,\"bestmove\":\"{}\",\"score\":{},\"depth\":{},\"nodes\":{},\"elapsed_ms\":{},\"evaluations\":{},\"hypothetical_activations\":{},\"inference_nanos\":{}}}",
-            titanium::move_id_to_algebraic(result.mv), result.score, result.depth,
-            result.nodes, result.ms, stats.evaluations, stats.hypothetical_activations,
-            stats.inference_nanos,
-        ),
-        Err(error) => eprintln!("reduction shadow disabled: {error}"),
-    }
 }
 
 const DEFAULT_PERFT_DEPTH: u32 = 3;

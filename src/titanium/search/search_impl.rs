@@ -9,7 +9,7 @@ use crate::titanium::dist::{
     shortest_route_bits, wall_incr_refresh_flags, width_in_layers,
 };
 use crate::titanium::{
-    is_hwall_move, is_pawn_move, is_vwall_move, is_wall_move, move_id_to_board, wall_slot,
+    is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot,
     MOVE_HW_BASE, MOVE_VW_BASE,
 };
 use crate::util::clock::{Duration, Instant};
@@ -18,13 +18,8 @@ use super::cat_index_lmr::apply_lmr_path_correction;
 use super::v16_lmr::{
     plan_v16_pawn_lmr, plan_v16_wall_lmr, V16HardOverride, ACE_LMR_AFTER_MOVE, ACE_LMR_MIN_DEPTH,
 };
-use crate::cat::prune::{
-    cat_v16_lmr_fringe_pct_for_worker, gap_play_zone_mask, get_shortest_path,
-    move_corridor_attention_with_denial, move_corridor_attention_with_path, move_impact_heat,
-    wall_in_dead_zone, wall_should_search,
-};
-use crate::cat::CorridorAttention;
-use crate::core::board::{Board, Move as BoardMove, Player, Undo, WallOrientation};
+use crate::cat::prune::{cat_v16_lmr_fringe_pct_for_worker, move_impact_heat};
+use crate::core::board::{Board, Move as BoardMove, Undo, WallOrientation};
 use crate::movegen::{
     generate_legal_moves_slice_cached, GeometricWallCache, GeometricWallCacheStats, MAX_LEGAL_MOVES,
 };
@@ -33,14 +28,13 @@ use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::titanium::certify::{certify, CertifyOpts};
 use crate::titanium::game::{GameState, ZOBRIST};
-use crate::titanium::net::{net, net_frozen, Net, MAX_NET_H, NET_BKT, NET_MIRC, NET_MIRS};
+use crate::titanium::net::{net, Net, MAX_NET_H, NET_BKT, NET_MIRC, NET_MIRS};
 use crate::titanium::packed_state::FEATURE_SCHEMA;
 use crate::titanium::race::{
     bff_tempo_margin_close, jump_aware_goal_distances, race_outcome_detailed,
     race_outcome_with_dist, solve_race_config, PlyEstimate, RaceBound, RaceOutcomeStats,
     RaceScratch, RACE_MATE, RACE_STATES, RACE_WIN_FLOOR,
 };
-use crate::titanium::reduction_sidecar::ReductionSidecar;
 use crate::util::grid::FLOOD_PLAYABLE;
 use std::collections::HashMap;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
@@ -72,17 +66,8 @@ fn tt_unpack_depth(meta: i32) -> i32 {
 }
 
 #[inline]
-fn reverse_futility_margin(
-    depth: i32,
-    improving: bool,
-    ace_rfp: bool,
-    ace_rfp_max_depth: i32,
-) -> Option<i32> {
-    if ace_rfp {
-        (depth <= ace_rfp_max_depth).then_some(100 * depth)
-    } else {
-        (depth <= 4).then_some((if improving { 70 } else { 90 }) * depth)
-    }
+fn reverse_futility_margin(depth: i32, ace_rfp_max_depth: i32) -> Option<i32> {
+    (depth <= ace_rfp_max_depth).then_some(100 * depth)
 }
 
 #[inline]
@@ -94,21 +79,6 @@ fn rfp_depth_for_budget(tc_adaptive: bool, allotted_ms: u64) -> i32 {
     }
 }
 
-/// Default CAT-index LMR tuning percent:
-/// -500 = strongest CAT-shaped cuts, 100 = current/default, 150 = full depth.
-pub const CAT_LMR_DEFAULT_TUNING_PERCENT: i32 = -177;
-
-fn cat_lmr_tuning_percent() -> i32 {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if let Ok(raw) = std::env::var("TITANIUM_CAT_LMR_TUNING_PERCENT") {
-            if let Ok(value) = raw.parse::<i32>() {
-                return value.clamp(-500, 150);
-            }
-        }
-    }
-    CAT_LMR_DEFAULT_TUNING_PERCENT
-}
 
 /// Late-move reduction plies — re-exported for LMR vision (`legacy_search::lmr_viz`).
 pub use super::v16_lmr::ace_graduated_lmr_reduction;
@@ -119,10 +89,8 @@ pub use super::v16_lmr::ace_graduated_lmr_reduction;
 const Q_SEARCH_MAX_DEFAULT: i32 = 4;
 /// Static-eval swing threshold in cp (Ka `qSwing=0.15` on a ~400cp net scale).
 const Q_SWING_CP_DEFAULT: i32 = 60;
-/// saturated wall at ~1.05M ordering score — the same neighborhood the legacy
-/// counter reaches on hot walls (and just above pawn-progress scores), so the
-/// relative ordering bands match the legacy mode and the A/B isolates the
-/// side-split/gravity/malus semantics, not a rescale of everything.
+/// Saturates wall history near 1.05M, above pawn-progress scores, so history
+/// affects wall ordering without changing the pawn progress bands.
 const SF_HIST_MAX: i32 = 1 << 20;
 
 /// Pawn progress changes ordering by 1000 points for each shortest-path step.
@@ -258,50 +226,6 @@ mod lazy_smp_tests {
         }
     }
 
-    /// Regression guard for the diagnostics-only cleanup: retained counts for
-    /// this exact 20-ply position were captured via CLI trace (`titanium
-    /// genmove --engine titanium-v17 --time 10 --threads 8`) as
-    /// [16,14,9,9,9,9,9,9]. `root_moves_before_filter` is 79 here -- that is
-    /// `root_moves_raw.len()` from `ordered_root_moves_snapshot` (already
-    /// past dead-zone/CAT-corridor root pruning upstream), NOT the naive
-    /// full-legal-move count (132, from plain `titanium moves`) which
-    /// includes moves this cleanup never had visibility into. This cleanup
-    /// touches naming, `allowed_root_moves()`, and diagnostics JSON only --
-    /// `lazy_smp_value_threshold_pct` and `lazy_smp_value_filtered_moves`
-    /// (the actual filtering logic) are untouched, so these counts must be
-    /// identical after the cleanup.
-    #[test]
-    fn root_filter_retained_counts_match_pre_cleanup_baseline_on_20ply_position() {
-        let moves = [
-            "e2", "e8", "e3", "e7", "e4", "e6", "e3h", "e6h", "c3h", "g6h", "g3h", "c6h", "a3h",
-            "e5", "h4v", "h7h", "f5v", "a6h", "e4h", "c4v",
-        ];
-        let mut g = GameState::new();
-        for mv in moves {
-            g.make_move(crate::titanium::algebraic_to_move_id(mv));
-        }
-        let mut search = TitaniumSearch::production(g, Some(18));
-        let result = search.think_with_threads(1_000, 1, true, false, "titanium-v17", 8);
-
-        assert_eq!(result.root_widths.len(), 8);
-        let counts: Vec<usize> = result
-            .root_widths
-            .iter()
-            .map(|p| p.root_move_count)
-            .collect();
-        assert_eq!(
-            counts,
-            vec![16, 14, 9, 9, 9, 9, 9, 9],
-            "retained root move counts drifted from the pre-cleanup baseline"
-        );
-        for plan in &result.root_widths {
-            assert_eq!(
-                plan.root_moves_before_filter, 79,
-                "root_moves_raw count at this position drifted"
-            );
-        }
-    }
-
     /// Every worker's threshold (from `lazy_smp_value_threshold_pct`) filters
     /// from the SAME (root_moves, heat_by_id, max_heat) inputs, only
     /// `threshold_pct` differs -- so a stricter threshold's kept set must be
@@ -374,41 +298,6 @@ mod lazy_smp_tests {
         assert_eq!(
             TitaniumSearch::lazy_smp_profile_root_moves(&(0..12).collect::<Vec<i16>>(), 4, 3, true),
             (vec![0, 1, 2], vec![0, 1, 2])
-        );
-    }
-
-    #[test]
-    fn lazy_topn_is_on_in_production_and_propagates_to_workers() {
-        let search = fresh();
-        assert!(search.lazy_topn_enabled());
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.lazy_topn_enabled());
-    }
-
-    #[test]
-    fn ace_lmp_is_on_in_production_and_propagates_to_workers() {
-        let search = fresh();
-        assert!(search.ace_lmp_enabled());
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.ace_lmp_enabled());
-    }
-
-    #[test]
-    fn lazy_topn_only_limits_last_worker_when_pool_has_three_threads() {
-        let mut search = fresh();
-        search.enable_lazy_topn();
-        let result = search.think_with_threads(100, 1, true, false, "titanium-v17-lazy-topn", 3);
-        assert_eq!(result.root_widths.len(), 3);
-        assert_eq!(result.root_widths[0].top_n_override, None);
-        assert_eq!(result.root_widths[1].top_n_override, None);
-        assert_eq!(
-            result.root_widths[2].top_n_override,
-            Some(LAZY_SMP_LAST_WORKER_TOP_N)
-        );
-        assert_eq!(result.root_widths[2].allowed_root_moves(), 3);
-        assert!(
-            result.root_visits[2].iter().copied().max().unwrap_or(0) < 3,
-            "last worker visited outside its effective top-N"
         );
     }
 
@@ -583,99 +472,29 @@ mod lazy_smp_tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod route_touch_tests {
     use super::*;
-    use crate::core::board::WallOrientation;
-
-    fn mask_with(cells: &[(u8, u8)]) -> [u8; 81] {
-        let mut m = [0u8; 81];
-        for &(r, c) in cells {
-            m[(r as usize) * 9 + c as usize] = 1;
-        }
-        m
-    }
 
     #[test]
-    fn q_search_defaults_off_and_has_an_explicit_setter() {
-        let search = TitaniumSearch::new(GameState::new());
-        assert!(!search.q_search_enabled());
-        let mut search = search;
-        search.enable_q_search();
-        assert!(search.q_search_enabled());
-    }
-
-    #[test]
-    fn enable_q_search_propagates_to_workers() {
-        let mut search = TitaniumSearch::production(GameState::new(), None);
-        search.enable_q_search();
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.q_search);
-        assert_eq!(worker.q_max, Q_SEARCH_MAX_DEFAULT);
-    }
-
-    #[test]
-    /// ace_rfp is part of the production feature set and propagates to LazySMP
-    /// workers. This used to assert it defaulted *off* -- true of the bare
-    /// constructor, but production switched it on out-of-band through the
-    /// session-flag layer, so the assertion encoded the very divergence it
-    /// should have caught.
-    fn ace_rfp_is_on_in_production_and_propagates_to_workers() {
-        let search = TitaniumSearch::production(GameState::new(), None);
-        assert!(search.ace_rfp_enabled());
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.ace_rfp_enabled());
-    }
-
-    #[test]
-    fn v17_ab_controls_default_on_and_propagate_to_workers() {
-        let search = TitaniumSearch::production(GameState::new(), None);
-        assert!(search.partial_iter_enabled());
-        assert!(search.predict_stop_enabled());
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(worker.partial_iter_enabled());
-        assert!(worker.predict_stop_enabled());
-    }
-
-    #[test]
-    fn v17_ab_controls_can_be_disabled_independently() {
-        let mut search = TitaniumSearch::production(GameState::new(), None);
-        search.set_partial_iter(false);
-        assert!(!search.partial_iter_enabled());
-        assert!(search.predict_stop_enabled());
-        search.set_predict_stop(false);
-        assert!(!search.partial_iter_enabled());
-        assert!(!search.predict_stop_enabled());
-        let worker = search.fork_lazy_worker(&search.g);
-        assert!(!worker.partial_iter_enabled());
-        assert!(!worker.predict_stop_enabled());
-    }
-
-    #[test]
-    fn rfp_margin_preserves_v17_and_uses_ace_candidate_only_when_enabled() {
-        assert_eq!(reverse_futility_margin(3, true, false, 3), Some(210));
-        assert_eq!(reverse_futility_margin(4, false, false, 3), Some(360));
-        assert_eq!(reverse_futility_margin(4, true, true, 3), None);
-        assert_eq!(reverse_futility_margin(3, false, true, 3), Some(300));
-        assert_eq!(reverse_futility_margin(4, true, true, 4), Some(400));
+    fn rfp_margin_uses_the_production_schedule() {
+        assert_eq!(reverse_futility_margin(3, 3), Some(300));
+        assert_eq!(reverse_futility_margin(4, 3), None);
+        assert_eq!(reverse_futility_margin(4, 4), Some(400));
         assert_eq!(rfp_depth_for_budget(true, 200), 4);
         assert_eq!(rfp_depth_for_budget(true, 201), 3);
         assert_eq!(rfp_depth_for_budget(false, 100), 3);
     }
 }
 
-/// Production: 21-bit f32 (~32MB table at 16B/entry). Feature `eval_cache_baseline`
-/// keeps the pre-B+C 21-bit f64 path for A/B benches only. wasm stays 16 bits.
+/// 21-bit f32 (~32MB table at 16B/entry) on native targets.
 #[cfg(not(target_arch = "wasm32"))]
 const EVAL_CACHE_BITS: usize = 21;
 #[cfg(target_arch = "wasm32")]
 const EVAL_CACHE_BITS: usize = 16;
 const EVAL_CACHE_SIZE: usize = 1 << EVAL_CACHE_BITS;
 
-/// Static-eval cache entry. Baseline feature uses f64; production uses f32.
+/// Static-eval cache entry.
 #[derive(Clone, Copy)]
 struct EvalCacheEntry {
     key: u64,
-    #[cfg(feature = "eval_cache_baseline")]
-    val: f64,
-    #[cfg(not(feature = "eval_cache_baseline"))]
     val: f32,
     /// wl0<<8|wl1 verify tag; u16::MAX = empty slot.
     meta: u16,
@@ -694,9 +513,8 @@ impl Default for EvalCacheEntry {
 /// Wall-topology → goal-distance-fields cache (both players). Sibling walls and
 /// iterative-deepening re-searches revisit the same topologies constantly; a hit
 /// turns a two-sided BFS reflood into a short memcpy. Inline layers are
-/// `[u128; DIST_LAYER_INLINE]` per side (entry size depends on inline capacity;
-/// `dist_layers_full81` uses full 81); depths beyond that spill
-/// to a freelist pool (≈99.96% of stores fit inline).
+/// `[u128; DIST_LAYER_INLINE]` per side; depths beyond that spill to a freelist
+/// pool (≈99.96% of stores fit inline).
 ///
 /// Adaptive sizing mirrors the TT strategy (`enable_adaptive_tt`/`tt_grow`):
 /// start small so short searches never pay allocation/zeroing for a table they
@@ -722,15 +540,8 @@ const DIST_LRU_MIN_BITS: usize = 7;
 const DIST_LRU_MAX_BITS: usize = 10;
 
 /// Inline layer capacity in each DistTopoEntry. Working ply arrays stay
-/// `[u128; 81]`; only the cache entry shrinks. Default 16 covers 99.96% ≤16.
-/// Features (A/B only, not production):
-/// - `dist_layers_full81` → 81
-/// - `dist_layers_inline12` → 12 (~98% ≤12; cache-line probe)
-#[cfg(feature = "dist_layers_full81")]
-const DIST_LAYER_INLINE: usize = 81;
-#[cfg(all(not(feature = "dist_layers_full81"), feature = "dist_layers_inline12"))]
-const DIST_LAYER_INLINE: usize = 12;
-#[cfg(all(not(feature = "dist_layers_full81"), not(feature = "dist_layers_inline12")))]
+/// `[u128; 81]`; only the cache entry shrinks. The production capacity covers
+/// 99.96% of stores without using the spill pool.
 const DIST_LAYER_INLINE: usize = 16;
 
 /// Heap tails for rare DistTopoEntry depths beyond [`DIST_LAYER_INLINE`].
@@ -863,18 +674,6 @@ const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 
-// Root-move width percent per worker. Reverted from the "narrow-first"
-// schedule (worker 0 at just 10%, commit 3daf94c) -- that left main's
-// iterative deepening authoritative over only its top ~10% of root moves by
-// initial move-ordering guess, so a deep, confident-looking main search could
-// be completely blind to the true best move whenever ordering ranked it
-// outside that slice. Main now keeps almost the full root (95%, leaving a
-// small margin to skip only moves ordering is very confident are losing);
-// helpers narrow progressively for deeper per-move lookahead, floored at 40%
-// (not 20%) since helper results only ever matter as an emergency fallback
-// when main produces nothing (see lazy_smp_helper_partial).
-const LAZY_SMP_WIDTHS: [usize; 4] = [95, 80, 80, 80];
-
 // The very last worker (worker_id == threads - 1, when there are at least 3
 // threads so it's a distinct role from main and the uniform-80% helpers)
 // skips the percentage schedule entirely and searches only this many
@@ -926,14 +725,9 @@ impl WorkerPlan {
     }
 }
 
-// EXPERIMENT (not the shipped schedule): per-worker root-move cutoff by CAT
-// impact-heat VALUE relative to the best root move's heat, not by move count.
-// A move survives worker `w` iff heat(move) >= pct[w]% * max(heat(any root
-// move)). This is a genuinely different criterion than LAZY_SMP_WIDTHS: in a
-// position with one dominant move it collapses hard (real tail-cut); in a
-// flat position where many moves are nearly as good it keeps most of them,
-// regardless of raw count. main=20% (only drop clearly-useless tail moves),
-// then progressively stricter per worker, floored at 40%.
+// Per-worker root-move cutoff by CAT impact heat relative to the best root
+// move's heat, not by move count. Main=20% (only drop clearly-useless tail
+// moves), then progressively stricter per worker, floored at 40%.
 const LAZY_SMP_VALUE_THRESHOLD_PCTS: [i32; 4] = [20, 30, 40, 40];
 
 fn lazy_smp_value_threshold_pct(worker_id: usize) -> i32 {
@@ -1316,46 +1110,6 @@ pub struct ThinkResult {
     pub timing: TimingDiag,
 }
 
-/// One complete late-move pipeline observation. These records are emitted only
-/// by the offline counterfactual collector; production search leaves probing off.
-#[derive(Debug, Clone)]
-pub struct ReductionProbeEvent {
-    pub ordinal: u64,
-    pub parent_hash_lo: u32,
-    pub parent_hash_hi: u32,
-    pub child_hash_lo: u32,
-    pub child_hash_hi: u32,
-    pub mv: i16,
-    pub depth: i32,
-    pub ply: usize,
-    pub alpha: i32,
-    pub beta: i32,
-    pub move_index: usize,
-    pub base_reduction: i32,
-    pub applied_extra_reduction: bool,
-    pub verification_triggered: bool,
-    pub self_gain: i32,
-    pub opponent_delay: i32,
-    pub race_gain: i32,
-    pub path_adjustment: i32,
-    pub final_reduction: i32,
-    pub thread_aggression_percent: i32,
-    pub score: i32,
-    pub nodes: u64,
-    pub hidden: [f64; MAX_NET_H],
-    /// Total legal moves generated at this node (enables rank_percentile computation).
-    pub total_legal_moves: usize,
-    /// Raw history-table score for this wall move (proxy for ordering confidence).
-    pub history_score: i32,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ReductionShadowStats {
-    pub evaluations: u64,
-    pub hypothetical_activations: u64,
-    pub inference_nanos: u64,
-}
-
 pub fn score_label(score: i32) -> String {
     let abs = score.abs();
     if abs >= MATE - 1_000 {
@@ -1573,7 +1327,6 @@ mod score_label_tests {
 
     fn enabled_two_wall_search(game: GameState) -> Box<TitaniumSearch> {
         let mut search = TitaniumSearch::new(game);
-        search.two_wall_race_resolved = Some(true);
         search.rp_build_ok = true;
         search.rc_count_cap = u32::MAX;
         search.rc_solve_cap = f64::INFINITY;
@@ -1582,10 +1335,7 @@ mod score_label_tests {
     }
 
     fn enabled_one_wall_search(game: GameState) -> Box<TitaniumSearch> {
-        let mut search = enabled_two_wall_search(game);
-        search.one_wall_race_resolved = Some(true);
-        search.two_wall_race_resolved = Some(false);
-        search
+        enabled_two_wall_search(game)
     }
 
     #[test]
@@ -1607,15 +1357,6 @@ mod score_label_tests {
         let game = two_wall_fixture("a2", "i5", [1, 0], 0);
         let mut search = enabled_one_wall_search(game);
         assert_eq!(search.one_wall_race_bound(), RaceBound::Unknown);
-    }
-
-    #[test]
-    fn two_wall_subset_is_default_off() {
-        let game = two_wall_fixture("a7", "i4", [2, 0], 0);
-        let mut search = TitaniumSearch::new(game);
-        search.two_wall_race_resolved = Some(false);
-        assert_eq!(search.two_wall_monopoly_race_bound(), RaceBound::Unknown);
-        assert_eq!(search.race_outcome_stats.two_wall_calls, 0);
     }
 
     #[test]
@@ -1641,12 +1382,10 @@ mod score_label_tests {
         // search prove the fixture outright, which held only for the old raw
         // TitaniumSearch::new() -- that constructor generated geometry-only
         // walls at inner nodes and sealed them downstream. Movegen is now
-        // uniformly fully-legal (gen_legal_ace), and production also prunes
-        // far harder (ace_lmp/ace_rfp/cat_path_lmr/lazy_topn are all on), so
-        // no depth-5 mate proof is available. Sign agreement is the part that
-        // actually guards soundness.
+        // uniformly fully-legal (gen_legal_ace), and production prunes more
+        // aggressively than the original baseline, so no depth-5 mate proof
+        // is available. Sign agreement is the part that guards soundness.
         let mut ordinary = TitaniumSearch::production(game, None);
-        ordinary.set_remaining_wall_race_layers(false, false);
         let result = ordinary.think(30_000, 10, true, false, "titanium-v18");
         assert_eq!(
             bound.signum(),
@@ -1789,7 +1528,6 @@ mod score_label_tests {
                 }
 
                 let mut ordinary = TitaniumSearch::new(game);
-                ordinary.two_wall_race_resolved = Some(false);
                 let result = ordinary.think(30_000, 8, true, false, "titanium-v17");
                 if result.score.abs() < MATE - 1_000 {
                     ordinary_unresolved += 1;
@@ -1807,44 +1545,6 @@ mod score_label_tests {
         eprintln!(
             "two-wall counter-oracle: {checked} independently proven states, 0 mismatches, {ordinary_unresolved} ordinary-search unknown"
         );
-    }
-
-    #[test]
-    #[ignore = "diagnostic performance comparison: explicit release invocation"]
-    fn two_wall_subset_ab_measurement() {
-        let fixtures = [
-            ("pure-win", two_wall_fixture("a7", "i4", [2, 0], 0), 8),
-            ("forced-wall", two_wall_fixture("a7", "i2", [2, 0], 0), 7),
-            ("reversed", two_wall_fixture("a8", "i3", [0, 2], 1), 7),
-        ];
-        for (name, game, depth) in fixtures {
-            let mut baseline = TitaniumSearch::new(game.clone());
-            baseline.two_wall_race_resolved = Some(false);
-            let t0 = Instant::now();
-            let baseline_result = baseline.think(30_000, depth, true, false, "titanium-v17");
-            let baseline_ms = t0.elapsed().as_millis();
-
-            let mut candidate = TitaniumSearch::new(game);
-            candidate.two_wall_race_resolved = Some(true);
-            let t1 = Instant::now();
-            let candidate_result = candidate.think(30_000, depth, true, false, "titanium-v17");
-            let candidate_ms = t1.elapsed().as_millis();
-
-            assert_eq!(
-                baseline_result.score.signum(),
-                candidate_result.score.signum()
-            );
-            eprintln!(
-                "two-wall AB {name}: depth={depth} baseline nodes={} ms={} candidate nodes={} ms={} calls={} decisive={} unknown={}",
-                baseline_result.nodes,
-                baseline_ms,
-                candidate_result.nodes,
-                candidate_ms,
-                candidate_result.race_outcome_stats.two_wall_calls,
-                candidate_result.race_outcome_stats.two_wall_decisive,
-                candidate_result.race_outcome_stats.two_wall_unknown,
-            );
-        }
     }
 
     #[test]
@@ -1875,19 +1575,6 @@ mod score_label_tests {
         let faster_with_worst_history = 1_000_000 - 5 * 1000 - 499;
         let slower_with_best_history = 1_000_000 - 6 * 1000 + 499;
         assert!(faster_with_worst_history > slower_with_best_history);
-    }
-
-    #[test]
-    fn sf_history_switch_reads_pawn_destination_from_the_selected_table() {
-        let mut search = TitaniumSearch::new(crate::titanium::game::GameState::new());
-        let pawn_destination = 42i16;
-        let pawn_hist = pawn_destination as usize;
-        search.history_tbl[pawn_hist] = 17;
-        search.hist_sf[0][pawn_hist] = -29;
-
-        assert_eq!(search.move_hist(0, pawn_destination), 17);
-        search.set_sf_history(true);
-        assert_eq!(search.move_hist(0, pawn_destination), -29);
     }
 
     #[test]
@@ -2503,22 +2190,10 @@ pub struct TitaniumSearch {
     sub_min: [i32; MAX_PLY],
     sub_anc_lo: [u32; MAX_PLY],
     sub_anc_hi: [u32; MAX_PLY],
-    history_tbl: [i32; HIST_SPAN],
+    /// Side-split gravity history for full-action ordering and pruning.
+    hist_sf: [[i32; HIST_SPAN]; 2],
     cm: [i16; HIST_SPAN], // countermove table, indexed by dense history code
     killers: [[i16; 2]; MAX_PLY],
-    /// Stockfish-style history experiment (A/B flag, default off): side-split
-    /// `[stm][move]` full-action history updated with the gravity formula
-    /// (`h += bonus − h·|bonus|/MAX`, self-saturating) plus MALUSES — every
-    /// action searched before the beta cutoff at a node gets the negative bonus,
-    /// so ordering mistakes are demoted instead of keeping stale credit.
-    /// When on, replaces `history_tbl` for full-action ordering reads (and wall
-    /// pruning reads);
-    /// `history_tbl` itself keeps updating unchanged so this stays a pure
-    /// read-side experiment (single-axis A/B, same decay policy both modes).
-    sf_history: bool,
-    /// Conservative reduced-depth fail-high verification. Off by default and
-    /// exposed only as an explicit A/B experiment.
-    hist_sf: [[i32; HIST_SPAN]; 2],
     /// SF batch 2 (branch build, unconditional): corrected static eval per
     /// ply, for the `improving` flag (i32::MIN = never written).
     eval_stack: [i32; MAX_PLY],
@@ -2532,16 +2207,6 @@ pub struct TitaniumSearch {
     /// `cm` table keeps only the single best reply, this keeps a full score
     /// surface). Heap Vec: HIST_SPAN*HIST_SPAN*4B = 256KiB.
     cont_hist: Vec<i32>,
-    // Offline-only LMR counterfactual probe. A target ordinal receives exactly
-    // one provisional extra reduction; verification always uses native depth.
-    reduction_probe_enabled: bool,
-    reduction_probe_target: Option<u64>,
-    reduction_probe_next: u64,
-    reduction_probe_limit: usize,
-    reduction_probe_min_depth: i32,
-    reduction_probe_events: Vec<ReductionProbeEvent>,
-    reduction_sidecar: Option<ReductionSidecar>,
-    reduction_shadow_stats: ReductionShadowStats,
     path_lo: [u32; MAX_PLY],
     path_hi: [u32; MAX_PLY],
     d0: [[u8; 81]; MAX_PLY],
@@ -2579,7 +2244,7 @@ pub struct TitaniumSearch {
     dist0_idx: usize, // active ply slot in d0 (JS: this.dist0 array ref)
     dist1_idx: usize,
     cached_stamp: i32,
-    /// After `cat_path_lmr` refresh at `ply+1`, child `ab(ply+1)` may reuse it.
+    /// After a CAT path refresh at `ply+1`, child `ab(ply+1)` may reuse it.
     pending_cat_child_ply: Option<usize>,
     ab_after_cat_child: bool,
     dir_masks_key_lo: u32,
@@ -2601,34 +2266,11 @@ pub struct TitaniumSearch {
     cat_lmr_v16: bool,
     cat_lmr_ceiling: u16,
     cat_lmr_fringe_pct: u16,
-    /// Experimental: small ordering bonus for walls touching either
-    /// player's shortest-route cell set (see ROUTE_TOUCH_ORDER_BONUS).
-    /// Off by default; only takes effect alongside cat_lmr_v16.
-    /// Opt-in CAT path-aware correction for the wall-LMR branch only. The
-    /// correction can only reduce v16's existing reduction by one ply.
-    cat_path_lmr: bool,
-    /// Skip CAT `refresh_dist` when the wall cuts neither shortest-path edge.
-    /// Enabled with `cat_path_lmr` on v17 after oracle + parity validation.
-    cat_no_edge_skip: bool,
     /// Ka-AB-style horizon quiescence: extend one ply at depth<=0 when a wall
-    /// fight or jump race is tactically noisy. Off by default.
-    q_search: bool,
+    /// fight or jump race is tactically noisy.
     q_max: i32,
     q_swing_cp: i32,
-    /// Opt-in Lazy SMP role for the last worker: search only the true top-N
-    /// ordered root moves. Off preserves the v17 worker schedule exactly.
-    lazy_topn: bool,
-    /// Opt-in ACE-style frontier LMP candidate. Off preserves the v17
-    /// depth<=2/index-threshold policy exactly.
-    ace_lmp: bool,
-    /// Predictive iterative-deepening stop before starting a depth that is
-    /// unlikely to fit the remaining time budget.
-    use_predict_stop: bool,
-    /// Opt-in ACE-style reverse futility pruning candidate. When enabled, RFP
-    /// is limited to depth <= 3 with a fixed 100 cp/depth margin.
-    ace_rfp: bool,
-    /// At roots allotted at most 200 ms, allow the ACE RFP rule at depth four
-    /// on null-window nodes. Fixed-depth and longer searches remain depth three.
+    /// Predictive iterative-deepening stop budget.
     ace_rfp_max_depth: i32,
     /// SOUND dead-zone wall prune at inner nodes (requires `bridge`): drop only
     /// walls in an unreachable void / sealed interior — provably irrelevant (they
@@ -2643,34 +2285,13 @@ pub struct TitaniumSearch {
     /// leaves with both hands empty. Inner nodes use the HalfPW net (search
     /// + EME resolve tempo ambiguity). Set in [`Self::grafted_with_weights`].
     cert_eval_leaves_only: bool,
-    /// Override for experimental wall-ignorance certificate (`None` = env only).
-    wall_ignore_cert_override: Option<bool>,
-    /// Lazy per-instance cache of the resolved override-or-env decision (`None`
-    /// = not yet resolved). `std::env::var` is a heap-allocating, lock-adjacent
-    /// syscall — reading it on every `evaluate_tail` call (once per node where
-    /// walls remain) measured as a flat ~400ns/call tax, independent of
-    /// position. Env vars don't change mid-process for this flag in any real
-    /// caller, so resolving once per instance is safe; `wall_ignore_loss_cert_enabled()`
-    /// itself is left untouched (other callers, e.g. the alphabeta.rs test that
-    /// toggles this env var at runtime, keep reading it fresh).
+    /// Cached wall-ignorance certificate decision.
     wall_ignore_cert_resolved: Option<bool>,
-    /// Cached `TITANIUM_RACE_ONE_WALL` decision.
-    one_wall_race_resolved: Option<bool>,
-    /// Restrict the one-wall proof to PV/full-window nodes.
-    /// Cached `TITANIUM_RACE_TWO_WALL` decision. The experiment is deliberately
-    /// default-off until its proof audit and strength gate both pass.
-    two_wall_race_resolved: Option<bool>,
-    /// Restrict the optional two-wall proof to PV/full-window nodes. Race1
-    /// remains available throughout the tree.
-    two_wall_race_pv_only: bool,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     pub nodes: u64,
     deadline: Instant,
     root_best: i16,
     root_score: i32,
-    /// Lague partial-iteration: on time-abort, adopt the best FULLY-searched
-    /// root move from the unfinished deepest iteration instead of discarding it.
-    use_partial_iter: bool,
     /// Pure-JS-port mode: disables all Rust-side state-retention extras
     /// (gen TT, history aging, dynamic ID startup, accumulator retention).
     /// Use with `ti_movegen=true` as the fair baseline opponent.
@@ -2861,25 +2482,12 @@ impl TitaniumSearch {
             sub_min: [MAX_PLY as i32; MAX_PLY],
             sub_anc_lo: [0; MAX_PLY],
             sub_anc_hi: [0; MAX_PLY],
-            history_tbl: [0; HIST_SPAN],
-            cm: [0; HIST_SPAN],
-            // Stockfish-style history is an explicit A/B experiment. Production
-            // Titanium stays on the legacy history table unless a caller enables
-            // the experiment with `set_sf_history(true)`.
-            sf_history: false,
             hist_sf: [[0; HIST_SPAN]; 2],
+            cm: [0; HIST_SPAN],
             eval_stack: [i32::MIN; MAX_PLY],
             corr_hist: [[0; CORR_SIZE]; 2],
             cont_hist: vec![0; HIST_SPAN * HIST_SPAN],
             killers: [[0; 2]; MAX_PLY],
-            reduction_probe_enabled: false,
-            reduction_probe_target: None,
-            reduction_probe_next: 0,
-            reduction_probe_limit: 0,
-            reduction_probe_min_depth: 0,
-            reduction_probe_events: Vec::new(),
-            reduction_sidecar: None,
-            reduction_shadow_stats: ReductionShadowStats::default(),
             path_lo: [0; MAX_PLY],
             path_hi: [0; MAX_PLY],
             d0: [[0; 81]; MAX_PLY],
@@ -2916,28 +2524,16 @@ impl TitaniumSearch {
             cat_lmr_v16: false,
             cat_lmr_ceiling: crate::cat::CAT_V16_LMR_CEILING_DEFAULT,
             cat_lmr_fringe_pct: crate::cat::CAT_V16_FRINGE_PCT_DEFAULT,
-            cat_path_lmr: false,
-            cat_no_edge_skip: false,
-            q_search: false,
             q_max: Q_SEARCH_MAX_DEFAULT,
             q_swing_cp: Q_SWING_CP_DEFAULT,
-            lazy_topn: false,
-            ace_lmp: false,
-            use_predict_stop: true,
-            ace_rfp: false,
             ace_rfp_max_depth: 3,
             cheap_cert: false,
             cert_eval_leaves_only: false,
-            wall_ignore_cert_override: None,
             wall_ignore_cert_resolved: None,
-            one_wall_race_resolved: None,
-            two_wall_race_resolved: None,
-            two_wall_race_pv_only: false,
             nodes: 0,
             deadline: Instant::now(),
             root_best: crate::titanium::TITANIUM_NO_MOVE,
             root_score: 0,
-            use_partial_iter: true,
             pure_mode: false,
             is_pondering: false,
             race_proof: true,
@@ -3038,44 +2634,6 @@ impl TitaniumSearch {
         std::mem::take(&mut self.wasm_progress)
     }
 
-    pub fn enable_cat_path_lmr(&mut self) {
-        self.cat_path_lmr = true;
-    }
-
-    pub fn enable_cat_no_edge_skip(&mut self) {
-        self.cat_no_edge_skip = true;
-    }
-
-    pub fn cat_no_edge_skip_enabled(&self) -> bool {
-        self.cat_no_edge_skip
-    }
-
-    pub fn cat_path_lmr_enabled(&self) -> bool {
-        self.cat_path_lmr
-    }
-
-    /// Enable bounded horizon quiescence (wall-fight / jump-race extensions).
-    pub fn enable_q_search(&mut self) {
-        self.q_search = true;
-        self.q_max = Q_SEARCH_MAX_DEFAULT;
-        self.q_swing_cp = Q_SWING_CP_DEFAULT;
-    }
-    pub fn q_search_enabled(&self) -> bool {
-        self.q_search
-    }
-
-    pub fn enable_lazy_topn(&mut self) {
-        self.lazy_topn = true;
-    }
-
-    pub fn lazy_topn_enabled(&self) -> bool {
-        self.lazy_topn
-    }
-
-    pub fn set_ace_lmp(&mut self, on: bool) {
-        self.ace_lmp = on;
-    }
-
     /// Report top-N root moves by score in progress JSON. When `> 1`, root moves
     /// are searched with an open window so scores are comparable.
     pub fn set_multipv(&mut self, n: u32) {
@@ -3093,39 +2651,6 @@ impl TitaniumSearch {
 
     pub fn root_scores_enabled(&self) -> bool {
         self.root_scores
-    }
-
-    pub fn ace_lmp_enabled(&self) -> bool {
-        self.ace_lmp
-    }
-
-    pub fn set_ace_rfp(&mut self, on: bool) {
-        self.ace_rfp = on;
-    }
-    /// Select the proven remaining-wall race layers used by an engine variant.
-    pub fn set_remaining_wall_race_layers(&mut self, one_wall: bool, two_wall: bool) {
-        self.one_wall_race_resolved = Some(one_wall);
-        self.two_wall_race_resolved = Some(two_wall);
-    }
-
-    pub fn set_two_wall_race_pv_only(&mut self, on: bool) {
-        self.two_wall_race_pv_only = on;
-    }
-    #[cfg(test)]
-    pub fn remaining_wall_race_layers(&self) -> (bool, bool) {
-        (
-            self.one_wall_race_resolved.unwrap_or(false),
-            self.two_wall_race_resolved.unwrap_or(false),
-        )
-    }
-
-    #[cfg(test)]
-    pub fn two_wall_race_pv_only(&self) -> bool {
-        self.two_wall_race_pv_only
-    }
-
-    pub fn ace_rfp_enabled(&self) -> bool {
-        self.ace_rfp
     }
 
     pub fn set_opening_book(
@@ -3168,34 +2693,6 @@ impl TitaniumSearch {
             self.opening_book_attention = Some(consult.order_attention);
         }
         consult.direct_play
-    }
-
-    /// Enable offline observation of complete native LMR move pipelines.
-    /// `target=None` records baseline events; `Some(n)` applies +1 only to event n.
-    /// `min_depth` skips events at local depth < min_depth so shallow-tree events
-    /// (which dominate post-order traversal) do not fill the limit before useful ones.
-    pub fn enable_reduction_probe(&mut self, target: Option<u64>, limit: usize, min_depth: i32) {
-        self.reduction_probe_enabled = true;
-        self.reduction_probe_target = target;
-        self.reduction_probe_next = 0;
-        self.reduction_probe_limit = limit;
-        self.reduction_probe_min_depth = min_depth;
-        self.reduction_probe_events.clear();
-    }
-
-    pub fn reduction_probe_events(&self) -> &[ReductionProbeEvent] {
-        &self.reduction_probe_events
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn enable_reduction_shadow(&mut self, path: &std::path::Path) -> Result<(), String> {
-        self.reduction_sidecar = Some(ReductionSidecar::load(path)?);
-        self.reduction_shadow_stats = ReductionShadowStats::default();
-        Ok(())
-    }
-
-    pub fn reduction_shadow_stats(&self) -> ReductionShadowStats {
-        self.reduction_shadow_stats
     }
 
     fn base_with_weights(
@@ -3245,20 +2742,6 @@ impl TitaniumSearch {
         } else {
             crate::cat::CAT_V16_LMR_CEILING_DEFAULT
         };
-        // The production feature set, previously applied out-of-band by
-        // `apply_session_experiment_flags("titanium-v18")`. Constructing it here
-        // makes the site, the bench and the match harness the same engine by
-        // construction — they used to diverge by ~1.8x node count because only
-        // the session path switched these on.
-        search.set_sf_history(true);
-        search.enable_q_search();
-        search.enable_cat_path_lmr();
-        search.enable_cat_no_edge_skip();
-        search.enable_lazy_topn();
-        search.set_ace_lmp(true);
-        search.set_ace_rfp(true);
-        search.set_remaining_wall_race_layers(true, true);
-        search.set_two_wall_race_pv_only(true);
         search
     }
 
@@ -3385,9 +2868,6 @@ impl TitaniumSearch {
     pub fn decay_history_by_surprise(&mut self, prior_score: i32) {
         let surprise = (prior_score - self.root_score).abs() as f32;
         let decay = 1.0 / (1.0 + surprise / 200.0);
-        for h in self.history_tbl.iter_mut() {
-            *h = (*h as f32 * decay) as i32;
-        }
         for side in self.hist_sf.iter_mut() {
             for h in side.iter_mut() {
                 *h = (*h as f32 * decay) as i32;
@@ -3398,27 +2878,11 @@ impl TitaniumSearch {
         }
     }
 
-    /// Enable the Stockfish-style history experiment (side-split + gravity +
-    /// maluses). Off by default; A/B-gated via the match harness before any
-    /// default flip — see the `hist_sf` field docs.
-    pub fn set_sf_history(&mut self, on: bool) {
-        self.sf_history = on;
-    }
-
-    pub fn sf_history_enabled(&self) -> bool {
-        self.sf_history
-    }
-
-    /// Full-action history as seen by ordering/pruning: the side-split gravity
-    /// table when the SF-history experiment is on, the legacy shared counter
-    /// otherwise. Pawn destinations already occupy valid move IDs.
+    /// Full-action history as seen by ordering and pruning. Pawn destinations
+    /// already occupy valid move IDs.
     #[inline]
     fn move_hist(&self, stm: usize, m: i16) -> i32 {
-        if self.sf_history {
-            self.hist_sf[stm][m as usize]
-        } else {
-            self.history_tbl[m as usize]
-        }
+        self.hist_sf[stm][m as usize]
     }
 
     /// Gravity update: `h += bonus − h·|bonus|/MAX`. Saturates at ±MAX with no
@@ -3478,25 +2942,6 @@ impl TitaniumSearch {
         self.evaluate(0)
     }
 
-    /// Enable Lague partial-iteration (keep the best fully-searched move from a
-    /// time-aborted deepest iteration). Off by default; A/B-measured before adoption.
-    pub fn set_partial_iter(&mut self, on: bool) {
-        self.use_partial_iter = on;
-    }
-
-    pub fn partial_iter_enabled(&self) -> bool {
-        self.use_partial_iter
-    }
-
-    /// Enable or disable the predictive iterative-deepening stop.
-    pub fn set_predict_stop(&mut self, on: bool) {
-        self.use_predict_stop = on;
-    }
-
-    pub fn predict_stop_enabled(&self) -> bool {
-        self.use_predict_stop
-    }
-
     /// Enter/exit ponder mode. While pondering, `think()` skips the tt_gen
     /// advance and history decay so all ponder chunks build on each other
     /// rather than aging their own work.  Call with `false` before the real
@@ -3514,25 +2959,12 @@ impl TitaniumSearch {
     }
 
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-    fn lazy_smp_width_percent(worker_id: usize) -> usize {
-        LAZY_SMP_WIDTHS
-            .get(worker_id)
-            .copied()
-            .unwrap_or(*LAZY_SMP_WIDTHS.last().expect("width schedule is non-empty"))
-    }
-
-    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     fn apply_think_start_state(&mut self) {
         if !self.pure_mode && !self.is_pondering {
             self.tt_gen = self.tt_gen.wrapping_add(1);
-            for h in self.history_tbl.iter_mut() {
-                *h >>= 1;
-            }
-            // Same aging policy for the SF-history experiment tables (`/ 2`,
-            // not `>>`: arithmetic shift would pin negative entries at -1
-            // forever instead of converging to 0). Correction history is NOT
-            // aged — eval bias per wall structure is slow-moving knowledge,
-            // not a tactical pattern (SF also persists it across moves).
+            // Arithmetic division lets negative history entries converge to zero.
+            // Correction history is not aged: eval bias per wall structure is
+            // slow-moving knowledge rather than a tactical pattern.
             for side in self.hist_sf.iter_mut() {
                 for h in side.iter_mut() {
                     *h /= 2;
@@ -3635,8 +3067,6 @@ impl TitaniumSearch {
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     fn fork_lazy_worker(&self, root: &GameState) -> Box<Self> {
         let mut worker = Self::new(root.clone());
-        worker.history_tbl = self.history_tbl;
-        worker.sf_history = self.sf_history;
         worker.hist_sf = self.hist_sf;
         worker.corr_hist = self.corr_hist;
         worker.cont_hist = self.cont_hist.clone();
@@ -3646,23 +3076,12 @@ impl TitaniumSearch {
         worker.cat_lmr_v16 = self.cat_lmr_v16;
         worker.cat_lmr_ceiling = self.cat_lmr_ceiling;
         worker.cat_lmr_fringe_pct = self.cat_lmr_fringe_pct;
-        worker.cat_path_lmr = self.cat_path_lmr;
-        worker.cat_no_edge_skip = self.cat_no_edge_skip;
-        worker.q_search = self.q_search;
         worker.q_max = self.q_max;
         worker.q_swing_cp = self.q_swing_cp;
-        worker.lazy_topn = self.lazy_topn;
-        worker.ace_lmp = self.ace_lmp;
-        worker.use_predict_stop = self.use_predict_stop;
-        worker.ace_rfp = self.ace_rfp;
         worker.ace_rfp_max_depth = self.ace_rfp_max_depth;
         worker.cheap_cert = self.cheap_cert;
         worker.cert_eval_leaves_only = self.cert_eval_leaves_only;
-        worker.wall_ignore_cert_override = self.wall_ignore_cert_override;
-        worker.one_wall_race_resolved = self.one_wall_race_resolved;
-        worker.two_wall_race_resolved = self.two_wall_race_resolved;
-        worker.two_wall_race_pv_only = self.two_wall_race_pv_only;
-        worker.use_partial_iter = self.use_partial_iter;
+        worker.wall_ignore_cert_resolved = self.wall_ignore_cert_resolved;
         worker.pure_mode = self.pure_mode;
         worker.race_proof = self.race_proof;
         worker.opening_book_mode = self.opening_book_mode;
@@ -4405,10 +3824,6 @@ impl TitaniumSearch {
         self.dir_masks_cache
     }
 
-    fn refresh_dist(&mut self, ply: usize) {
-        self.refresh_dist_site(ply, crate::bench_instr::REFRESH_SITE_UNKNOWN);
-    }
-
     fn refresh_dist_site(&mut self, ply: usize, site: u8) {
         #[cfg(feature = "bench-instrument")]
         {
@@ -4422,34 +3837,6 @@ impl TitaniumSearch {
             let _ = site;
             self.refresh_dist_inner(ply);
         }
-    }
-
-    fn refresh_ab_skip_enabled() -> bool {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| std::env::var_os("TITANIUM_REFRESH_AB_SKIP").is_some())
-    }
-
-    fn cat_child_dist_reuse_enabled() -> bool {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| std::env::var_os("TITANIUM_CAT_CHILD_DIST_REUSE").is_some())
-    }
-
-    fn should_skip_cat_no_edge_refresh(&self) -> bool {
-        if !self.cat_path_lmr {
-            return false;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Ok(v) = std::env::var("TITANIUM_CAT_NO_EDGE_SKIP") {
-                if v == "0" || v.eq_ignore_ascii_case("false") {
-                    return false;
-                }
-                if v == "1" || v.eq_ignore_ascii_case("true") {
-                    return true;
-                }
-            }
-        }
-        self.cat_no_edge_skip
     }
 
     fn dist_indices_valid_for_current_topology(&self) -> bool {
@@ -4470,15 +3857,12 @@ impl TitaniumSearch {
             crate::bench_instr::bump_u64(|b| &mut b.cat_child_ab_entries);
             if self.cached_stamp == self.g.wall_stamp {
                 crate::bench_instr::bump_u64(|b| &mut b.cat_child_ab_dup_valid);
-                if Self::cat_child_dist_reuse_enabled() || Self::refresh_ab_skip_enabled() {
-                    crate::bench_instr::bump_u64(|b| &mut b.cat_child_ab_dup_avoided);
-                    return;
-                }
-                crate::bench_instr::bump_u64(|b| &mut b.cat_child_ab_dup_refresh);
+                crate::bench_instr::bump_u64(|b| &mut b.cat_child_ab_dup_avoided);
+                return;
             }
         } else {
             self.ab_after_cat_child = false;
-            if Self::refresh_ab_skip_enabled() && self.dist_refresh_already_valid() {
+            if self.dist_refresh_already_valid() {
                 crate::bench_instr::bump_ab_refresh_skipped();
                 return;
             }
@@ -5046,8 +4430,7 @@ impl TitaniumSearch {
         let enabled = match self.wall_ignore_cert_resolved {
             Some(v) => v,
             None => {
-                let v = self.wall_ignore_cert_override.unwrap_or(false)
-                    || wall_ignore_loss_cert_enabled();
+                let v = wall_ignore_loss_cert_enabled();
                 self.wall_ignore_cert_resolved = Some(v);
                 v
             }
@@ -5079,31 +4462,13 @@ impl TitaniumSearch {
     /// Bound-only deductions run in `ab()`, where the search window exists.
     /// Static evaluation never promotes a lower/upper bound to exact.
     #[inline]
-    fn one_wall_race_enabled(&mut self) -> bool {
-        match self.one_wall_race_resolved {
-            Some(enabled) => enabled,
-            None => {
-                let enabled = std::env::var("TITANIUM_RACE_ONE_WALL")
-                    .ok()
-                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-                self.one_wall_race_resolved = Some(enabled);
-                enabled
-            }
-        }
+    fn one_wall_race_enabled(&self) -> bool {
+        true
     }
 
     #[inline]
-    fn two_wall_race_enabled(&mut self) -> bool {
-        match self.two_wall_race_resolved {
-            Some(enabled) => enabled,
-            None => {
-                let enabled = std::env::var("TITANIUM_RACE_TWO_WALL")
-                    .ok()
-                    .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
-                self.two_wall_race_resolved = Some(enabled);
-                enabled
-            }
-        }
+    fn two_wall_race_enabled(&self) -> bool {
+        true
     }
 
     /// Exact fixed-topology winner after discarding every remaining wall.
@@ -5581,33 +4946,6 @@ impl TitaniumSearch {
         false
     }
 
-    /// Materialize the existing HalfPW child representation without computing
-    /// route fields, legal-wall count, or the value projection. Probe/shadow only.
-    fn current_hidden_features(&mut self) -> [f64; MAX_NET_H] {
-        let nw = self.net;
-        let b0 = NET_BKT[self.g.pawn[0]] as i32;
-        let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
-        self.ensure_nnue_wall_accumulators(nw, b0, b1);
-
-        let mut hidden = [0.0; MAX_NET_H];
-        if self.g.turn == 0 {
-            let po = self.g.pawn[0] * nw.h;
-            let px = self.g.pawn[1] * nw.h;
-            for j in 0..nw.h {
-                hidden[j] =
-                    (nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j]).clamp(0.0, 1.0);
-            }
-        } else {
-            let po = NET_MIRC[self.g.pawn[1]] * nw.h;
-            let px = NET_MIRC[self.g.pawn[0]] * nw.h;
-            for j in 0..nw.h {
-                hidden[j] =
-                    (nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j]).clamp(0.0, 1.0);
-            }
-        }
-        hidden
-    }
-
     /// Static/quiescence eval. `depth <= 0` = leaf (cert oracle eligible when gated).
     fn evaluate(&mut self, depth: i32) -> i32 {
         let _eval_timer = crate::bench_instr::OpTimer::start(|b| &mut b.evaluate);
@@ -5684,9 +5022,6 @@ impl TitaniumSearch {
         {
             let e = &self.eval_cache[ec_idx];
             if e.key == hash64 && e.meta == ec_meta {
-                #[cfg(feature = "eval_cache_baseline")]
-                let out = e.val;
-                #[cfg(not(feature = "eval_cache_baseline"))]
                 let out = e.val as f64;
                 crate::bench_instr::bump(|b| &mut b.eval_cache_hit);
                 return self.evaluate_tail(out, depth, me, d_me_i, d_opp_i, w_me_i, w_opp_i);
@@ -5849,9 +5184,6 @@ impl TitaniumSearch {
         }
         *slot = EvalCacheEntry {
             key: hash64,
-            #[cfg(feature = "eval_cache_baseline")]
-            val: out,
-            #[cfg(not(feature = "eval_cache_baseline"))]
             val: out as f32,
             meta: ec_meta,
         };
@@ -6140,145 +5472,6 @@ impl TitaniumSearch {
             .gen_legal_ace(out)
     }
 
-    /// Hybrid wall generation: lazy geometry + CAT relevance filter.
-    ///
-    /// CAT (multi-route corridor heat) only above the leaf layer — depth-1 nodes
-    /// dominate the tree and only need witness-path tactics, not breadth
-    /// (mirrors `search::alphabeta`). The TT move always survives the filter.
-    fn gen_walls_cat_filtered(
-        &mut self,
-        depth: i32,
-        tt_move: i16,
-        out: &mut [i16; 160],
-        mut n: usize,
-    ) -> usize {
-        let me = self.g.turn;
-        let our_dist = if me == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]]
-        } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]]
-        };
-        let opp_dist = if me == 0 {
-            self.d1[self.dist1_idx][self.g.pawn[1]]
-        } else {
-            self.d0[self.dist0_idx][self.g.pawn[0]]
-        };
-        let white_dist = if me == 0 { our_dist } else { opp_dist };
-        let black_dist = if me == 0 { opp_dist } else { our_dist };
-        let opp_player = if me == 0 { Player::Two } else { Player::One };
-
-        let bridge = self.bridge.as_mut().expect("cat bridge");
-        let (cat, opp_path, opp_path_len, reachable) = if depth >= 2 {
-            let data =
-                crate::cat::build::build_corridor_search_data(&mut bridge.bfs, &bridge.board);
-            (
-                data.attention,
-                data.opponent_path,
-                data.opponent_path_len,
-                data.reachable,
-            )
-        } else {
-            let mut path = [0u8; 81];
-            let path_len = get_shortest_path(&bridge.board, opp_player, &mut bridge.bfs, &mut path);
-            let reachable = bridge.bfs.both_reachable_mask(&bridge.board);
-            (CorridorAttention::default(), path, path_len, reachable)
-        };
-        let gap_zone = gap_play_zone_mask(reachable);
-        let mut wall_candidates = [BoardMove::Pawn { row: 0, col: 0 }; 128];
-        let mut wall_direct_heats = [0i32; 128];
-        let mut wall_candidate_n = 0usize;
-
-        for slot in 0..64 {
-            for (wall_type, base) in [(0usize, MOVE_HW_BASE), (1usize, MOVE_VW_BASE)] {
-                if !self.g.wall_fits(wall_type, slot) {
-                    continue;
-                }
-                let m = base + slot as i16;
-                let mv = move_id_to_board(m);
-                wall_candidates[wall_candidate_n] = mv;
-                wall_direct_heats[wall_candidate_n] = move_corridor_attention_with_path(
-                    &mut bridge.board,
-                    mv,
-                    &cat,
-                    white_dist,
-                    black_dist,
-                    &mut bridge.bfs,
-                );
-                wall_candidate_n += 1;
-            }
-        }
-
-        for i in 0..wall_candidate_n {
-            let mv = wall_candidates[i];
-            let m = match mv {
-                BoardMove::Wall {
-                    row,
-                    col,
-                    orientation,
-                } => {
-                    let slot = i16::from(row) * 8 + i16::from(col);
-                    match orientation {
-                        WallOrientation::Horizontal => MOVE_HW_BASE + slot,
-                        WallOrientation::Vertical => MOVE_VW_BASE + slot,
-                    }
-                }
-                BoardMove::Pawn { .. } => continue,
-            };
-            let boosted_heat = move_corridor_attention_with_denial(
-                &bridge.board,
-                mv,
-                &cat,
-                &wall_candidates[..wall_candidate_n],
-                &wall_direct_heats[..wall_candidate_n],
-                wall_candidate_n,
-            );
-            let denied_hot_neighbor = boosted_heat > wall_direct_heats[i];
-            let keep = m == tt_move
-                || denied_hot_neighbor
-                || wall_should_search(
-                    mv,
-                    &cat,
-                    reachable,
-                    gap_zone,
-                    &mut bridge.board,
-                    our_dist,
-                    opp_dist,
-                    &opp_path,
-                    opp_path_len,
-                    &mut bridge.bfs,
-                );
-            if keep {
-                out[n] = m;
-                n += 1;
-            }
-        }
-        n
-    }
-
-    /// Wall generation with the SOUND dead-zone skip ONLY: emit every geometrically
-    /// legal wall EXCEPT those whose every touched square is unreachable (a wall in
-    /// a pure void). Those touch no pawn-reachable cell, block no path, and only
-    /// burn inventory — never the best move, so pruning is NPS-only and can't cost
-    /// Elo. A wall touching even one reachable square (incl. half-in-void) is kept.
-    fn gen_walls_deadzone_filtered(&mut self, out: &mut [i16; 160], mut n: usize) -> usize {
-        let bridge = self.bridge.as_mut().expect("dead-zone bridge");
-        let reachable = bridge.bfs.both_reachable_mask(&bridge.board);
-        for slot in 0..64 {
-            for (wall_type, base) in [(0usize, MOVE_HW_BASE), (1usize, MOVE_VW_BASE)] {
-                if !self.g.wall_fits(wall_type, slot) {
-                    continue;
-                }
-                let m = base + slot as i16;
-                if wall_in_dead_zone(move_id_to_board(m), reachable) {
-                    continue;
-                }
-                out[n] = m;
-                n += 1;
-            }
-        }
-        n
-    }
-
     fn order_moves(&self, ply: usize, moves: &mut [i16], tt_move: i16, cm_move: i16) {
         self.order_moves_prior(ply, moves, tt_move, cm_move, 0, None);
     }
@@ -6310,14 +5503,9 @@ impl TitaniumSearch {
                 2_000_000_000
             } else if is_pawn_move(m) {
                 let progress = 1_000_000 - dist_me[m as usize] as i32 * 1000;
-                // Legacy mode intentionally keeps its exact pawn ordering. In
-                // the SF-history A/B, history is only a ±499 tie-break; one
-                // shortest-path step remains worth 1000 points.
-                if self.sf_history {
-                    progress + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
-                } else {
-                    progress
-                }
+                // History is only a ±499 tie-break; one shortest-path step
+                // remains worth 1000 points.
+                progress + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
             } else if m == k[0] {
                 900_000
             } else if m == cm_move {
@@ -6402,17 +5590,6 @@ impl TitaniumSearch {
         rep
     }
 
-    fn lmr_thread_id(&self) -> usize {
-        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-        {
-            self.lazy_worker_id
-        }
-        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-        {
-            0
-        }
-    }
-
     fn q_search_jump_race_trigger(&self) -> bool {
         let me = self.g.turn;
         let from = self.g.pawn[me] as usize;
@@ -6477,16 +5654,12 @@ impl TitaniumSearch {
         self.q_search_jump_race_trigger()
     }
 
-    fn ab(
-        &mut self,
-        depth: i32,
-        mut alpha: i32,
-        beta: i32,
-        ply: usize,
-        allow_null: bool,
-        prev_move: i16,
-        q_left: i32,
-    ) -> Result<i32, TimeUp> {
+    /// Per-node entry work that can terminate the node outright: node
+    /// accounting, the time check, the "opponent already home" terminal, the
+    /// ply cap, and repetition detection (search path, then game history back
+    /// to the last wall). `Ok(Some(score))` means the node is decided.
+    #[inline]
+    fn ab_node_guard(&mut self, ply: usize) -> Result<Option<i32>, TimeUp> {
         self.nodes += 1;
         #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         if let Some(runtime) = self.lazy_runtime.as_ref() {
@@ -6496,14 +5669,14 @@ impl TitaniumSearch {
         self.sub_min[ply] = MAX_PLY as i32;
         let prev = 1 - self.g.turn;
         if (prev == 0 && self.g.pawn[0] < 9) || (prev == 1 && self.g.pawn[1] >= 72) {
-            return Ok(-(MATE - ply as i32));
+            return Ok(Some(-(MATE - ply as i32)));
         }
         if ply >= MAX_PLY - 1 {
             // truncation-zero is unverified — taint ancestors (ZeroFence)
             self.sub_min[ply] = -1;
             self.sub_anc_lo[ply] = 0;
             self.sub_anc_hi[ply] = 0;
-            return Ok(0);
+            return Ok(Some(0));
         }
         self.path_lo[ply] = self.g.hash_lo;
         self.path_hi[ply] = self.g.hash_hi;
@@ -6517,7 +5690,7 @@ impl TitaniumSearch {
                         self.sub_anc_lo[ply] = self.g.hash_lo;
                         self.sub_anc_hi[ply] = self.g.hash_hi;
                     }
-                    return Ok(0);
+                    return Ok(Some(0));
                 }
             }
             let lwp = self.g.last_wall_ply as isize;
@@ -6527,30 +5700,30 @@ impl TitaniumSearch {
                     && self.g.hashes_u[gi as usize + 1] == self.g.hash_hi
                 {
                     // game-history rep: path-independent, no taint
-                    return Ok(0);
+                    return Ok(Some(0));
                 }
                 gi -= 2;
             }
         }
+        Ok(None)
+    }
 
-        self.maybe_refresh_dist_at_ab(ply);
-        let nd0 = self.dist0_idx; // restored on every unmake
-        let nd1 = self.dist1_idx;
-        let nst = self.cached_stamp;
-        let ndm_lo = self.dir_masks_key_lo;
-        let ndm_hi = self.dir_masks_key_hi;
-        let ndm_cache = self.dir_masks_cache;
-        let pv_node = beta > alpha.saturating_add(1);
+    fn ab_pre_leaf_race_guards(
+        &mut self,
+        alpha: i32,
+        beta: i32,
+        pv_node: bool,
+    ) -> Option<i32> {
         // Exactly one side out of walls: refuse-to-place race cuts (covers [k,0]/[0,k]).
         if (self.g.wl[0] == 0) != (self.g.wl[1] == 0) {
             match self.one_side_broke_race_bound() {
                 RaceBound::Lower(value) if value >= beta => {
                     self.race_outcome_stats.broke_cut_fail_high += 1;
-                    return Ok(beta);
+                    return Some(beta);
                 }
                 RaceBound::Upper(value) if value <= alpha => {
                     self.race_outcome_stats.broke_cut_fail_low += 1;
-                    return Ok(alpha);
+                    return Some(alpha);
                 }
                 RaceBound::Lower(_)
                 | RaceBound::Upper(_)
@@ -6560,18 +5733,18 @@ impl TitaniumSearch {
         }
         if self.g.wl[0] + self.g.wl[1] == 1 {
             match self.one_wall_race_bound() {
-                RaceBound::Lower(value) if value >= beta => return Ok(beta),
-                RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
+                RaceBound::Lower(value) if value >= beta => return Some(beta),
+                RaceBound::Upper(value) if value <= alpha => return Some(alpha),
                 RaceBound::Lower(_)
                 | RaceBound::Upper(_)
                 | RaceBound::Exact(_)
                 | RaceBound::Unknown => {}
             }
         }
-        if self.g.wl[0] + self.g.wl[1] == 2 && (!self.two_wall_race_pv_only || pv_node) {
+        if self.g.wl[0] + self.g.wl[1] == 2 && pv_node {
             match self.two_wall_monopoly_race_bound() {
-                RaceBound::Lower(value) if value >= beta => return Ok(beta),
-                RaceBound::Upper(value) if value <= alpha => return Ok(alpha),
+                RaceBound::Lower(value) if value >= beta => return Some(beta),
+                RaceBound::Upper(value) if value <= alpha => return Some(alpha),
                 RaceBound::Lower(_)
                 | RaceBound::Upper(_)
                 | RaceBound::Exact(_)
@@ -6592,11 +5765,11 @@ impl TitaniumSearch {
                 match bound {
                     RaceBound::Lower(v) if v >= beta => {
                         self.race_outcome_stats.resolved_gate1 += 1;
-                        return Ok(beta);
+                        return Some(beta);
                     }
                     RaceBound::Upper(v) if v <= alpha => {
                         self.race_outcome_stats.resolved_gate1_loss += 1;
-                        return Ok(alpha);
+                        return Some(alpha);
                     }
                     RaceBound::Lower(_)
                     | RaceBound::Upper(_)
@@ -6605,8 +5778,36 @@ impl TitaniumSearch {
                 }
             }
             if let Some(score) = self.exact_hands_empty_score(false) {
-                return Ok(score);
+                return Some(score);
             }
+        }
+        None
+    }
+
+    fn ab(
+        &mut self,
+        depth: i32,
+        mut alpha: i32,
+        beta: i32,
+        ply: usize,
+        allow_null: bool,
+        prev_move: i16,
+        q_left: i32,
+    ) -> Result<i32, TimeUp> {
+        if let Some(score) = self.ab_node_guard(ply)? {
+            return Ok(score);
+        }
+
+        self.maybe_refresh_dist_at_ab(ply);
+        let nd0 = self.dist0_idx; // restored on every unmake
+        let nd1 = self.dist1_idx;
+        let nst = self.cached_stamp;
+        let ndm_lo = self.dir_masks_key_lo;
+        let ndm_hi = self.dir_masks_key_hi;
+        let ndm_cache = self.dir_masks_cache;
+        let pv_node = beta > alpha.saturating_add(1);
+        if let Some(score) = self.ab_pre_leaf_race_guards(alpha, beta, pv_node) {
+            return Ok(score);
         }
         if depth <= 0 {
             match self.wall_ignore_race_bound() {
@@ -6624,9 +5825,7 @@ impl TitaniumSearch {
                 | RaceBound::Unknown => {}
             }
             let static_ev = self.evaluate(depth);
-            if self.q_search
-                && q_left > 0
-                && ply > 0
+            if q_left > 0 && ply > 0
                 && static_ev > -2000
                 && static_ev < 2000
                 && self.q_search_should_extend(ply, prev_move, static_ev)
@@ -6731,18 +5930,9 @@ impl TitaniumSearch {
         // flag, and the correction-history update at node completion.
         let static_ev = self.evaluate(depth);
         self.eval_stack[ply] = static_ev;
-        // improving: static eval rose vs 2 plies ago (same side to move).
-        // Stale same-slot values from sibling lines are tolerated, as in SF.
-        let improving = ply >= 2
-            && self.eval_stack[ply - 2] != i32::MIN
-            && static_ev > self.eval_stack[ply - 2];
 
-        // reverse futility: hopeless to fall below beta at shallow depth.
-        // The ACE candidate is deliberately a single-axis change: it narrows
-        // the depth gate and uses a fixed 100 cp/depth margin.
-        if let Some(margin) =
-            reverse_futility_margin(depth, improving, self.ace_rfp, self.ace_rfp_max_depth)
-        {
+        // Reverse futility: hopeless to fall below beta at shallow depth.
+        if let Some(margin) = reverse_futility_margin(depth, self.ace_rfp_max_depth) {
             let adaptive_depth_four = depth == 4 && self.ace_rfp_max_depth == 4;
             let admissible_window = !adaptive_depth_four || beta == alpha.saturating_add(1);
             if admissible_window && beta > -2000 && beta < 2000 && static_ev - margin >= beta {
@@ -6823,17 +6013,6 @@ impl TitaniumSearch {
                     }
                 }
             }
-            // Cheap cold-start nudge (experimental, off by default): a wall
-            // touching a cell on EITHER player's shortest-route set gets a
-            // small flat bonus, on top of (not instead of) the CAT heat
-            // above. Deliberately NOT "does this wall actually block the
-            // path" (that needs walking the path's edges, the expensive
-            // check this replaces) -- just "is it near/adjacent to the
-            // route", from the already-leaf-cheap route masks (bit-parallel
-            // flood, same cost class as the CAT heatmap itself). Small
-            // enough (ROUTE_TOUCH_ORDER_BONUS) to nudge otherwise-similar
-            // moves earlier without overriding a strong CAT signal or
-            // distorting iterative deepening.
         }
         let cat_order_prior = if cat_lmr_active && max_move_impact > 0 {
             Some((&heat_by_id, max_move_impact))
@@ -6867,17 +6046,6 @@ impl TitaniumSearch {
             cat_heats[i] = heat_by_id[moves[i] as usize];
         }
 
-        let lazy_walls_active = false;
-        let lazy_seal_mode = crate::titanium::lazy_seal::LazySealMode::from_env();
-        let mut lazy_seal = if lazy_walls_active {
-            Some(crate::titanium::lazy_seal::LazySealNode::from_game(
-                &self.g,
-                lazy_seal_mode,
-            ))
-        } else {
-            None
-        };
-
         let mut best = i32::MIN; // JS -Infinity
         let mut best_move: i16 = 0;
         let mut flag = 2;
@@ -6893,15 +6061,9 @@ impl TitaniumSearch {
 
         for i in 0..n {
             let m = moves[i];
-            // Frontier LMP. The default v17 policy remains unchanged; ACE-LMP
-            // is an opt-in, conservative extension to depth 3 with a later
-            // wall-only cutoff. All existing tactical/TT/history safeguards
-            // remain shared between both policies.
-            let lmp_cutoff = if self.ace_lmp {
-                depth <= 3 && i >= 24
-            } else {
-                depth <= 2 && i >= if improving { 14 } else { 8 }
-            };
+            // Frontier LMP: a conservative depth-three wall-only cutoff with
+            // the existing tactical, TT, and history safeguards.
+            let lmp_cutoff = depth <= 3 && i >= 24;
             if lmp_cutoff
                 && ply > 0
                 && is_wall_move(m)
@@ -6910,20 +6072,6 @@ impl TitaniumSearch {
                 && best > -MATE + 200
             {
                 continue;
-            }
-            // Seal check only needed for ACE's lazy pseudo-legal walls; with
-            // MoveGen+ (Titanium legal gen at every node) all walls are legal.
-            // The CAT and dead-zone paths both emit geometry-only (pseudo-legal)
-            // walls, so they STILL need the seal check — only the pure ti_movegen
-            // path (full legal gen) can skip it.
-            if is_wall_move(m) {
-                if let Some(seal) = lazy_seal.as_mut() {
-                    let wt = if is_hwall_move(m) { 0 } else { 1 };
-                    let slot = wall_slot(m);
-                    if !seal.allows_lazy_wall(&mut self.g, wt, slot) {
-                        continue; // sealing wall: pseudo-legal only
-                    }
-                }
             }
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             if ply == 0 {
@@ -6934,11 +6082,6 @@ impl TitaniumSearch {
                     .unwrap_or(i);
                 self.lazy_root_visits.push(original_idx);
             }
-            let probe_parent_hash = if self.reduction_probe_enabled {
-                Some((self.g.hash_lo, self.g.hash_hi))
-            } else {
-                None
-            };
             let mover = self.g.turn;
             let pre_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
             let pre_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
@@ -6985,7 +6128,6 @@ impl TitaniumSearch {
                 } else {
                     1.0
                 };
-                let wall_opponent_delay = 0;
                 let v16_plan = if cat_lmr_active {
                     plan_v16_wall_lmr(i, depth, new_depth, attention_ratio, 0, 0)
                 } else {
@@ -6999,14 +6141,14 @@ impl TitaniumSearch {
                     }
                 };
                 let path_plan =
-                    if self.cat_path_lmr && cat_lmr_active && v16_plan.final_reduction > 0 {
+                    if cat_lmr_active && v16_plan.final_reduction > 0 {
                         crate::bench_instr::bump_u64(|b| &mut b.cat_edge_test_calls);
                         let (refresh0, refresh1) = wall_incr_refresh_flags(
                             &self.d0[self.dist0_idx],
                             &self.d1[self.dist1_idx],
                             m,
                         );
-                        if self.should_skip_cat_no_edge_refresh() && !refresh0 && !refresh1 {
+                        if !refresh0 && !refresh1 {
                             crate::bench_instr::bump_u64(|b| &mut b.cat_no_edge_skip);
                             apply_lmr_path_correction(
                                 v16_plan.final_reduction.max(0) as u32,
@@ -7051,98 +6193,23 @@ impl TitaniumSearch {
                     };
                 let red = path_plan.final_reduction as i32;
                 let child_depth_used = (new_depth - red).max(0);
-                if self.reduction_sidecar.is_some() {
-                    let started = Instant::now();
-                    let hidden_full = self.current_hidden_features();
-                    // reduction_sidecar is a separate, independently-calibrated
-                    // model with a fixed 32-wide input contract -- unrelated to
-                    // the main net's hidden width (which may now be > 32).
-                    let hidden: [f64; 32] = hidden_full[..32].try_into().unwrap();
-                    let context = [
-                        ((depth - 1).max(0) as f64 / 30.0).clamp(0.0, 1.0),
-                        (i as f64 / 128.0).clamp(0.0, 1.0),
-                        (red as f64 / 4.0).clamp(0.0, 1.0),
-                        if is_hwall_move(m) { 1.0 } else { 0.0 },
-                        if is_vwall_move(m) { 1.0 } else { 0.0 },
-                    ];
-                    let sidecar = self.reduction_sidecar.as_ref().expect("checked above");
-                    let probability = sidecar.predict(&hidden, &context);
-                    self.reduction_shadow_stats.evaluations += 1;
-                    self.reduction_shadow_stats.hypothetical_activations +=
-                        u64::from(sidecar.would_activate(probability));
-                    self.reduction_shadow_stats.inference_nanos +=
-                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-                }
-                let probe_ordinal =
-                    if self.reduction_probe_enabled && depth >= self.reduction_probe_min_depth {
-                        let ordinal = self.reduction_probe_next;
-                        self.reduction_probe_next += 1;
-                        Some(ordinal)
-                    } else {
-                        None
-                    };
-                let extra_reduction = probe_ordinal
-                    .is_some_and(|ordinal| self.reduction_probe_target == Some(ordinal));
-                let rd = (child_depth_used - i32::from(extra_reduction)).max(0);
-                let nodes_before = self.nodes;
-                let mut verification_triggered = false;
-                let pipeline_result =
-                    match self.ab(rd, -alpha - 1, -alpha, ply + 1, true, m, q_left) {
-                        Ok(s) => {
-                            let mut score = -s;
-                            if score > alpha {
-                                verification_triggered = true;
-                                match self.ab(new_depth, -beta, -alpha, ply + 1, true, m, q_left) {
-                                    Ok(s2) => score = -s2,
-                                    Err(e) => {
-                                        self.unwind_move(nd0, nd1, nst, ndm_lo, ndm_hi, ndm_cache);
-                                        return Err(e);
-                                    }
+                let rd = child_depth_used;
+                match self.ab(rd, -alpha - 1, -alpha, ply + 1, true, m, q_left) {
+                    Ok(s) => {
+                        let mut score = -s;
+                        if score > alpha {
+                            match self.ab(new_depth, -beta, -alpha, ply + 1, true, m, q_left) {
+                                Ok(s2) => score = -s2,
+                                Err(e) => {
+                                    self.unwind_move(nd0, nd1, nst, ndm_lo, ndm_hi, ndm_cache);
+                                    return Err(e);
                                 }
                             }
-                            Ok(score)
                         }
-                        Err(e) => Err(e),
-                    };
-                if let (Some(ordinal), Ok(score), Some((parent_hash_lo, parent_hash_hi))) =
-                    (probe_ordinal, pipeline_result.as_ref(), probe_parent_hash)
-                {
-                    let should_record = self.reduction_probe_events.len()
-                        < self.reduction_probe_limit
-                        && (self.reduction_probe_target.is_none()
-                            || self.reduction_probe_target == Some(ordinal));
-                    if should_record {
-                        let hidden = self.current_hidden_features();
-                        self.reduction_probe_events.push(ReductionProbeEvent {
-                            ordinal,
-                            parent_hash_lo,
-                            parent_hash_hi,
-                            child_hash_lo: self.g.hash_lo,
-                            child_hash_hi: self.g.hash_hi,
-                            mv: m,
-                            depth,
-                            ply,
-                            alpha,
-                            beta,
-                            move_index: i,
-                            base_reduction: v16_plan.ace_base_reduction,
-                            applied_extra_reduction: extra_reduction,
-                            verification_triggered,
-                            self_gain: 0,
-                            opponent_delay: wall_opponent_delay,
-                            race_gain: 0,
-                            path_adjustment: v16_plan.final_reduction - v16_plan.ace_base_reduction,
-                            final_reduction: red,
-                            thread_aggression_percent: cat_lmr_tuning_percent(),
-                            score: *score,
-                            nodes: self.nodes.saturating_sub(nodes_before),
-                            hidden,
-                            total_legal_moves: n,
-                            history_score: self.history_tbl[m as usize],
-                        });
+                        Ok(score)
                     }
+                    Err(e) => Err(e),
                 }
-                pipeline_result
             } else if self.cat_lmr_v16
                 && is_pawn_move(m)
                 && i > 0
@@ -7232,14 +6299,12 @@ impl TitaniumSearch {
                     self.stream_root_moves.push((m, score));
                 }
             }
-            if self.sf_history {
-                if is_wall_move(m) {
-                    searched_walls[searched_wall_count] = m;
-                    searched_wall_count += 1;
-                } else {
-                    searched_pawns[searched_pawn_count] = m;
-                    searched_pawn_count += 1;
-                }
+            if is_wall_move(m) {
+                searched_walls[searched_wall_count] = m;
+                searched_wall_count += 1;
+            } else {
+                searched_pawns[searched_pawn_count] = m;
+                searched_pawn_count += 1;
             }
 
             // RaceProof(b): best non-wall root alternative
@@ -7278,48 +6343,36 @@ impl TitaniumSearch {
                                 self.killers[ply][1] = self.killers[ply][0];
                                 self.killers[ply][0] = m;
                             }
-                            self.history_tbl[m as usize] += depth * depth;
-                            if self.history_tbl[m as usize] > 100_000_000 {
-                                for h in self.history_tbl.iter_mut() {
-                                    *h >>= 1;
+                        }
+                        // Side-split gravity credit for the cutoff wall,
+                        // maluses for every wall searched before it (on a
+                        // pawn cutoff the bonus is skipped but the tried
+                        // walls still failed against "just walk" — demote
+                        // them too). Continuation history mirrors both,
+                        // keyed by the previous move.
+                        let stm = self.g.turn;
+                        let bonus = depth * depth;
+                        self.sf_hist_apply(stm, m, bonus);
+                        if is_wall_move(m) && prev_move >= 0 {
+                            self.cont_hist_apply(prev_move, m, bonus);
+                        }
+                        for j in 0..searched_wall_count {
+                            let pm = searched_walls[j];
+                            if pm != m {
+                                self.sf_hist_apply(stm, pm, -bonus);
+                                if prev_move >= 0 {
+                                    self.cont_hist_apply(prev_move, pm, -bonus);
                                 }
                             }
                         }
-                        if self.sf_history {
-                            // Side-split gravity credit for the cutoff wall,
-                            // maluses for every wall searched before it (on a
-                            // pawn cutoff the bonus is skipped but the tried
-                            // walls still failed against "just walk" — demote
-                            // them too). Continuation history mirrors both,
-                            // keyed by the previous move.
-                            let stm = self.g.turn;
-                            let bonus = depth * depth;
-                            if is_wall_move(m) {
-                                self.sf_hist_apply(stm, m, bonus);
-                                if prev_move >= 0 {
-                                    self.cont_hist_apply(prev_move, m, bonus);
-                                }
-                            } else {
-                                self.sf_hist_apply(stm, m, bonus);
-                            }
-                            for j in 0..searched_wall_count {
-                                let pm = searched_walls[j];
-                                if pm != m {
-                                    self.sf_hist_apply(stm, pm, -bonus);
-                                    if prev_move >= 0 {
-                                        self.cont_hist_apply(prev_move, pm, -bonus);
-                                    }
-                                }
-                            }
-                            // The cutoff pawn is already in this array, so the
-                            // inequality leaves its bonus intact while every
-                            // prior pawn that was truly searched gets a malus.
-                            // Skipped LMP/seal-check moves never enter it.
-                            for j in 0..searched_pawn_count {
-                                let pm = searched_pawns[j];
-                                if pm != m {
-                                    self.sf_hist_apply(stm, pm, -bonus);
-                                }
+                        // The cutoff pawn is already in this array, so the
+                        // inequality leaves its bonus intact while every
+                        // prior pawn that was truly searched gets a malus.
+                        // Skipped LMP/seal-check moves never enter it.
+                        for j in 0..searched_pawn_count {
+                            let pm = searched_pawns[j];
+                            if pm != m {
+                                self.sf_hist_apply(stm, pm, -bonus);
                             }
                         }
                         if prev_move >= 0 {
@@ -8072,7 +7125,7 @@ impl TitaniumSearch {
                 root_move_count: filtered_by_worker[worker_id].len(),
                 root_moves_before_filter: root_moves_raw.len(),
                 root_value_threshold_pct: lazy_smp_value_threshold_pct(worker_id) as usize,
-                top_n_override: (self.lazy_topn && threads >= 3 && worker_id == threads - 1)
+                top_n_override: (threads >= 3 && worker_id == threads - 1)
                     .then_some(LAZY_SMP_LAST_WORKER_TOP_N),
             })
             .collect();
@@ -8316,9 +7369,6 @@ impl TitaniumSearch {
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             if !self.pure_mode && !self.is_pondering {
                 self.tt_gen = self.tt_gen.wrapping_add(1);
-                for h in self.history_tbl.iter_mut() {
-                    *h >>= 1;
-                }
                 for side in self.hist_sf.iter_mut() {
                     for h in side.iter_mut() {
                         *h /= 2;
@@ -8370,7 +7420,7 @@ impl TitaniumSearch {
         } else {
             128
         };
-        let root_q_left = if self.q_search { self.q_max } else { 0 };
+        let root_q_left = self.q_max;
 
         // Dynamic iterative-deepening startup: probe the TT for the root position.
         // If the prior think (or pondering) left a deep exact entry, skip the
@@ -8444,9 +7494,7 @@ impl TitaniumSearch {
                 *stop_reason = "stability_soft_budget_before_depth";
                 break;
             }
-            if self.use_predict_stop
-                && !full
-                && Self::predicted_over_time_budget(t0, soft_ms, &depth_log)
+            if !full && Self::predicted_over_time_budget(t0, soft_ms, &depth_log)
             {
                 *stop_reason = "predicted_over_time_budget_before_depth";
                 break;
@@ -8578,7 +7626,7 @@ impl TitaniumSearch {
                                 }
                             }
                             Err(TimeUp) => {
-                                if self.use_partial_iter && self.root_best >= 0 {
+                                if self.root_best >= 0 {
                                     last_best = self.root_best;
                                     last_score = self.root_score;
                                     partial_iter_used = true;
@@ -8612,7 +7660,7 @@ impl TitaniumSearch {
                                 }
                             }
                             Err(TimeUp) => {
-                                if self.use_partial_iter && self.root_best >= 0 {
+                                if self.root_best >= 0 {
                                     last_best = self.root_best;
                                     last_score = self.root_score;
                                     partial_iter_used = true;
@@ -8646,7 +7694,7 @@ impl TitaniumSearch {
                     // back to depth d-1. On a pure fail-low (no alpha-raise this
                     // iteration) root_best/root_score still equal the prior depth's
                     // values, so this is a no-op exactly in the unsafe case.
-                    if self.use_partial_iter && self.root_best >= 0 {
+                    if self.root_best >= 0 {
                         last_best = self.root_best;
                         last_score = self.root_score;
                         last_depth = d;

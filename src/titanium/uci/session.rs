@@ -257,33 +257,3 @@ pub fn run_titanium_session_stdio(engine_flag: &str, threads: usize) {
         }
     }
 }
-
-#[cfg(test)]
-mod session_tests {
-    use super::*;
-    use crate::titanium::game::GameState;
-
-    /// There is exactly one engine. The wire label is accepted for
-    /// compatibility but must never select a configuration again -- that
-    /// two-layer setup made the site, the bench and the match harness run
-    /// materially different searches.
-    #[test]
-    fn every_label_builds_the_same_production_engine() {
-        for label in [
-            "titanium-v18",
-            "titanium-v17",
-            "titanium-v15",
-            "ace-v13-grafted",
-            "totally-unknown-label",
-        ] {
-            let search = build_search(label, GameState::new());
-            assert!(search.q_search_enabled(), "{label}");
-            assert!(search.sf_history_enabled(), "{label}");
-            assert!(search.cat_path_lmr_enabled(), "{label}");
-            assert!(search.cat_no_edge_skip_enabled(), "{label}");
-            assert!(search.lazy_topn_enabled(), "{label}");
-            assert!(search.ace_lmp_enabled(), "{label}");
-            assert!(search.ace_rfp_enabled(), "{label}");
-        }
-    }
-}

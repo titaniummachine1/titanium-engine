@@ -16,7 +16,7 @@ use crate::pathfinding::bfs::layers::{
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::util::grid::{
-    flood_bit_sq, pack_flood_mask, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT,
+    flood_bit_sq, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT,
 };
 
 fn corridor_heat(delta: u16) -> u16 {
@@ -205,87 +205,6 @@ fn merge_corridor_max(a: &mut CorridorAttention, b: &CorridorAttention) {
     }
 }
 
-/// CAT output plus pathfinding facts already available while building it.
-/// Reusing these fields avoids a separate opponent-path flood and two more
-/// reachability floods in wall generation.
-pub(crate) struct CorridorSearchData {
-    pub attention: CorridorAttention,
-    pub opponent_path: [u8; 81],
-    pub opponent_path_len: usize,
-    pub reachable: u128,
-}
-
-fn recover_shortest_path_from_goal_distances(
-    board: &Board,
-    player: Player,
-    masks: DirMasks,
-    dist_to_goal: &[u8; 81],
-    path_out: &mut [u8; 81],
-) -> usize {
-    let (row, col) = board.pawn(player);
-    let mut current = square_index(row, col);
-    let mut len = 0usize;
-    loop {
-        path_out[len] = current;
-        len += 1;
-        if len == path_out.len() || dist_to_goal[current as usize] == 0 {
-            return len;
-        }
-        let current_distance = dist_to_goal[current as usize];
-        if current_distance == u8::MAX {
-            return len;
-        }
-        let mut neighbors = [0u8; 4];
-        let count = neighbor_squares(current, masks, &mut neighbors);
-        let Some(next) = neighbors[..count]
-            .iter()
-            .copied()
-            .filter(|&sq| dist_to_goal[sq as usize].saturating_add(1) == current_distance)
-            .min()
-        else {
-            return len;
-        };
-        current = next;
-    }
-}
-
-/// Build CAT and retain the opponent path/reachability from the same four BFFs.
-pub(crate) fn build_corridor_search_data(
-    scratch: &mut BfsScratch,
-    board: &Board,
-) -> CorridorSearchData {
-    let masks = scratch.dir_masks(board);
-    let opponent = board.side().opposite();
-    let mut white = CorridorAttention::default();
-    let mut black = CorridorAttention::default();
-    let mut opponent_path = [0u8; 81];
-    let mut opponent_path_len = 0usize;
-    let mut reachable_flood = 0u128;
-
-    for (player, attention) in [(Player::One, &mut white), (Player::Two, &mut black)] {
-        let (dist_from, dist_to) = scratch.dist_scratch_mut();
-        reachable_flood |=
-            add_player_corridor_attention(board, player, masks, attention, dist_from, dist_to);
-        if player == opponent {
-            opponent_path_len = recover_shortest_path_from_goal_distances(
-                board,
-                player,
-                masks,
-                dist_to,
-                &mut opponent_path,
-            );
-        }
-    }
-
-    merge_corridor_max(&mut white, &black);
-    CorridorSearchData {
-        attention: white,
-        opponent_path,
-        opponent_path_len,
-        reachable: pack_flood_mask(reachable_flood),
-    }
-}
-
 /// Build combined two-player corridor attention for search ordering.
 ///
 /// Uses per-square **max** of each player's heat (same as the web overlay), not sum —
@@ -466,11 +385,6 @@ pub(crate) fn add_player_impact_heat_with_bias(
             scatter_add(heat, cells, w);
         }
     }
-}
-
-fn add_player_impact_heat(board: &Board, player: Player, masks: DirMasks, heat: &mut [u16; 81]) {
-    let bias_bp = cat_distance_bias_bp();
-    add_player_impact_heat_with_bias(board, player, masks, heat, bias_bp);
 }
 
 /// STM-specific policy filter applied after both player planes are combined.
