@@ -16,6 +16,7 @@
 //! the engine's own movegen.
 
 use crate::titanium::position::game::GameState;
+use std::sync::OnceLock;
 
 /// Result from the side-to-move's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,10 +342,18 @@ impl ZeroWallTb {
     }
 }
 
+static ZERO_WALL_TB: OnceLock<ZeroWallTb> = OnceLock::new();
+
+/// Probe the process-wide exact zero-wall tablebase, building it once on first use.
+#[inline]
+pub fn probe_global(g: &GameState) -> Option<TbEntry> {
+    ZERO_WALL_TB.get_or_init(ZeroWallTb::build).probe(g)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::titanium::cert_bridge::hands_empty_race_stm_wins;
+    use crate::titanium::cert_bridge::hands_empty_race_stm_wins_oracle;
 
     fn tb() -> ZeroWallTb {
         ZeroWallTb::build()
@@ -382,7 +391,7 @@ mod tests {
                     g.pawn[1] = p1;
                     g.turn = stm;
                     g.wl = [0, 0];
-                    let Some(oracle_stm_wins) = hands_empty_race_stm_wins(&mut g) else {
+                    let Some(oracle_stm_wins) = hands_empty_race_stm_wins_oracle(&mut g) else {
                         continue;
                     };
                     let e = t.probe_raw(p0, p1, stm);

@@ -7,11 +7,13 @@
 //! Walls: L1 empty → L2 shift collision → topo shift flood-skip → L3 flood (legal.rs)
 //! ```
 //!
-//! Pawn tables are built at COLD START (`runtime`) by default, so the binary/
-//! wasm ship ~1.85MB lighter. The `gen` module is the single source of truth
-//! (shared with the `movegen-o1-gen` emitter). The `embed-tables` feature bakes
-//! the precomputed consts in instead (prewarmed build); a parity test asserts
-//! the runtime build matches them byte-for-byte.
+//! Pawn tables are EMBEDDED by default (`embed-tables` is in the default
+//! feature set), so the binary ships ready to play with zero cold-start cost
+//! (~1.85MB heavier). The `gen` module is the single source of truth (shared
+//! with the `movegen-o1-gen` emitter). Site owners who want a slim binary for
+//! transfer build with `--no-default-features --features parallel`; the tables
+//! are then recomputed on first use / `prewarm()` (~1-2s). A parity test
+//! asserts the runtime build matches the embedded consts byte-for-byte.
 
 pub mod gen;
 mod lookup;

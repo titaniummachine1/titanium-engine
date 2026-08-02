@@ -4,12 +4,14 @@
 //! The hot path reads `tables()` → `&'static PawnTables` (one `OnceLock` load,
 //! hoisted to the top of each generate call). Initialization:
 //!
-//! - **default build**: `super::gen::discover_all_pawn_tables()` recomputes the
-//!   tables (~1-2s). Lazy on first use; call [`prewarm`] up front (e.g. on UCI
-//!   `isready`) so search/perft timing never includes the build.
-//! - **`embed-tables` feature**: copies the committed `generated_*` consts in
-//!   (no compute) — the prewarmed build for the website / latency-sensitive
-//!   targets. A parity test asserts the two paths produce identical tables.
+//! - **default build** (`embed-tables` ON): copies the committed `generated_*`
+//!   consts in (no compute) — the engine is ready to play immediately, at the
+//!   cost of a ~1.85MB larger binary. Site owners who want a slim transfer
+//!   binary build with `--no-default-features --features parallel`.
+//! - **slim build** (`embed-tables` OFF): `super::gen::discover_all_pawn_tables()`
+//!   recomputes the tables (~1-2s). Lazy on first use; call [`prewarm`] up front
+//!   (e.g. on UCI `isready`) so search/perft timing never includes the build.
+//!   A parity test asserts the two paths produce identical tables.
 
 use std::sync::OnceLock;
 

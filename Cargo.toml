@@ -37,7 +37,12 @@ path = "src/bin/search_bench.rs"
 required-features = ["parallel"]
 
 [features]
-default = ["parallel"]
+# Fat default: embedded o1 pawn tables (~1.85MB) baked into the binary, so the
+# engine is ready to play with zero cold-start setup. Site owners who want a
+# smaller binary for transfer can build slim with:
+#   cargo build --release --no-default-features --features parallel
+# which recomputes the pawn tables on first use / `prewarm()` (~1-2s).
+default = ["parallel", "embed-tables"]
 # Search measurement, TT-hit profiling, and phase timers are compiled only with
 # --features bench-instrument. Default cargo build --release contains no search
 # telemetry counters. Use search-telemetry as a descriptive alias when profiling.
@@ -47,8 +52,8 @@ search-telemetry = ["bench-instrument"]
 # browser Lazy SMP uses the explicit wasm-threads profile below.
 parallel = ["dep:rayon"]
 # Bake the precomputed pawn O1 tables (~1.85MB) into the binary instead of
-# building them at cold start. Use for prewarmed / latency-sensitive targets
-# (e.g. the website); the default build computes them on first use / `prewarm()`.
+# building them at cold start. ON by default (fat binary); site owners disable
+# it via `--no-default-features --features parallel` for a slim transfer binary.
 embed-tables = []
 # wasm-bindgen bindings for the website (build with:
 #   wasm-pack build --no-default-features --features wasm

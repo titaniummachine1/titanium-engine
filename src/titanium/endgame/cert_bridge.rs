@@ -374,12 +374,23 @@ pub fn paths_overlap(g: &GameState, d_goal0: &[u8; 81], d_goal1: &[u8; 81]) -> b
 
 /// Classifier + resolver: `Some(stm_wins)` when exact, `None` when certification
 /// must be declined (resolver returned [`RaceProof::Unknown`]).
-pub fn hands_empty_race_stm_wins(g: &mut GameState) -> Option<bool> {
+pub(crate) fn hands_empty_race_stm_wins_oracle(g: &mut GameState) -> Option<bool> {
     match hands_empty_race(g) {
         RaceVerdict::Win => Some(true),
         RaceVerdict::Loss => Some(false),
         RaceVerdict::NeedsProof => race_minimax_stm_wins(g),
     }
+}
+
+pub fn hands_empty_race_stm_wins(g: &mut GameState) -> Option<bool> {
+    if let Some(entry) = super::tb_zero::probe_global(g) {
+        return match entry.result {
+            super::tb_zero::TbResult::Win => Some(true),
+            super::tb_zero::TbResult::Loss => Some(false),
+            super::tb_zero::TbResult::Draw => None,
+        };
+    }
+    hands_empty_race_stm_wins_oracle(g)
 }
 
 /// Outcome of the wall-free (hands-empty) race classifier.
