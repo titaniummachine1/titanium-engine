@@ -330,12 +330,13 @@ mod lazy_smp_tests {
         search.install_lazy_smp_context(
             0,
             shared.clone(),
+            None,
             runtime.clone(),
             root_moves.clone(),
             root_visit_map.clone(),
             1,
         );
-        worker.install_lazy_smp_context(1, shared.clone(), runtime, root_moves, root_visit_map, 1);
+        worker.install_lazy_smp_context(1, shared.clone(), None, runtime, root_moves, root_visit_map, 1);
         assert!(Arc::ptr_eq(
             search.shared_tt.as_ref().expect("main shared TT"),
             worker.shared_tt.as_ref().expect("helper shared TT")
@@ -787,6 +788,47 @@ struct SharedTtEntry {
     anc_lo: u32,
     anc_hi: u32,
     entry_gen: u8,
+}
+
+/// Eval cache shared by the main search and every LazySMP helper.
+///
+/// Helpers previously carried a 1-slot stub, so every helper re-evaluated
+/// positions the main thread had already scored. Cloning a full private cache
+/// instead would duplicate ~32MB per helper and thrash LLC -- the same reason
+/// the local TT was dropped -- so this shares ONE table, exactly as
+/// `SharedTitaniumTt` does.
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+struct SharedEvalCache {
+    slots: Vec<RwLock<EvalCacheEntry>>,
+    bits: usize,
+}
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+impl SharedEvalCache {
+    fn from_search(search: &TitaniumSearch) -> Self {
+        let slots = search
+            .eval_cache
+            .iter()
+            .map(|e| RwLock::new(*e))
+            .collect();
+        Self {
+            slots,
+            bits: search.eval_cache_bits,
+        }
+    }
+
+    #[inline]
+    fn probe(&self, idx: usize, key: u64, meta: u16) -> Option<f32> {
+        let e = self.slots[idx].read().ok()?;
+        (e.key == key && e.meta == meta).then_some(e.val)
+    }
+
+    #[inline]
+    fn store(&self, idx: usize, entry: EvalCacheEntry) {
+        if let Ok(mut slot) = self.slots[idx].write() {
+            *slot = entry;
+        }
+    }
 }
 
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -2353,6 +2395,8 @@ pub struct TitaniumSearch {
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     shared_tt: Option<Arc<SharedTitaniumTt>>,
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    shared_eval: Option<Arc<SharedEvalCache>>,
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     lazy_runtime: Option<Arc<LazySmpRuntime>>,
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     lazy_root_moves: Option<Arc<Vec<i16>>>,
@@ -2571,6 +2615,8 @@ impl TitaniumSearch {
             stream_last_best: 0,
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             shared_tt: None,
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            shared_eval: None,
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             lazy_runtime: None,
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -3108,12 +3154,18 @@ impl TitaniumSearch {
         &mut self,
         worker_id: usize,
         shared_tt: Arc<SharedTitaniumTt>,
+        shared_eval: Option<Arc<SharedEvalCache>>,
         runtime: Arc<LazySmpRuntime>,
         root_moves: Arc<Vec<i16>>,
         root_visit_map: Arc<Vec<usize>>,
         allowed: usize,
     ) {
         self.shared_tt = Some(shared_tt.clone());
+        if let Some(sc) = shared_eval {
+            // Index with the shared table's bits, not the 1-slot stub's.
+            self.eval_cache_bits = sc.bits;
+            self.shared_eval = Some(sc);
+        }
         self.tt_mask = shared_tt.mask;
         self.tt_bits = shared_tt.bits;
         self.tt_adaptive = false;
@@ -4999,9 +5051,21 @@ impl TitaniumSearch {
         let ec_idx = eval_cache_slot(hash64, self.eval_cache_bits);
         let ec_meta = ((self.g.wl[0] as u16) << 8) | (self.g.wl[1] as u16);
         {
-            let e = &self.eval_cache[ec_idx];
-            if e.key == hash64 && e.meta == ec_meta {
-                let out = e.val as f64;
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            let hit = match self.shared_eval.as_ref() {
+                Some(sc) => sc.probe(ec_idx, hash64, ec_meta),
+                None => {
+                    let e = &self.eval_cache[ec_idx];
+                    (e.key == hash64 && e.meta == ec_meta).then_some(e.val)
+                }
+            };
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let hit = {
+                let e = &self.eval_cache[ec_idx];
+                (e.key == hash64 && e.meta == ec_meta).then_some(e.val)
+            };
+            if let Some(val) = hit {
+                let out = val as f64;
                 crate::bench_instr::bump(|b| &mut b.eval_cache_hit);
                 return self.evaluate_tail(out, depth, me, d_me_i, d_opp_i, w_me_i, w_opp_i);
             }
@@ -5157,15 +5221,30 @@ impl TitaniumSearch {
                 }
             },
         );
-        let slot = &mut self.eval_cache[ec_idx];
-        if slot.meta != u16::MAX && slot.key != hash64 {
-            crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
-        }
-        *slot = EvalCacheEntry {
+        let entry = EvalCacheEntry {
             key: hash64,
             val: out as f32,
             meta: ec_meta,
         };
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        match self.shared_eval.as_ref() {
+            Some(sc) => sc.store(ec_idx, entry),
+            None => {
+                let slot = &mut self.eval_cache[ec_idx];
+                if slot.meta != u16::MAX && slot.key != hash64 {
+                    crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
+                }
+                *slot = entry;
+            }
+        }
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            let slot = &mut self.eval_cache[ec_idx];
+            if slot.meta != u16::MAX && slot.key != hash64 {
+                crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
+            }
+            *slot = entry;
+        }
         self.evaluate_tail(out, depth, me, d_me_i, d_opp_i, w_me_i, w_opp_i)
     }
 
@@ -7091,6 +7170,13 @@ impl TitaniumSearch {
             .shared_tt
             .clone()
             .unwrap_or_else(|| Arc::new(SharedTitaniumTt::from_search(self)));
+        // One eval cache for the whole pool, seeded from the main thread's, so
+        // helpers stop re-evaluating what it already scored.
+        let shared_eval = self
+            .shared_eval
+            .clone()
+            .unwrap_or_else(|| Arc::new(SharedEvalCache::from_search(self)));
+        self.shared_eval = Some(shared_eval.clone());
         let deadline = Instant::now() + Duration::from_millis(time_ms.max(1));
         let runtime = Arc::new(LazySmpRuntime::new(deadline));
         let plans: Vec<WorkerPlan> = (0..threads)
@@ -7112,6 +7198,7 @@ impl TitaniumSearch {
         self.install_lazy_smp_context(
             0,
             shared_tt.clone(),
+            Some(shared_eval.clone()),
             runtime.clone(),
             Arc::new(main_root_moves),
             Arc::new(main_visit_map),
@@ -7134,6 +7221,7 @@ impl TitaniumSearch {
                 worker.install_lazy_smp_context(
                     plan.worker_id,
                     shared_tt.clone(),
+                    Some(shared_eval.clone()),
                     runtime.clone(),
                     Arc::new(profiled_root_moves),
                     Arc::new(visit_map),
