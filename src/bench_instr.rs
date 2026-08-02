@@ -150,6 +150,8 @@ pub struct BenchInstr {
     pub dist_lru_spill_load: OpStat,
     pub eval_width_opp: OpStat,
     pub eval_cat_heat: OpStat,
+    pub cat_cache_hit: OpStat,
+    pub cat_cache_miss: OpStat,
     pub eval_tail: OpStat,
     pub mat_layers: OpStat,
     pub refresh_site_stats: [RefreshSiteStat; REFRESH_SITE_COUNT],
@@ -226,7 +228,7 @@ impl BenchInstr {
         }
         let nodes = self.search_nodes;
         let total_ns = self.measured_ns;
-          let ops: [(&str, &OpStat); 56] = [
+          let ops: [(&str, &OpStat); 58] = [
             ("evaluate", &self.evaluate),
             ("eval_race_bound", &self.eval_race_bound),
             ("race_gate_cached", &self.race_gate_cached),
@@ -281,6 +283,8 @@ impl BenchInstr {
             ("dist_lru_spill_load", &self.dist_lru_spill_load),
             ("eval_width_opp", &self.eval_width_opp),
             ("eval_cat_heat", &self.eval_cat_heat),
+            ("cat_cache_hit", &self.cat_cache_hit),
+            ("cat_cache_miss", &self.cat_cache_miss),
             ("eval_tail", &self.eval_tail),
             ("mat_layers", &self.mat_layers),
         ];

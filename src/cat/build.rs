@@ -580,6 +580,7 @@ fn add_catv5_propagated_heat(
 /// CATv5 NN fields. The raw 0..4 witness value identifies which deterministic
 /// unique path owns a cell (paths may overlap only on the first ply). This is
 /// the compact representation: no extra per-path arrays in the hot evaluator.
+#[derive(Clone)]
 pub struct CatV5Heatmaps {
     pub witness_p0: [u8; 81],
     pub witness_p1: [u8; 81],
@@ -588,7 +589,102 @@ pub struct CatV5Heatmaps {
     pub propagated: [u16; 81],
 }
 
+// CATv5 self-cache.
+//
+// CAT is the only major component that had no cache -- eval and the TT both
+// did -- while running at ~0.72 calls per node and 47% of measured search time.
+// The cache lives INSIDE the builder so every caller benefits without touching
+// a single call site.
+//
+// Keyed on exactly what the heatmap depends on: both wall bitboards and both
+// pawn squares. Not side to move, not history -- so it hits on position pairs
+// the TT treats as distinct.
+
+const CAT_CACHE_BITS: usize = 12;
+const CAT_CACHE_SIZE: usize = 1 << CAT_CACHE_BITS;
+
+#[derive(Clone)]
+struct CatCacheEntry {
+    hw: u64,
+    vw: u64,
+    pawns: u16,
+    valid: bool,
+    maps: CatV5Heatmaps,
+}
+
+impl Default for CatCacheEntry {
+    fn default() -> Self {
+        Self {
+            hw: 0,
+            vw: 0,
+            pawns: 0,
+            valid: false,
+            maps: CatV5Heatmaps {
+                witness_p0: [0; 81],
+                witness_p1: [0; 81],
+                propagated_p0: [0; 81],
+                propagated_p1: [0; 81],
+                propagated: [0; 81],
+            },
+        }
+    }
+}
+
+/// ONE table for the whole process: the main search and every LazySMP helper
+/// read and write the same slots, so they cooperate instead of each rebuilding
+/// what another thread already computed. Per-slot `RwLock`, the same shape as
+/// `SharedTitaniumTt` and the shared eval cache.
+static CAT_CACHE: std::sync::OnceLock<Vec<std::sync::RwLock<CatCacheEntry>>> =
+    std::sync::OnceLock::new();
+
+#[inline]
+fn cat_cache() -> &'static Vec<std::sync::RwLock<CatCacheEntry>> {
+    CAT_CACHE.get_or_init(|| {
+        (0..CAT_CACHE_SIZE)
+            .map(|_| std::sync::RwLock::new(CatCacheEntry::default()))
+            .collect()
+    })
+}
+
+#[inline]
+fn cat_cache_slot(hw: u64, vw: u64, pawns: u16) -> usize {
+    let mut x = hw ^ vw.rotate_left(17) ^ ((pawns as u64) << 43);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    x ^= x >> 29;
+    (x as usize) & (CAT_CACHE_SIZE - 1)
+}
+
+/// Cached CATv5. Falls through to [`build_catv5_heatmaps_uncached`] on a miss.
 pub fn build_catv5_heatmaps(board: &Board) -> CatV5Heatmaps {
+    let (r0, c0) = board.pawn(Player::One);
+    let (r1, c1) = board.pawn(Player::Two);
+    let pawns = ((square_index(r0, c0) as u16) << 8) | square_index(r1, c1) as u16;
+    let (hw, vw) = (board.horizontal_walls, board.vertical_walls);
+    let slot = cat_cache_slot(hw, vw, pawns);
+
+    let table = cat_cache();
+    if let Some(hit) = table[slot].read().ok().and_then(|e| {
+        (e.valid && e.hw == hw && e.vw == vw && e.pawns == pawns).then(|| e.maps.clone())
+    }) {
+        crate::bench_instr::bump(|b| &mut b.cat_cache_hit);
+        return hit;
+    }
+    crate::bench_instr::bump(|b| &mut b.cat_cache_miss);
+    let maps = build_catv5_heatmaps_uncached(board);
+    if let Ok(mut e) = table[slot].write() {
+        *e = CatCacheEntry {
+            hw,
+            vw,
+            pawns,
+            valid: true,
+            maps: maps.clone(),
+        };
+    }
+    maps
+}
+
+pub fn build_catv5_heatmaps_uncached(board: &Board) -> CatV5Heatmaps {
     let masks = DirMasks::from_board(board);
     let (paths0, count0) = catv5_witness_paths(board, Player::One, masks);
     let (paths1, count1) = catv5_witness_paths(board, Player::Two, masks);
