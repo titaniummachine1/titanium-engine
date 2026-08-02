@@ -2263,7 +2263,6 @@ pub struct TitaniumSearch {
     /// Use Titanium `generate_legal_moves_slice` instead of ACE `wall_legal`.
     /// CAT-filter walls at inner nodes (requires `bridge`).
     /// Historical field name for the production v17 CAT-graduated LMR.
-    cat_lmr_v16: bool,
     cat_lmr_ceiling: u16,
     cat_lmr_fringe_pct: u16,
     /// Ka-AB-style horizon quiescence: extend one ply at depth<=0 when a wall
@@ -2280,11 +2279,9 @@ pub struct TitaniumSearch {
     /// path-aware tempo classifier ([`cert_bridge::hands_empty_race`]) instead of
     /// the full recursive `certify`. Same result, a fraction of the nodes — frees
     /// NPS for the rest of the search. Off = faithful gen13 (always `certify`).
-    cheap_cert: bool,
     /// When true, recursive certify + k=0 race oracle run only at quiescence
     /// leaves with both hands empty. Inner nodes use the HalfPW net (search
     /// + EME resolve tempo ambiguity). Set in [`Self::grafted_with_weights`].
-    cert_eval_leaves_only: bool,
     /// Cached wall-ignorance certificate decision.
     wall_ignore_cert_resolved: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
@@ -2295,7 +2292,6 @@ pub struct TitaniumSearch {
     /// Pure-JS-port mode: disables all Rust-side state-retention extras
     /// (gen TT, history aging, dynamic ID startup, accumulator retention).
     /// Use with `ti_movegen=true` as the fair baseline opponent.
-    pure_mode: bool,
     /// Ponder mode: suppresses tt_gen advance and history decay so all ponder
     /// chunks share one TT generation and history accumulates uninterrupted.
     /// Set true before the ponder loop, false before the real think() call.
@@ -2521,20 +2517,16 @@ impl TitaniumSearch {
             np_b1v: -1,
             net: net(),
             bridge: None,
-            cat_lmr_v16: false,
             cat_lmr_ceiling: crate::cat::CAT_V16_LMR_CEILING_DEFAULT,
             cat_lmr_fringe_pct: crate::cat::CAT_V16_FRINGE_PCT_DEFAULT,
             q_max: Q_SEARCH_MAX_DEFAULT,
             q_swing_cp: Q_SWING_CP_DEFAULT,
             ace_rfp_max_depth: 3,
-            cheap_cert: false,
-            cert_eval_leaves_only: false,
             wall_ignore_cert_resolved: None,
             nodes: 0,
             deadline: Instant::now(),
             root_best: crate::titanium::TITANIUM_NO_MOVE,
             root_score: 0,
-            pure_mode: false,
             is_pondering: false,
             race_proof: true,
             rc_key_lo: [0; RC_SLOTS],
@@ -2702,8 +2694,6 @@ impl TitaniumSearch {
     ) -> Box<Self> {
         let mut search = Self::new(g);
         search.net = weights;
-        search.cheap_cert = true;
-        search.cert_eval_leaves_only = true;
         match tt_bits {
             Some(bits) => search.resize_tt(bits),
             None => search.enable_adaptive_tt(),
@@ -2736,7 +2726,6 @@ impl TitaniumSearch {
         weights: &'static Net,
     ) -> Box<Self> {
         let mut search = Self::base_with_weights(g, tt_bits, weights);
-        search.cat_lmr_v16 = true;
         search.cat_lmr_ceiling = if crate::cat::CAT_V16_LMR_CEILINGS.contains(&ceiling) {
             ceiling
         } else {
@@ -2846,11 +2835,7 @@ impl TitaniumSearch {
         if is_wall_move(m) {
             self.cached_stamp = -1;
         }
-        if self.pure_mode {
-            // Faithful JS baseline: reset accumulator every move (no retention).
-            self.np_b0 = -1;
-        }
-        // non-pure: do NOT reset np_b0/np_b1v — evaluate()'s bucket-aware diff handles any
+        // Do NOT reset np_b0/np_b1v — evaluate()'s bucket-aware diff handles any
         // accumulator transition (wall diff or full rebuild on bucket cross).
     }
 
@@ -2927,9 +2912,7 @@ impl TitaniumSearch {
     pub fn migrate_root(&mut self, m: i16, prior_score: i32) {
         self.apply_move(m);
         self.decay_history_by_surprise(prior_score);
-        if !self.pure_mode {
-            self.tt_gen = self.tt_gen.wrapping_add(1);
-        }
+        self.tt_gen = self.tt_gen.wrapping_add(1);
     }
 
     /// Static evaluation of the current position (no search) — primes the distance
@@ -2960,7 +2943,7 @@ impl TitaniumSearch {
 
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     fn apply_think_start_state(&mut self) {
-        if !self.pure_mode && !self.is_pondering {
+        if !self.is_pondering {
             self.tt_gen = self.tt_gen.wrapping_add(1);
             // Arithmetic division lets negative history entries converge to zero.
             // Correction history is not aged: eval bias per wall structure is
@@ -3073,16 +3056,12 @@ impl TitaniumSearch {
         worker.cm = self.cm;
         worker.killers = self.killers;
         worker.net = self.net;
-        worker.cat_lmr_v16 = self.cat_lmr_v16;
         worker.cat_lmr_ceiling = self.cat_lmr_ceiling;
         worker.cat_lmr_fringe_pct = self.cat_lmr_fringe_pct;
         worker.q_max = self.q_max;
         worker.q_swing_cp = self.q_swing_cp;
         worker.ace_rfp_max_depth = self.ace_rfp_max_depth;
-        worker.cheap_cert = self.cheap_cert;
-        worker.cert_eval_leaves_only = self.cert_eval_leaves_only;
         worker.wall_ignore_cert_resolved = self.wall_ignore_cert_resolved;
-        worker.pure_mode = self.pure_mode;
         worker.race_proof = self.race_proof;
         worker.opening_book_mode = self.opening_book_mode;
         worker.opening_book_order = self.opening_book_order.clone();
@@ -4994,7 +4973,7 @@ impl TitaniumSearch {
             }
         }
 
-        if w_me_i == 0 && w_opp_i == 0 && (!self.cert_eval_leaves_only || depth <= 0) {
+        if w_me_i == 0 && w_opp_i == 0 && depth <= 0 {
             match self.try_hands_empty_endgame(d_me_i, d_opp_i) {
                 HandsEmptyPipelineOutcome::Score(s) => return s,
             }
@@ -5207,11 +5186,8 @@ impl TitaniumSearch {
         let _tail_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_tail);
         // Integer centipawns (JS `out | 0` / halfpw `int(out)`).
         let mut ret = out as i32;
-        let cert_ok = if self.cert_eval_leaves_only {
-            depth <= 0 && w_me_i == 0 && w_opp_i == 0
-        } else {
-            w_me_i <= 2
-        };
+        // Certificate only at eval leaves with both hands empty.
+        let cert_ok = depth <= 0 && w_me_i == 0 && w_opp_i == 0;
         if self.race_proof
             && cert_ok
             && ret < 2500
@@ -5315,8 +5291,7 @@ impl TitaniumSearch {
     /// overlapping finalists trigger the exact fixed-topology retrograde.  No
     /// ordinary alpha-beta simulation is used by this shortcut.
     fn semi_terminal_race_root(&mut self) -> Option<RaceRootSolution> {
-        if !self.cheap_cert
-            || self.g.wl[0] != 0
+        if self.g.wl[0] != 0
             || self.g.wl[1] != 0
             || self.g.pawn[0] < 9
             || self.g.pawn[1] >= 72
@@ -5755,7 +5730,7 @@ impl TitaniumSearch {
             // Service A is a typed alpha/beta bound, not a static score.  It
             // may cut only when it crosses the current window.  A PV/wide
             // window falls through to the exact retrograde or ordinary search.
-            if self.cheap_cert {
+            {
                 let d0 = &self.d0[self.dist0_idx];
                 let d1 = &self.d1[self.dist1_idx];
                 let bound = crate::bench_instr::record(
@@ -5999,7 +5974,7 @@ impl TitaniumSearch {
         // heat can dwarf every wall's heat, which previously made the best wall
         // on the board look like a cold ~9% move and forced it to depth 1.
         let mut max_wall_impact = 0u32;
-        let cat_lmr_active = self.cat_lmr_v16 && depth >= 2 && n > 0;
+        let cat_lmr_active = depth >= 2 && n > 0;
         if cat_lmr_active {
             if let Some(bridge) = self.bridge.as_mut() {
                 let cat = crate::cat::build::build_impact_heatmap(&bridge.board);
@@ -6210,8 +6185,7 @@ impl TitaniumSearch {
                     }
                     Err(e) => Err(e),
                 }
-            } else if self.cat_lmr_v16
-                && is_pawn_move(m)
+            } else if is_pawn_move(m)
                 && i > 0
                 && depth >= ACE_LMR_MIN_DEPTH
                 && m != tt_move
@@ -6441,7 +6415,7 @@ impl TitaniumSearch {
                 self.g.hash_lo,
                 self.g.hash_hi,
                 self.tt_gen,
-                self.pure_mode,
+                false, // pure_mode: retired faithful-JS baseline
                 SharedTtEntry {
                     key_hi: self.g.hash_hi,
                     key_lo: self.g.hash_lo,
@@ -6455,7 +6429,7 @@ impl TitaniumSearch {
             );
         } else {
             let was_empty = self.tt_meta[idx] == 0;
-            let stale_gen = !self.pure_mode && !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
+            let stale_gen = !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
             let deeper = !was_empty
                 && !stale_gen
                 && depth.clamp(0, TT_DEPTH_MAX) >= tt_unpack_depth(self.tt_meta[idx]);
@@ -6486,7 +6460,7 @@ impl TitaniumSearch {
         #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         {
             let was_empty = self.tt_meta[idx] == 0;
-            let stale_gen = !self.pure_mode && !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
+            let stale_gen = !was_empty && self.tt_entry_gen[idx] != self.tt_gen;
             let deeper = !was_empty
                 && !stale_gen
                 && depth.clamp(0, TT_DEPTH_MAX) >= tt_unpack_depth(self.tt_meta[idx]);
@@ -6548,7 +6522,7 @@ impl TitaniumSearch {
     fn root_defense_verify(&mut self, depth: i32) -> Result<i32, TimeUp> {
         // Invalidate shallow LMR-reduced root-move TT entries from the iteration
         // that just completed so every candidate is searched at full depth.
-        if !self.pure_mode && !self.is_pondering {
+        if !self.is_pondering {
             self.tt_gen = self.tt_gen.wrapping_add(1);
         }
         self.root_defense_diag.clear();
@@ -6700,7 +6674,7 @@ impl TitaniumSearch {
     /// deadline handling (an aborted pass just keeps whatever `root_best` the
     /// normal alpha-beta pass already found).
     fn root_clean_win_verify(&mut self, depth: i32) -> Result<i32, TimeUp> {
-        if !self.pure_mode && !self.is_pondering {
+        if !self.is_pondering {
             self.tt_gen = self.tt_gen.wrapping_add(1);
         }
         let root_side = self.g.turn;
@@ -6864,7 +6838,7 @@ impl TitaniumSearch {
                 timing: TimingDiag::default(),
             };
         }
-        if self.cheap_cert {
+        {
             let rt0 = Instant::now();
             if let Some(solution) = self.semi_terminal_race_root() {
                 self.rp_root_solves += 1;
@@ -7332,14 +7306,6 @@ impl TitaniumSearch {
         // out of the search deadline when the gate can fire — it runs after
         // the search loop and its raceTbl(force=true) call ignores deadline.
         let mut gate_reserve_ms = 0u64;
-        if self.race_proof && !self.cheap_cert && self.g.wl[self.g.turn] == 1 {
-            let cap = (0.3 * time_ms as f64) as u64;
-            gate_reserve_ms = self
-                .rc_build_ms
-                .max(25)
-                .max((time_ms as f64 * 0.15) as u64)
-                .min(cap);
-        }
         // Each thread derives its deadline from its OWN monotonic clock. Under
         // wasm, `web_time::Instant` is backed by per-Worker `performance.now()`
         // origins, so a deadline created on the main thread is meaningless to a
@@ -7367,7 +7333,7 @@ impl TitaniumSearch {
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             self.apply_think_start_state();
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-            if !self.pure_mode && !self.is_pondering {
+            if !self.is_pondering {
                 self.tt_gen = self.tt_gen.wrapping_add(1);
                 for side in self.hist_sf.iter_mut() {
                     for h in side.iter_mut() {
@@ -7427,8 +7393,7 @@ impl TitaniumSearch {
         // shallow iterations we already know the answer to and resume from near
         // that depth. last_score is seeded from the TT so aspiration windows are
         // correctly centred on the first iteration we actually run.
-        // Disabled in pure_mode (faithful JS baseline).
-        let start_depth = if !self.pure_mode {
+        let start_depth = {
             let ridx = (self.g.hash_lo & self.tt_mask) as usize;
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             let root_entry = self
@@ -7478,8 +7443,6 @@ impl TitaniumSearch {
             } else {
                 1
             }
-        } else {
-            1
         };
 
         for d in start_depth..=max_depth {
@@ -7743,13 +7706,9 @@ impl TitaniumSearch {
                     Some(opp_wins) => !opp_wins,
                     None => true, // unknown ⇒ do not demote without proof
                 }
-            } else if self.cert_eval_leaves_only {
+            } else {
                 // Walls remain: search + EME cover tempo; skip recursive certify here.
                 true
-            } else {
-                // gen13 refutation: demote only if the opponent's win is certified.
-                let deadline_ms = 25u64.max(time_ms * 15 / 100);
-                !self.cert_win(self.g.turn, 60_000, deadline_ms)
             };
             self.g.unmake_move();
             self.cached_stamp = -1;
