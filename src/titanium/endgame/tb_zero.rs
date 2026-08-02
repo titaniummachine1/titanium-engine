@@ -215,6 +215,106 @@ impl ZeroWallTb {
         Some(self.probe_raw(g.pawn[0], g.pawn[1], g.turn))
     }
 
+    // ── Serialization ───────────────────────────────────────────────────────
+    //
+    // Format `TBZW` v1: 16-byte header then one 5-byte record per state in
+    // `tb_index` order (result u8, distance i16 LE, best_move i16 LE).
+    //
+    //   0..4   magic  b"TBZW"
+    //   4..6   version u16 LE
+    //   6..8   reserved
+    //   8..16  content hash u64 LE (over the record bytes)
+
+    pub const MAGIC: &'static [u8; 4] = b"TBZW";
+    pub const VERSION: u16 = 1;
+    pub const HEADER_LEN: usize = 16;
+    pub const RECORD_LEN: usize = 5;
+
+    /// FNV-1a over the record bytes. Used to version the table and to detect a
+    /// corrupt or stale file at load time.
+    pub fn content_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for e in &self.tbl {
+            for b in Self::encode_entry(e) {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        h
+    }
+
+    fn encode_entry(e: &TbEntry) -> [u8; 5] {
+        let r = match e.result {
+            TbResult::Loss => 0u8,
+            TbResult::Draw => 1,
+            TbResult::Win => 2,
+        };
+        let d = e.distance.to_le_bytes();
+        let m = e.best_move.to_le_bytes();
+        [r, d[0], d[1], m[0], m[1]]
+    }
+
+    fn decode_entry(b: &[u8]) -> Result<TbEntry, String> {
+        let result = match b[0] {
+            0 => TbResult::Loss,
+            1 => TbResult::Draw,
+            2 => TbResult::Win,
+            other => return Err(format!("bad result byte {other}")),
+        };
+        Ok(TbEntry {
+            result,
+            distance: i16::from_le_bytes([b[1], b[2]]),
+            best_move: i16::from_le_bytes([b[3], b[4]]),
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::HEADER_LEN + NSTATES * Self::RECORD_LEN);
+        out.extend_from_slice(Self::MAGIC);
+        out.extend_from_slice(&Self::VERSION.to_le_bytes());
+        out.extend_from_slice(&[0u8, 0]);
+        out.extend_from_slice(&self.content_hash().to_le_bytes());
+        for e in &self.tbl {
+            out.extend_from_slice(&Self::encode_entry(e));
+        }
+        out
+    }
+
+    /// Parse a table produced by [`to_bytes`], rejecting a wrong magic,
+    /// version, length, or content hash.
+    pub fn from_bytes(bytes: &[u8]) -> Result<ZeroWallTb, String> {
+        let want = Self::HEADER_LEN + NSTATES * Self::RECORD_LEN;
+        if bytes.len() != want {
+            return Err(format!("length {} != expected {want}", bytes.len()));
+        }
+        if &bytes[0..4] != Self::MAGIC {
+            return Err("bad magic (not a TBZW file)".into());
+        }
+        let ver = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if ver != Self::VERSION {
+            return Err(format!("version {ver} != supported {}", Self::VERSION));
+        }
+        let stored_hash = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let mut tbl = Vec::with_capacity(NSTATES);
+        for i in 0..NSTATES {
+            let off = Self::HEADER_LEN + i * Self::RECORD_LEN;
+            tbl.push(Self::decode_entry(&bytes[off..off + Self::RECORD_LEN])?);
+        }
+        let mut live = 0usize;
+        for p0 in 0..NCELLS {
+            for p1 in 0..NCELLS {
+                if p0 != p1 {
+                    live += 2;
+                }
+            }
+        }
+        let tb = ZeroWallTb { tbl, live };
+        if tb.content_hash() != stored_hash {
+            return Err("content hash mismatch (file is corrupt or stale)".into());
+        }
+        Ok(tb)
+    }
+
     pub fn live_states(&self) -> usize {
         self.live
     }

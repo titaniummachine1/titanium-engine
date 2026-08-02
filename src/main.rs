@@ -71,6 +71,7 @@ fn main() {
         "path-scan" => run_path_scan(),
         "cat-packed-batch" => run_cat_packed_batch(),
         "score-out" => run_score_out(&args),
+        "tbgen" => run_tbgen(&args),
         "fields" => run_fields(&args),
         "match" => run_match(&args),
         "uci" => titanium::run_uci_stdio(),
@@ -852,6 +853,82 @@ fn run_cat_packed_batch() {
 /// `unknown` means the budget stopped the search before the first iteration.
 /// `proven` is true only for a mate score verified by the AB search. A finite
 /// depth-limited score is not game-theoretically proven.
+/// Generate (or verify) the zero-wall tablebase.
+///
+/// The table is small and solves in a few milliseconds, so the engine can
+/// always build it at startup -- this command exists so it can instead be
+/// produced once and shipped as a file, for builds that would rather not pay
+/// even that cost (notably wasm, where it is paid on every page load).
+///
+///   titanium tbgen --out tb_zero.bin     write the table
+///   titanium tbgen --verify tb_zero.bin  check a file against a fresh solve
+///   titanium tbgen                       report the census and hash only
+fn run_tbgen(args: &[String]) {
+    use titanium::titanium::endgame::tb_zero::ZeroWallTb;
+    let mut out: Option<String> = None;
+    let mut verify: Option<String> = None;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" if i + 1 < args.len() => {
+                out = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--verify" if i + 1 < args.len() => {
+                verify = Some(args[i + 1].clone());
+                i += 2;
+            }
+            other => {
+                eprintln!("unknown tbgen option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let t0 = Instant::now();
+    let tb = ZeroWallTb::build();
+    let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let (w, l, d) = tb.census();
+    let hash = tb.content_hash();
+    println!(
+        "tbgen solved live_states={} win={w} loss={l} draw={d} hash={hash:016x} build_ms={build_ms:.1}",
+        tb.live_states()
+    );
+
+    if let Some(path) = verify {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("tbgen: cannot read {path}: {e}");
+                std::process::exit(1);
+            }
+        };
+        match ZeroWallTb::from_bytes(&bytes) {
+            Ok(loaded) => {
+                if loaded.content_hash() == hash {
+                    println!("tbgen verify OK: {path} matches a fresh solve");
+                } else {
+                    eprintln!("tbgen verify FAILED: {path} disagrees with a fresh solve");
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("tbgen verify FAILED: {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(path) = out {
+        let bytes = tb.to_bytes();
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            eprintln!("tbgen: cannot write {path}: {e}");
+            std::process::exit(1);
+        }
+        println!("tbgen wrote {path} ({} bytes)", bytes.len());
+    }
+}
+
 fn run_score_out(args: &[String]) {
     let mut nodes = None::<u64>;
     let mut packed_hex = None::<String>;
