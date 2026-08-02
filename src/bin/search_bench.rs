@@ -345,9 +345,9 @@ fn bench_time(sec: u64, runs: usize, position: &str, full: bool, log: bool, thre
     eprintln!("{}", dump_lazy_seal_stats());
 }
 
-fn bench_depth(target_depth: i32, position: &str, full: bool, threads: usize, moves: Option<&str>) {
+fn bench_depth(target_depth: i32, position: &str, full: bool, threads: usize) {
     reset_lazy_seal_stats();
-    let mut search = fresh_search(position, moves);
+    let mut search = fresh_search(position, None);
     let _ = run_think(
         &mut search,
         60_000,
@@ -356,10 +356,7 @@ fn bench_depth(target_depth: i32, position: &str, full: bool, threads: usize, mo
         false,
         threads,
     );
-    match moves {
-        Some(raw) if !raw.trim().is_empty() => search.set_position(load_position_from_moves(raw)),
-        _ => search.set_position(load_position(position)),
-    }
+    search.set_position(load_position(position));
     let t0 = Instant::now();
     let r = run_think(&mut search, 600_000, target_depth, full, false, threads);
     let wall_ms = t0.elapsed().as_millis() as u64;
@@ -592,7 +589,7 @@ fn main() {
         }
         "depth" => {
             let depth = parse_i32(&args, "--depth", 6);
-            bench_depth(depth, position, full, threads, moves);
+            bench_depth(depth, position, full, threads);
         }
         "profile" => {
             let sec = parse_u64(&args, "--sec", 30);
