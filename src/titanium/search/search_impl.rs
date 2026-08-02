@@ -5119,38 +5119,13 @@ impl TitaniumSearch {
         // byte-for-byte unaffected. Retrain-ready: a blob with learned `cat_heat`
         // weights activates it, giving the net the combined CAT signal alongside the
         // atomic route/near/contested planes (so it needn't reconstruct CAT itself).
-        if nw.cat_active {
-            let _cat_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_cat_heat);
-            if let Some(bridge) = self.bridge.as_ref() {
-                let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
-                let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
-                    (
-                        &cat.witness_p0,
-                        &cat.witness_p1,
-                        &cat.propagated_p0,
-                        &cat.propagated_p1,
-                    )
-                } else {
-                    (
-                        &cat.witness_p1,
-                        &cat.witness_p0,
-                        &cat.propagated_p1,
-                        &cat.propagated_p0,
-                    )
-                };
-                let mut cat_score = 0.0;
-                for sq in 0..81usize {
-                    let canon = if me == 0 { sq } else { NET_MIRC[sq] };
-                    cat_score += nw.cat_raw_me[canon] * (f64::from(raw_me[sq]) / 4.0)
-                        + nw.cat_raw_opp[canon] * (f64::from(raw_opp[sq]) / 4.0)
-                        + nw.cat_propagated_me[canon] * (f64::from(prop_me[sq]) / 200.0)
-                        + nw.cat_propagated_opp[canon] * (f64::from(prop_opp[sq]) / 200.0)
-                        + nw.cat_propagated_combined[canon]
-                            * (f64::from(cat.propagated[sq]) / 400.0);
-                }
-                out += cat_score;
-            }
-        }
+        // EXPERIMENT: the CATv5 eval plane is removed.
+        //
+        // On the live weights cat_active is TRUE and all five planes carry
+        // weights, but they move the score by a mean |0.13| cp (range -0.17
+        // .. +0.53) while build_catv5_heatmaps costs 47% of measured search
+        // time. The net was trained WITH these planes and learned to ignore
+        // them. This branch deletes the block to price that 47% in Elo.
         // ws[14] legal-wall-count input is retired from live search. The cheap
         // remaining-wall counts are already present as scalar features.
         // ws[15]: opponent corridor width on their goal field (matches halfpw.py).
