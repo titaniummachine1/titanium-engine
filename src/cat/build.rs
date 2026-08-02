@@ -525,40 +525,57 @@ fn add_catv5_propagated_heat(
     for j in 0..=shortest {
         forward |= to_goal.masks[j];
     }
-    for rank in 0..count {
-        let mut reached = paths[rank] & forward;
-        let mut frontier = reached;
-        let max_wave = MAX_IMPACT_HEAT_DELTA.saturating_sub(rank);
-        for wave in 0..=max_wave {
-            let base = impact_heat(rank + wave);
-            for j in 0..=shortest {
-                let cells = frontier & to_goal.masks[j] & !start_bit;
-                if cells == 0 {
-                    continue;
-                }
-                let mult = distance_bias_mult(j, shortest, bias_bp);
-                let weighted = (u32::from(base) * u32::from(mult) / 100) as u16;
-                let mut bits = cells;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let sq = FLOOD_SQ_BY_BIT[bit];
-                    if sq != u8::MAX {
-                        heat[sq as usize] = heat[sq as usize].max(weighted);
-                    }
-                }
-            }
-            if wave == max_wave {
+    // ONE multi-source expansion, not one per witness path.
+    //
+    // A cell reached from path `rank` after `wave` steps is scored
+    // `impact_heat(rank + wave)`, and the loop keeps the max. Because
+    // `impact_heat` is monotonically decreasing, that max is simply the
+    // SMALLEST `rank + wave` -- so the whole thing is a single BFS over the
+    // cost `c = rank + wave`, with path `r` entering as a source at cost `r`.
+    //
+    // The previous form ran `count` (up to 4) complete wave expansions over the
+    // board and threw away the overlap between them. This runs one.
+    let mut reached = 0u128;
+    let mut frontier = 0u128;
+    for c in 0..=MAX_IMPACT_HEAT_DELTA {
+        let expanded = if c > 0 && frontier != 0 {
+            expand_frontier(frontier, masks) & forward & FLOOD_PLAYABLE
+        } else {
+            0
+        };
+        let seed = if c < count { paths[c] & forward } else { 0 };
+        let new = (expanded | seed) & !reached;
+        if new == 0 {
+            if c >= count {
                 break;
             }
-            frontier = expand_frontier(frontier, masks) & forward & !reached & FLOOD_PLAYABLE;
-            if frontier == 0 {
-                break;
+            frontier = 0;
+            continue;
+        }
+        reached |= new;
+        frontier = new;
+
+        let base = impact_heat(c);
+        for j in 0..=shortest {
+            let cells = frontier & to_goal.masks[j] & !start_bit;
+            if cells == 0 {
+                continue;
             }
-            reached |= frontier;
+            let mult = distance_bias_mult(j, shortest, bias_bp);
+            let weighted = (u32::from(base) * u32::from(mult) / 100) as u16;
+            let mut bits = cells;
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let sq = FLOOD_SQ_BY_BIT[bit];
+                if sq != u8::MAX {
+                    heat[sq as usize] = heat[sq as usize].max(weighted);
+                }
+            }
         }
     }
 }
+
 
 /// CATv5 NN fields. The raw 0..4 witness value identifies which deterministic
 /// unique path owns a cell (paths may overlap only on the first ply). This is
