@@ -281,6 +281,123 @@ pub fn bff_wall_legal_with_proof(
     (true, p1_visited | p2_visited)
 }
 
+/// One concrete shortest path to a goal row, stored in the SAME per-direction
+/// shape as [`WallGrids`]: `east` holds every cell the path leaves heading east,
+/// and so on.  A wall's blocked-step delta is in that shape too, so "does this
+/// wall cut this path" is a 4-way AND — exact, no adjacency slop.
+///
+/// This is the witness the wall loop reasons about.  It is deliberately NOT the
+/// reachable set: a reachable set covers most of the board, so almost every wall
+/// touches it and it proves nothing.  A path is ~8-16 steps, so almost no wall
+/// touches it and it proves a great deal.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct PathWitness {
+    pub east: u128,
+    pub west: u128,
+    pub north: u128,
+    pub south: u128,
+}
+
+impl PathWitness {
+    /// True when `delta` blocks at least one step of this path — i.e. the path
+    /// alone no longer proves the player still gets home, so doubt remains.
+    #[inline]
+    pub fn cut_by(&self, delta: &WallGrids) -> bool {
+        ((self.east & delta.east)
+            | (self.west & delta.west)
+            | (self.north & delta.north)
+            | (self.south & delta.south))
+            != 0
+    }
+}
+
+/// Deepest BFS layer we will record.  A 9x9 board cannot need more.
+const MAX_PATH_LAYERS: usize = 96;
+
+/// Lee-wave flood that keeps its layer stack and reconstructs ONE shortest path.
+///
+/// Returns `None` exactly when the goal is unreachable, so this doubles as the
+/// legality test for the player it is run for — a caller that needs a fresh
+/// witness never has to flood twice: one pass both proves a path exists and
+/// hands back which path it is.
+///
+/// The visited set comes back too, so the second player's flood can still steal
+/// these bits exactly as it does after a plain flood.
+pub fn bff_path_to_goal_with_visited(
+    start: u128,
+    grids: &WallGrids,
+    goal: u128,
+) -> (Option<PathWitness>, u128) {
+    let mut layers = [0u128; MAX_PATH_LAYERS];
+    let mut visited = start & FLOOD_PLAYABLE;
+    layers[0] = visited;
+    if visited & goal != 0 {
+        return (Some(PathWitness::default()), visited);
+    }
+    let mut wave = visited;
+    let mut depth = 0usize;
+    loop {
+        wave = expand_wave(wave, grids) & !visited;
+        if wave == 0 {
+            return (None, visited);
+        }
+        depth += 1;
+        visited |= wave;
+        layers[depth] = wave;
+        if wave & goal != 0 {
+            break;
+        }
+        if depth + 1 >= MAX_PATH_LAYERS {
+            return (None, visited);
+        }
+    }
+
+    // Walk back goal -> start, one layer at a time.  `expand_wave` moves east by
+    // `<< 1` and south by `<< FLOOD_STRIDE`, so the cell that stepped east into
+    // `cur` sits at `cur >> 1` and must not itself be east-blocked.  The stride
+    // leaves buffer columns, so an off-board shift can never land in a layer.
+    let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
+    let mut path = PathWitness::default();
+    for i in (1..=depth).rev() {
+        let prev = layers[i - 1];
+        let east_src = cur >> 1;
+        if east_src & prev != 0 && east_src & grids.east == 0 {
+            path.east |= east_src;
+            cur = east_src;
+            continue;
+        }
+        let west_src = cur << 1;
+        if west_src & prev != 0 && west_src & grids.west == 0 {
+            path.west |= west_src;
+            cur = west_src;
+            continue;
+        }
+        let south_src = cur >> FLOOD_STRIDE;
+        if south_src & prev != 0 && south_src & grids.south == 0 {
+            path.south |= south_src;
+            cur = south_src;
+            continue;
+        }
+        let north_src = cur << FLOOD_STRIDE;
+        if north_src & prev != 0 && north_src & grids.north == 0 {
+            path.north |= north_src;
+            cur = north_src;
+            continue;
+        }
+        // Every layer-i cell was reached from layer i-1 by construction.
+        debug_assert!(false, "no predecessor for path backtrack");
+        return (None, visited);
+    }
+    (Some(path), visited)
+}
+
+/// [`bff_path_to_goal_with_visited`] when the visited set is not needed.
+#[inline]
+pub fn bff_path_to_goal(start: u128, grids: &WallGrids, goal: u128) -> Option<PathWitness> {
+    bff_path_to_goal_with_visited(start, grids, goal).0
+}
+
+
 /// Convenience wrapper for one-off queries (oracle / replay validation).
 pub fn bff_wall_legal_board(board: &Board) -> bool {
     let grids = WallGrids::from_board(board);

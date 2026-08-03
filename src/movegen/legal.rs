@@ -8,7 +8,10 @@ use crate::movegen::pawn_bits::{
     generate_pawn_moves_bitboard_with_masks, generate_pawn_moves_shift_slice,
 };
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
-use crate::pathfinding::bff::wall::{bff_wall_legal_with_proof, pawn_bit, wall_delta, WallGrids};
+use crate::pathfinding::bff::wall::{
+    bff_path_to_goal, bff_path_to_goal_with_visited, bff_to_goal_cached, bff_wall_legal, pawn_bit,
+    wall_delta, PathWitness, WallGrids, P1_GOAL_BITS, P2_GOAL_BITS,
+};
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::util::grid::{can_step, has_wall};
@@ -625,11 +628,54 @@ impl WallSealTopology {
 }
 
 /// Per-node wall-trial state: topology proof, directional grids, and pawn flood bits.
+/// How many shortest paths we keep per player per node.  Each one costs 4 ANDs
+/// to test and is only ever learned as the by-product of a flood we had to run
+/// anyway, so a small set pays for itself; past ~4 the marginal path almost
+/// never survives a wall the other four failed to survive.
+const MAX_WITNESS_PATHS: usize = 4;
+
+/// The accumulated path witnesses for one player at one node.
+#[derive(Default, Clone, Copy)]
+struct WitnessSet {
+    paths: [PathWitness; MAX_WITNESS_PATHS],
+    len: usize,
+}
+
+impl WitnessSet {
+    /// True when at least one stored path survives `delta` intact.  That single
+    /// surviving path IS the proof the player still reaches their goal, so no
+    /// flood is needed.  A wall only leaves doubt if it cuts every known path
+    /// simultaneously.
+    #[inline]
+    fn survives(&self, delta: &WallGrids) -> bool {
+        for i in 0..self.len {
+            if !self.paths[i].cut_by(delta) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline]
+    fn push(&mut self, path: PathWitness) {
+        if self.len < MAX_WITNESS_PATHS {
+            self.paths[self.len] = path;
+            self.len += 1;
+        }
+    }
+}
+
 struct WallTrialCtx {
     grids: WallGrids,
     p1_bit: u128,
     p2_bit: u128,
-    proof: u128,
+    /// Shortest-path witnesses shared by every wall candidate at this node.
+    /// A path found while testing one candidate stays valid for its siblings —
+    /// a sibling has the same walls plus a different one, so any path it does
+    /// not cut still holds — which is why a child's discovery is pushed back
+    /// here rather than kept locally.
+    w1: WitnessSet,
+    w2: WitnessSet,
     occupied_walls: u128,
     seal_topology: Option<WallSealTopology>,
 }
@@ -642,21 +688,26 @@ impl WallTrialCtx {
             grids: WallGrids::from_board(board),
             p1_bit: pawn_bit(r1, c1),
             p2_bit: pawn_bit(r2, c2),
-            proof: 0,
+            w1: WitnessSet::default(),
+            w2: WitnessSet::default(),
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
         }
     }
 
+
     /// Speculative trial: place the wall's blocked-edge delta, run binary flood fill
     /// for both players (P2 reuses P1's visited bits), then roll back.
     #[inline]
     fn wall_keeps_paths_open(&mut self, row: u8, col: u8, orientation: WallOrientation) -> bool {
-        let delta = wall_delta(row, col, orientation);
-        if self.proof != 0 && !delta.touches(self.proof) {
-            crate::bench_instr::bump(|b| &mut b.wall_proof_skip);
-            return true;
-        }
+        // Cheapest-and-most-effective FIRST, most expensive LAST.
+        //
+        //   1. seal topology   pure lookup after one lazy component build; needs
+        //                      no witness at all, so a node culled here never
+        //                      pays to build one
+        //   2. path witnesses  4 ANDs per stored path
+        //   3. exact flood     the thing every step above exists to avoid, and
+        //                      the only step that ever creates a witness
         let candidate = row as usize * 8
             + col as usize
             + if orientation == WallOrientation::Horizontal {
@@ -671,7 +722,69 @@ impl WallTrialCtx {
             crate::bench_instr::bump(|b| &mut b.wall_seal_skip);
             return true;
         }
-        self.wall_keeps_paths_open_exact(row, col, orientation)
+
+        // A player with no witness yet counts as "in doubt" and falls through to
+        // the flood, which mints one.  That is the whole bootstrap: no separate
+        // seeding pass exists.
+        let delta = wall_delta(row, col, orientation);
+        let p1_safe = self.w1.survives(delta);
+        let p2_safe = self.w2.survives(delta);
+        if p1_safe && p2_safe {
+            crate::bench_instr::bump(|b| &mut b.wall_proof_skip);
+            return true;
+        }
+
+        crate::bench_instr::bump(|b| &mut b.wall_flood_exact);
+        if self.w1.len > 0 && self.w2.len > 0 {
+            crate::bench_instr::bump(|b| &mut b.wall_witness_cut);
+        }
+        self.grids.place(delta);
+        let ok = self.trial_and_learn(p1_safe, p2_safe);
+        self.grids.remove(delta);
+        ok
+    }
+
+    /// Decide a candidate the witnesses could not, with the trial wall ALREADY
+    /// placed in `self.grids`, and back-propagate whatever path the flood finds
+    /// into the shared sets so every later candidate at this node can use it.
+    #[inline]
+    fn trial_and_learn(&mut self, p1_safe: bool, p2_safe: bool) -> bool {
+        if p1_safe != p2_safe {
+            // Only one side is in doubt, so only that side floods — and the
+            // shortest path that comes back is simultaneously the verdict and
+            // the new witness.  The other side is already proven by a live path.
+            let (start, goal, is_p1) = if p2_safe {
+                (self.p1_bit, P1_GOAL_BITS, true)
+            } else {
+                (self.p2_bit, P2_GOAL_BITS, false)
+            };
+            return match bff_path_to_goal(start, &self.grids, goal) {
+                Some(path) => {
+                    if is_p1 {
+                        self.w1.push(path);
+                    } else {
+                        self.w2.push(path);
+                    }
+                    true
+                }
+                None => false,
+            };
+        }
+        // Both in doubt — the bootstrap case. One layered flood for P1 yields
+        // both its verdict and its path. P2 then floods against P1's visited
+        // bits exactly as before (bit stealing); when that succeeds P2 is
+        // already proven, so no second path is extracted here. If a later
+        // candidate actually threatens P2, the branch above mints one then.
+        let (p1_path, p1_visited) =
+            bff_path_to_goal_with_visited(self.p1_bit, &self.grids, P1_GOAL_BITS);
+        let Some(p1_path) = p1_path else {
+            return false;
+        };
+        if !bff_to_goal_cached(self.p2_bit, p1_visited, &self.grids, P2_GOAL_BITS) {
+            return false;
+        }
+        self.w1.push(p1_path);
+        true
     }
 
     #[inline]
@@ -683,11 +796,8 @@ impl WallTrialCtx {
     ) -> bool {
         let delta = wall_delta(row, col, orientation);
         self.grids.place(delta);
-        let (ok, proof) = bff_wall_legal_with_proof(self.p1_bit, self.p2_bit, &self.grids);
+        let ok = bff_wall_legal(self.p1_bit, self.p2_bit, &self.grids);
         self.grids.remove(delta);
-        if ok {
-            self.proof = proof;
-        }
         ok
     }
 }
