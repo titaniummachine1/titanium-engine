@@ -9,8 +9,10 @@ use crate::movegen::pawn_bits::{
 };
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{
-    bff_path_to_goal, bff_path_to_goal_with_visited, bff_to_goal_cached, bff_wall_legal, pawn_bit,
-    wall_delta, PathWitness, WallGrids, P1_GOAL_BITS, P2_GOAL_BITS,
+    bff_path_to_goal, bff_path_to_goal_cached_with_visited, bff_path_to_goal_with_visited,
+    bff_resume_path_to_goal, bff_to_goal_cached, bff_wall_legal, delta_touches_visited,
+    pawn_bit, wall_delta, CachedPathResult, PathWitness, WallGrids, MAX_PATH_LAYERS,
+    P1_GOAL_BITS, P2_GOAL_BITS,
 };
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
@@ -705,16 +707,27 @@ impl WitnessSet {
     }
 
     /// Drop every path that no longer proves anything on this board — cut by a
-    /// wall, or rooted on a square the pawn has since left.  Run once per node
-    /// when the trial context is built, which is what lets a node inherit its
-    /// parent's set wholesale without having to reason about the move between
-    /// them.
+    /// wall, or rooted on a square the pawn has since left.  If the pawn moved
+    /// ALONG a path, truncate the path to start from the pawn's current position
+    /// instead of dropping it.  Run once per node when the trial context is
+    /// built, which is what lets a node inherit its parent's set wholesale
+    /// without having to reason about the move between them.
     #[inline]
     fn retain_valid(&mut self, grids: &WallGrids, pawn: u128) {
         let mut kept = 0usize;
         for i in 0..self.len {
-            if self.paths[i].valid_for(grids, pawn) {
-                self.paths[kept] = self.paths[i];
+            let mut path = self.paths[i];
+            // If the pawn is still on the start, just check validity.
+            if path.start == pawn {
+                if !path.cut_by(grids) {
+                    self.paths[kept] = path;
+                    kept += 1;
+                }
+                continue;
+            }
+            // Pawn moved — try to truncate the path to the new pawn position.
+            if path.truncate_to(pawn) && !path.cut_by(grids) {
+                self.paths[kept] = path;
                 kept += 1;
             }
         }
@@ -762,6 +775,10 @@ struct WallTrialCtx {
     p2_bit: u128,
     occupied_walls: u128,
     seal_topology: Option<WallSealTopology>,
+    p2_resume_layers: Option<Box<[u128; MAX_PATH_LAYERS]>>,
+    p2_resume_depth: usize,
+    p2_resume_visited: u128,
+    grids_last_delta: WallGrids,
 }
 
 impl WallTrialCtx {
@@ -777,6 +794,10 @@ impl WallTrialCtx {
             p2_bit: pawn_bit(r2, c2),
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
+            p2_resume_layers: None,
+            p2_resume_depth: 0,
+            p2_resume_visited: 0,
+            grids_last_delta: WallGrids::default(),
         };
         witness.w1.retain_valid(&ctx.grids, ctx.p1_bit);
         witness.w2.retain_valid(&ctx.grids, ctx.p2_bit);
@@ -832,6 +853,7 @@ impl WallTrialCtx {
         if witness.w1.len > 0 && witness.w2.len > 0 {
             crate::bench_instr::bump(|b| &mut b.wall_witness_cut);
         }
+        self.grids_last_delta = *delta;
         self.grids.place(delta);
         let ok = self.trial_and_learn(p1_safe, p2_safe, witness);
         self.grids.remove(delta);
@@ -852,38 +874,91 @@ impl WallTrialCtx {
             // Only one side is in doubt, so only that side floods — and the
             // shortest path that comes back is simultaneously the verdict and
             // the new witness.  The other side is already proven by a live path.
-            let (start, goal, is_p1) = if p2_safe {
-                (self.p1_bit, P1_GOAL_BITS, true)
-            } else {
-                (self.p2_bit, P2_GOAL_BITS, false)
-            };
-            return match bff_path_to_goal(start, &self.grids, goal) {
-                Some(path) => {
-                    if is_p1 {
+            if p2_safe {
+                // P1 in doubt — always flood from scratch (no resume for P1).
+                return match bff_path_to_goal(self.p1_bit, &self.grids, P1_GOAL_BITS) {
+                    Some(path) => {
                         witness.w1.push(path);
-                    } else {
-                        witness.w2.push(path);
+                        true
                     }
+                    None => false,
+                };
+            }
+            // P2 in doubt.  Try to resume from stored pre-theft layers first.
+            // If the new delta doesn't block any edge within P2's pre-theft
+            // visited region, the layers are still valid and we can resume
+            // the flood from where P2 left off before bit-theft.
+            let delta = self.grids_last_delta;
+            if let Some(ref layers) = self.p2_resume_layers {
+                if !delta_touches_visited(&delta, self.p2_resume_visited) {
+                    let (path, _) = bff_resume_path_to_goal(
+                        layers,
+                        self.p2_resume_depth,
+                        self.p2_resume_visited,
+                        &self.grids,
+                        P2_GOAL_BITS,
+                    );
+                    return match path {
+                        Some(p) => {
+                            witness.w2.push(p);
+                            true
+                        }
+                        None => false,
+                    };
+                }
+            }
+            // No stored layers or delta touches them — restart from scratch.
+            return match bff_path_to_goal(self.p2_bit, &self.grids, P2_GOAL_BITS) {
+                Some(path) => {
+                    witness.w2.push(path);
                     true
                 }
                 None => false,
             };
         }
         // Both in doubt — the bootstrap case. One layered flood for P1 yields
-        // both its verdict and its path. P2 then floods against P1's visited
-        // bits exactly as before (bit stealing); when that succeeds P2 is
-        // already proven, so no second path is extracted here. If a later
-        // candidate actually threatens P2, the branch above mints one then.
+        // both its verdict and its path. P2 then floods with bit-theft from
+        // P1's visited set. P2 gets a witness only when it reaches the goal
+        // on its own (no bit-theft); when bit-theft triggers, P2 is proven
+        // but gets no path — instead, P2's pre-theft layers are stored so a
+        // later single-side-doubt flood can resume from that point.
         let (p1_path, p1_visited) =
             bff_path_to_goal_with_visited(self.p1_bit, &self.grids, P1_GOAL_BITS);
         let Some(p1_path) = p1_path else {
             return false;
         };
-        if !bff_to_goal_cached(self.p2_bit, p1_visited, &self.grids, P2_GOAL_BITS) {
-            return false;
-        }
         witness.w1.push(p1_path);
-        true
+        match bff_path_to_goal_cached_with_visited(
+            self.p2_bit,
+            p1_visited,
+            &self.grids,
+            P2_GOAL_BITS,
+        ) {
+            CachedPathResult::Path(p2_path, _) => {
+                witness.w2.push(p2_path);
+                true
+            }
+            CachedPathResult::BitTheftProven {
+                visited: _,
+                layers,
+                depth,
+            } => {
+                // Store pre-theft layers for later resume.
+                if depth > 0 {
+                    // Reconstruct pre-theft visited from layers (not the
+                    // post-theft visited that came back).
+                    let mut v = 0u128;
+                    for i in 0..=depth {
+                        v |= layers[i];
+                    }
+                    self.p2_resume_visited = v;
+                    self.p2_resume_depth = depth;
+                    self.p2_resume_layers = Some(layers);
+                }
+                true
+            }
+            CachedPathResult::Unreachable(_) => false,
+        }
     }
 
     #[inline]

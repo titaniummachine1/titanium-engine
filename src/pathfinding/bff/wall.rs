@@ -322,10 +322,78 @@ impl PathWitness {
             | (self.south & delta.south))
             != 0
     }
+
+    /// If the pawn moved along this path, truncate the path to start from the
+    /// pawn's current position and return true.  Returns false if the pawn is
+    /// not on the path (path should be dropped).
+    ///
+    /// The path is a sequence of steps from `start` to the goal.  Each cell on
+    /// the path has exactly one direction bit set (the direction it leaves in).
+    /// To truncate: walk from `start` along the path until we reach `pawn`,
+    /// removing each intermediate cell's direction bit.  If we reach `pawn`,
+    /// update `start` to `pawn` and we're done.  If we reach the goal without
+    /// finding `pawn`, the pawn is not on the path.
+    pub fn truncate_to(&mut self, pawn: u128) -> bool {
+        if self.start == pawn {
+            return true;
+        }
+        let mut cur = self.start;
+        // Walk along the path, removing each step until we reach pawn.
+        for _ in 0..80 {
+            // Find the direction cur leaves in.
+            let east_step = cur & self.east;
+            if east_step != 0 {
+                let next = cur << 1;
+                self.east &= !cur;
+                cur = next;
+                if cur == pawn {
+                    self.start = pawn;
+                    return true;
+                }
+                continue;
+            }
+            let west_step = cur & self.west;
+            if west_step != 0 {
+                let next = cur >> 1;
+                self.west &= !cur;
+                cur = next;
+                if cur == pawn {
+                    self.start = pawn;
+                    return true;
+                }
+                continue;
+            }
+            let south_step = cur & self.south;
+            if south_step != 0 {
+                let next = cur << FLOOD_STRIDE;
+                self.south &= !cur;
+                cur = next;
+                if cur == pawn {
+                    self.start = pawn;
+                    return true;
+                }
+                continue;
+            }
+            let north_step = cur & self.north;
+            if north_step != 0 {
+                let next = cur >> FLOOD_STRIDE;
+                self.north &= !cur;
+                cur = next;
+                if cur == pawn {
+                    self.start = pawn;
+                    return true;
+                }
+                continue;
+            }
+            // No step from cur — reached goal without finding pawn.
+            return false;
+        }
+        false
+    }
 }
 
 /// Deepest BFS layer we will record.  A 9x9 board cannot need more.
-const MAX_PATH_LAYERS: usize = 96;
+pub const MAX_PATH_LAYERS: usize = 96;
 
 /// Lee-wave flood that keeps its layer stack and reconstructs ONE shortest path.
 ///
@@ -416,6 +484,229 @@ pub fn bff_path_to_goal_with_visited(
 #[inline]
 pub fn bff_path_to_goal(start: u128, grids: &WallGrids, goal: u128) -> Option<PathWitness> {
     bff_path_to_goal_with_visited(start, grids, goal).0
+}
+
+/// Layered cached flood: same as `bff_path_to_goal_with_visited` but with
+/// bit-theft from `cache` (P1's visited set).  When the wave first touches
+/// the cache, the entire cached region is annexed into the current layer —
+/// so the backtrack can walk through annexed cells just like normal layers.
+/// Returns both the path witness and the full visited set.
+///
+/// This lets the bootstrap case mint a P2 witness without losing bit-theft
+/// speed: P2 still steals P1's reachable region, but now also gets a path.
+/// Result of a layered cached flood: path found, bit-theft proven (no path,
+/// but pre-theft layers stored for later resume), or unreachable.
+pub enum CachedPathResult {
+    /// P2 reached the goal on its own — path extracted, layers sound.
+    Path(PathWitness, u128),
+    /// P2 touched P1's cached region — proven reachable, but no path.
+    /// Carries P2's pre-theft layers, visited, and frontier so a later
+    /// single-side-doubt flood can resume from this point instead of
+    /// restarting from scratch.
+    BitTheftProven {
+        visited: u128,
+        layers: Box<[u128; MAX_PATH_LAYERS]>,
+        depth: usize,
+    },
+    /// P2 cannot reach the goal — wall is illegal.
+    Unreachable(u128),
+}
+
+/// Resume a P2 flood from stored pre-theft layers.  The layers represent
+/// P2's BFS distances from its start on a PREVIOUS wall configuration.
+/// The new `grids` may differ (different trial wall).  If the new delta
+/// blocks an edge within the stored visited region, the layers are stale
+/// and the caller must restart from scratch — check `delta_touches_visited`
+/// first.
+pub fn bff_resume_path_to_goal(
+    layers: &[u128; MAX_PATH_LAYERS],
+    depth: usize,
+    visited: u128,
+    grids: &WallGrids,
+    goal: u128,
+) -> (Option<PathWitness>, u128) {
+    // Work buffer: copy of the immutable pre-theft layers.  Resume flood
+    // appends new layers into this buffer so the backtrack can walk the
+    // full stack.
+    let mut work_layers = *layers;
+    let origin = work_layers[0];
+    let mut wave = work_layers[depth];
+    let mut visited = visited;
+    let mut depth = depth;
+    // Check if we already reached the goal in the stored layers.
+    if visited & goal != 0 {
+        for i in (1..=depth).rev() {
+            if work_layers[i] & goal != 0 {
+                wave = work_layers[i] & goal;
+                depth = i;
+                break;
+            }
+        }
+    } else {
+        // Continue flooding from the stored frontier with the new grids,
+        // appending each new layer into the work buffer.
+        loop {
+            wave = expand_wave(wave, grids) & !visited;
+            if wave == 0 {
+                return (None, visited);
+            }
+            depth += 1;
+            visited |= wave;
+            work_layers[depth] = wave;
+            if depth >= MAX_PATH_LAYERS {
+                return (None, visited);
+            }
+            if wave & goal != 0 {
+                break;
+            }
+        }
+    }
+
+    // Walk back goal -> start using the full work buffer.
+    let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
+    let mut path = PathWitness {
+        start: origin,
+        ..PathWitness::default()
+    };
+    for i in (1..=depth).rev() {
+        let prev = work_layers[i - 1];
+        let pred_mask = expand_wave(cur, grids) & prev;
+        if pred_mask == 0 {
+            return (None, visited);
+        }
+        let pred = pred_mask & pred_mask.wrapping_neg();
+        let diff = cur.trailing_zeros() as i32 - pred.trailing_zeros() as i32;
+        match diff {
+            1 => path.east |= pred,
+            -1 => path.west |= pred,
+            d if d == FLOOD_STRIDE as i32 => path.south |= pred,
+            d if d == -(FLOOD_STRIDE as i32) => path.north |= pred,
+            _ => return (None, visited),
+        }
+        cur = pred;
+    }
+    (Some(path), visited)
+}
+
+/// True when `delta` blocks an edge within `visited` — meaning the stored
+/// pre-theft layers are stale and the flood cannot safely resume.
+#[inline]
+pub fn delta_touches_visited(delta: &WallGrids, visited: u128) -> bool {
+    // delta.east marks cells whose east step is blocked (step from C to C<<1).
+    // If C is in visited AND C's east neighbor (C<<1) is also in visited, the
+    // blocked edge is within the visited region — layers are stale.
+    let east_blocked = delta.east & visited;
+    let west_blocked = delta.west & visited;
+    let south_blocked = delta.south & visited;
+    let north_blocked = delta.north & visited;
+    ((east_blocked << 1) & visited != 0)
+        || ((west_blocked >> 1) & visited != 0)
+        || ((south_blocked << FLOOD_STRIDE) & visited != 0)
+        || ((north_blocked >> FLOOD_STRIDE) & visited != 0)
+}
+
+pub fn bff_path_to_goal_cached_with_visited(
+    start: u128,
+    cache: u128,
+    grids: &WallGrids,
+    goal: u128,
+) -> CachedPathResult {
+    let mut layers = [0u128; MAX_PATH_LAYERS];
+    let mut visited = start & FLOOD_PLAYABLE;
+    layers[0] = visited;
+    let origin = visited;
+    if visited & goal != 0 {
+        return CachedPathResult::Path(
+            PathWitness {
+                start: origin,
+                ..PathWitness::default()
+            },
+            visited,
+        );
+    }
+    let mut wave = visited;
+    let mut pool = cache & !visited;
+    let mut depth = 0usize;
+    let mut layers_frozen = false;
+    // Pre-theft state: saved when bit-theft triggers, so a later flood can
+    // resume from this point instead of restarting from scratch.
+    let mut pre_theft_layers = Box::new([0u128; MAX_PATH_LAYERS]);
+    let mut pre_theft_depth = 0usize;
+    loop {
+        // Bit theft: on first contact with the cached region, annex P1's
+        // reachable set and keep flooding for the legality verdict — but
+        // freeze layer storage.  Annexed cells have arbitrary P2-distances,
+        // so any layer at or past this point is unsound for path extraction.
+        // P2 gets a witness only when it reaches the goal on its own before
+        // ever touching P1's territory.
+        if !layers_frozen && pool != 0 && wave & pool != 0 {
+            // Save pre-theft state: layers[0..depth] and the frontier wave
+            // are P2's own BFS progress, all at correct distances.
+            pre_theft_layers = Box::new(layers);
+            pre_theft_depth = depth;
+            visited |= pool;
+            wave |= pool;
+            pool = 0;
+            layers_frozen = true;
+            if visited & goal != 0 {
+                return CachedPathResult::BitTheftProven {
+                    visited,
+                    layers: pre_theft_layers,
+                    depth: pre_theft_depth,
+                };
+            }
+            // Continue flooding for legality, but don't store layers.
+            continue;
+        }
+        wave = expand_wave(wave, grids) & !visited;
+        if wave == 0 {
+            return CachedPathResult::Unreachable(visited);
+        }
+        visited |= wave;
+        if !layers_frozen {
+            depth += 1;
+            layers[depth] = wave;
+        }
+        if wave & goal != 0 {
+            if layers_frozen {
+                return CachedPathResult::BitTheftProven {
+                    visited,
+                    layers: pre_theft_layers,
+                    depth: pre_theft_depth,
+                };
+            }
+            break;
+        }
+        if !layers_frozen && depth + 1 >= MAX_PATH_LAYERS {
+            return CachedPathResult::Unreachable(visited);
+        }
+    }
+
+    // P2 reached the goal on its own — layers are sound, extract the path.
+    let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
+    let mut path = PathWitness {
+        start: origin,
+        ..PathWitness::default()
+    };
+    for i in (1..=depth).rev() {
+        let prev = layers[i - 1];
+        let pred_mask = expand_wave(cur, grids) & prev;
+        debug_assert!(pred_mask != 0, "no predecessor for cached path backtrack");
+        if pred_mask == 0 {
+            return CachedPathResult::Unreachable(visited);
+        }
+        let pred = pred_mask & pred_mask.wrapping_neg();
+        let diff = cur.trailing_zeros() as i32 - pred.trailing_zeros() as i32;
+        match diff {
+            1 => path.east |= pred,
+            -1 => path.west |= pred,
+            d if d == FLOOD_STRIDE as i32 => path.south |= pred,
+            d if d == -(FLOOD_STRIDE as i32) => path.north |= pred,
+            _ => unreachable!("invalid predecessor direction"),
+        }
+        cur = pred;
+    }
+    CachedPathResult::Path(path, visited)
 }
 
 
