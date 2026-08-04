@@ -345,63 +345,29 @@ impl PathWitness {
         }
         let mut cur = self.start;
         let mut steps_removed = 0u8;
-        // Walk along the path, removing each step until we reach pawn.
+        // Walk along the path branchlessly.  Each cell has exactly one
+        // direction bit set (the direction it leaves in), so all 4
+        // shifts can be computed simultaneously — only one produces a
+        // non-zero result.  8 bit ops per step, 1 predictable branch.
         for _ in 0..80 {
-            // Find the direction cur leaves in.
-            let east_step = cur & self.east;
-            if east_step != 0 {
-                let next = cur << 1;
-                self.east &= !cur;
-                cur = next;
-                steps_removed += 1;
-                if cur == pawn {
-                    self.start = pawn;
-                    self.length -= steps_removed;
-                    return true;
-                }
-                continue;
+            let next = ((cur & self.east) << 1)
+                | ((cur & self.west) >> 1)
+                | ((cur & self.south) << FLOOD_STRIDE)
+                | ((cur & self.north) >> FLOOD_STRIDE);
+            if next == 0 {
+                return false; // reached goal without finding pawn
             }
-            let west_step = cur & self.west;
-            if west_step != 0 {
-                let next = cur >> 1;
-                self.west &= !cur;
-                cur = next;
-                steps_removed += 1;
-                if cur == pawn {
-                    self.start = pawn;
-                    self.length -= steps_removed;
-                    return true;
-                }
-                continue;
+            self.east &= !cur;
+            self.west &= !cur;
+            self.south &= !cur;
+            self.north &= !cur;
+            cur = next;
+            steps_removed += 1;
+            if cur == pawn {
+                self.start = pawn;
+                self.length -= steps_removed;
+                return true;
             }
-            let south_step = cur & self.south;
-            if south_step != 0 {
-                let next = cur << FLOOD_STRIDE;
-                self.south &= !cur;
-                cur = next;
-                steps_removed += 1;
-                if cur == pawn {
-                    self.start = pawn;
-                    self.length -= steps_removed;
-                    return true;
-                }
-                continue;
-            }
-            let north_step = cur & self.north;
-            if north_step != 0 {
-                let next = cur >> FLOOD_STRIDE;
-                self.north &= !cur;
-                cur = next;
-                steps_removed += 1;
-                if cur == pawn {
-                    self.start = pawn;
-                    self.length -= steps_removed;
-                    return true;
-                }
-                continue;
-            }
-            // No step from cur — reached goal without finding pawn.
-            return false;
         }
         false
     }

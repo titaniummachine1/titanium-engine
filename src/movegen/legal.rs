@@ -10,9 +10,9 @@ use crate::movegen::pawn_bits::{
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{
     bff_path_to_goal, bff_path_to_goal_cached_with_visited, bff_path_to_goal_with_visited,
-    bff_resume_path_to_goal, bff_to_goal_cached, bff_wall_legal, delta_touches_visited,
-    pawn_bit, wall_delta, CachedPathResult, PathWitness, WallGrids, MAX_PATH_LAYERS,
-    P1_GOAL_BITS, P2_GOAL_BITS,
+    bff_resume_path_to_goal, bff_to_goal, bff_to_goal_cached, bff_wall_legal,
+    delta_touches_visited, pawn_bit, wall_delta, CachedPathResult, PathWitness, WallGrids,
+    MAX_PATH_LAYERS, P1_GOAL_BITS, P2_GOAL_BITS,
 };
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
@@ -924,7 +924,12 @@ impl WallTrialCtx {
             // shortest path that comes back is simultaneously the verdict and
             // the new witness.  The other side is already proven by a live path.
             if p2_safe {
-                // P1 in doubt — always flood from scratch (no resume for P1).
+                // P1 in doubt.  Skip backtrack if witness set is full.
+                let p1_full = witness.w1.len >= MAX_WITNESS_PATHS;
+                if p1_full {
+                    let (ok, _) = bff_to_goal(self.p1_bit, &self.grids, P1_GOAL_BITS);
+                    return ok;
+                }
                 return match bff_path_to_goal(self.p1_bit, &self.grids, P1_GOAL_BITS) {
                     Some(path) => {
                         witness.w1.push(path);
@@ -937,9 +942,21 @@ impl WallTrialCtx {
             // If the new delta doesn't block any edge within P2's pre-theft
             // visited region, the layers are still valid and we can resume
             // the flood from where P2 left off before bit-theft.
+            let p2_full = witness.w2.len >= MAX_WITNESS_PATHS;
             let delta = self.grids_last_delta;
             if let Some(ref layers) = self.p2_resume_layers {
                 if !delta_touches_visited(&delta, self.p2_resume_visited) {
+                    if p2_full {
+                        // Skip backtrack — just check legality via resume flood.
+                        let (path, _) = bff_resume_path_to_goal(
+                            layers,
+                            self.p2_resume_depth,
+                            self.p2_resume_visited,
+                            &self.grids,
+                            P2_GOAL_BITS,
+                        );
+                        return path.is_some();
+                    }
                     let (path, _) = bff_resume_path_to_goal(
                         layers,
                         self.p2_resume_depth,
@@ -957,6 +974,10 @@ impl WallTrialCtx {
                 }
             }
             // No stored layers or delta touches them — restart from scratch.
+            if p2_full {
+                let (ok, _) = bff_to_goal(self.p2_bit, &self.grids, P2_GOAL_BITS);
+                return ok;
+            }
             return match bff_path_to_goal(self.p2_bit, &self.grids, P2_GOAL_BITS) {
                 Some(path) => {
                     witness.w2.push(path);
@@ -971,12 +992,28 @@ impl WallTrialCtx {
         // on its own (no bit-theft); when bit-theft triggers, P2 is proven
         // but gets no path — instead, P2's pre-theft layers are stored so a
         // later single-side-doubt flood can resume from that point.
-        let (p1_path, p1_visited) =
-            bff_path_to_goal_with_visited(self.p1_bit, &self.grids, P1_GOAL_BITS);
-        let Some(p1_path) = p1_path else {
-            return false;
+        let p1_full = witness.w1.len >= MAX_WITNESS_PATHS;
+        let p2_full = witness.w2.len >= MAX_WITNESS_PATHS;
+        // When P1's set is full, skip the backtrack — use bff_to_goal (flood
+        // only) instead of bff_path_to_goal_with_visited (flood + backtrack).
+        // The visited set is still returned for P2's bit-theft flood.
+        let (p1_path, p1_visited) = if p1_full {
+            let (ok, visited) = bff_to_goal(self.p1_bit, &self.grids, P1_GOAL_BITS);
+            if !ok {
+                return false;
+            }
+            (None, visited)
+        } else {
+            let (path, visited) =
+                bff_path_to_goal_with_visited(self.p1_bit, &self.grids, P1_GOAL_BITS);
+            let Some(path) = path else {
+                return false;
+            };
+            (Some(path), visited)
         };
-        witness.w1.push(p1_path);
+        if let Some(p) = p1_path {
+            witness.w1.push(p);
+        }
         match bff_path_to_goal_cached_with_visited(
             self.p2_bit,
             p1_visited,
@@ -984,7 +1021,9 @@ impl WallTrialCtx {
             P2_GOAL_BITS,
         ) {
             CachedPathResult::Path(p2_path, _) => {
-                witness.w2.push(p2_path);
+                if !p2_full {
+                    witness.w2.push(p2_path);
+                }
                 true
             }
             CachedPathResult::BitTheftProven {
