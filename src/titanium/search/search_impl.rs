@@ -963,7 +963,7 @@ impl TiBridge {
     /// without a flood. Inherited paths are taken unchecked and pruned inside
     /// `WallTrialCtx::new`, which is what keeps this sound for every move kind —
     /// wall, pawn, or null — without decoding the move.
-    fn gen_legal_ace(&mut self, ply: usize, out: &mut [i16; 160]) -> usize {
+    fn gen_legal(&mut self, ply: usize, out: &mut [i16; 160]) -> usize {
         let mut ti_buf = [BoardMove::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
         let Self {
             geometric_walls,
@@ -1465,7 +1465,7 @@ mod score_label_tests {
         // search prove the fixture outright, which held only for the old raw
         // TitaniumSearch::new() -- that constructor generated geometry-only
         // walls at inner nodes and sealed them downstream. Movegen is now
-        // uniformly fully-legal (gen_legal_ace), and production prunes more
+        // uniformly fully-legal (gen_legal), and production prunes more
         // aggressively than the original baseline, so no depth-5 mate proof
         // is available. Sign agreement is the part that guards soundness.
         let mut ordinary = TitaniumSearch::production(game, None);
@@ -3847,6 +3847,64 @@ impl TitaniumSearch {
         (score, route0, route1)
     }
 
+    /// Distance-field plane score: exact per-cell BFS distances weighted by
+    /// learned per-cell weights. Gives the net the actual distance gradient
+    /// instead of the lossy binarized route planes.
+    ///
+    /// Cost: 2 × materialize (81 iterations each, reading already-cached layer
+    /// bitmasks) + 2 × 81 dot product + 1 broadcast scalar = ~243 MACs.
+    /// The distance layers are already maintained by refresh_dist_site, so
+    /// this only materializes them — no BFS flood is triggered here.
+    fn dist_field_score(&mut self, nw: &Net) -> f64 {
+        if !nw.dist_field_active {
+            return 0.0;
+        }
+        let turn = self.g.turn;
+        let d0_field = materialize_distance_layers_inline(
+            &self.d0_layers[self.dist0_idx],
+            self.d0_layer_depth[self.dist0_idx],
+        );
+        let d1_field = materialize_distance_layers_inline(
+            &self.d1_layers[self.dist1_idx],
+            self.d1_layer_depth[self.dist1_idx],
+        );
+        // In canonical frame: own = me, opp = opp
+        let (own_field, opp_field) = if turn == 0 {
+            (&d0_field, &d1_field)
+        } else {
+            (&d1_field, &d0_field)
+        };
+        let dist_me_w = &nw.dist_me_canon[turn];
+        let dist_opp_w = &nw.dist_opp_canon[turn];
+        let dist_diff_w = &nw.dist_diff_canon[turn];
+
+        let mut score = 0.0f64;
+        let own_pawn = self.g.pawn[turn];
+        let opp_pawn = self.g.pawn[1 - turn];
+        let d_own_pawn = own_field[own_pawn as usize];
+        let d_opp_pawn = opp_field[opp_pawn as usize];
+
+        // dist_diff is a broadcast plane: same value for all 81 cells, but the
+        // weight is per-cell (learned), so we compute the scalar once and dot
+        // with the weight vector.
+        let dd = if d_own_pawn == u8::MAX || d_opp_pawn == u8::MAX {
+            0.0
+        } else {
+            ((d_opp_pawn as f64 - d_own_pawn as f64) / 20.0).clamp(-1.0, 1.0)
+        };
+
+        for c in 0..81 {
+            let d_own = own_field[c];
+            let d_opp = opp_field[c];
+            let n_own = if d_own == u8::MAX { 1.0 } else { (d_own as f64).min(20.0) / 20.0 };
+            let n_opp = if d_opp == u8::MAX { 1.0 } else { (d_opp as f64).min(20.0) / 20.0 };
+            score += dist_me_w[c] * n_own;
+            score += dist_opp_w[c] * n_opp;
+            score += dist_diff_w[c] * dd;
+        }
+        score
+    }
+
     fn wall_topology_key(&self) -> (u32, u32) {
         let z = &ZOBRIST;
         let mut k_lo = self.g.hash_lo ^ z.pawn_lo[0][self.g.pawn[0]] ^ z.pawn_lo[1][self.g.pawn[1]];
@@ -5137,6 +5195,11 @@ impl TitaniumSearch {
         );
         let (route_score, _, _) = self.route_feature_score(nw);
         out += route_score;
+        // Distance-field extension: exact per-cell BFS distances as net input.
+        // Zero-padded in legacy weights → dist_field_active false → not computed,
+        // so existing blobs are byte-for-byte unaffected. A retrained blob with
+        // learned dist weights activates this path.
+        out += self.dist_field_score(nw);
         // CAT impact heatmap as a direct net input plane. Zeroed in legacy weights
         // (loader zero-pads) → `cat_active` false → NOT computed, so the live net is
         // byte-for-byte unaffected. Retrain-ready: a blob with learned `cat_heat`
@@ -5509,7 +5572,7 @@ impl TitaniumSearch {
         self.bridge
             .as_mut()
             .expect("ti movegen needs bridge")
-            .gen_legal_ace(_ply, out)
+            .gen_legal(_ply, out)
     }
 
     fn order_moves(&self, ply: usize, moves: &mut [i16], tt_move: i16, cm_move: i16) {
@@ -5683,7 +5746,27 @@ impl TitaniumSearch {
             return false;
         }
         if is_wall_move(prev_move) {
-            if !self.q_search_wall_dist_changed(ply, prev_move) {
+            let dist_changed = self.q_search_wall_dist_changed(ply, prev_move);
+
+            // Seal-threat extension: if the wall could close a cycle in the
+            // wall-barrier graph (touches 2+ walls in the same component),
+            // extend even if distances haven't changed yet — the opponent's
+            // sealing response may dramatically change the position.
+            let has_seal_potential = if !dist_changed {
+                let slot = crate::titanium::wall_slot(prev_move);
+                let wall_bit = slot + if is_hwall_move(prev_move) { 0 } else { 64 };
+                let occupied = crate::movegen::wall_occupied_from_game(
+                    self.g.hw_bits,
+                    self.g.vw_bits,
+                );
+                // Check seal potential against walls placed BEFORE this move.
+                let occupied_before = occupied & !(1u128 << wall_bit);
+                crate::movegen::wall_has_seal_potential(occupied_before, wall_bit)
+            } else {
+                false
+            };
+
+            if !dist_changed && !has_seal_potential {
                 return false;
             }
             if self.q_swing_cp > 0 && (static_ev + parent_static).abs() < self.q_swing_cp {
@@ -7917,7 +8000,7 @@ mod witness_inheritance_tests {
     use super::*;
     use crate::util::perft::{PERFT3_STARTPOS, PERFT4_STARTPOS};
 
-    /// Perft driven through `TiBridge::gen_legal_ace`, so the per-ply witness
+    /// Perft driven through `TiBridge::gen_legal`, so the per-ply witness
     /// stack is live at every node and each node really does inherit its
     /// parent's paths.
     ///
@@ -7926,7 +8009,7 @@ mod witness_inheritance_tests {
     /// as an illegal wall being accepted, i.e. an inflated node count.
     fn perft_bridge(b: &mut TiBridge, depth: u32, ply: usize) -> u64 {
         let mut moves = [0i16; 160];
-        let n = b.gen_legal_ace(ply, &mut moves);
+        let n = b.gen_legal(ply, &mut moves);
         if depth == 1 {
             return n as u64;
         }
