@@ -4,11 +4,9 @@
 
 use crate::titanium::dist::{
     dist_in_layers, fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0,
-    fill_ace_dist_layers_to_goal_p1, fill_ace_dist_to_goal_with_masks_p0,
-    fill_ace_dist_to_goal_with_masks_p1, fill_choke_points, fill_contested, fill_corridor_delta,
-    fill_sparse_route_masks, materialize_distance_layers,
-    materialize_distance_layers_inline, shortest_route_bits, wall_incr_refresh_flags,
-    width_in_layers,
+    fill_ace_dist_layers_to_goal_p1, fill_choke_points, fill_contested, fill_corridor_delta,
+    fill_sparse_route_masks, materialize_distance_layers_inline, shortest_route_bits,
+    wall_incr_refresh_flags, width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot,
