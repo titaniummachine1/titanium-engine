@@ -372,10 +372,13 @@ pub fn bff_path_to_goal_with_visited(
         }
     }
 
-    // Walk back goal -> start, one layer at a time.  `expand_wave` moves east by
-    // `<< 1` and south by `<< FLOOD_STRIDE`, so the cell that stepped east into
-    // `cur` sits at `cur >> 1` and must not itself be east-blocked.  The stride
-    // leaves buffer columns, so an off-board shift can never land in a layer.
+    // Walk back goal -> start, one layer at a time.  `expand_wave` is the
+    // flood-bit-space equivalent of the pawn LUT with enemy_key=0: it gives
+    // the wall-gated cardinal neighbours of a cell (no diagonal jumps, no
+    // opponent).  Reusing it here means the wall gating is done once in the
+    // shift expression — no separate per-direction wall ANDs or sequential
+    // branches.  The predecessor is whichever wall-reachable neighbour of
+    // `cur` sits in the previous layer.
     let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
     let mut path = PathWitness {
         start: origin,
@@ -383,33 +386,28 @@ pub fn bff_path_to_goal_with_visited(
     };
     for i in (1..=depth).rev() {
         let prev = layers[i - 1];
-        let east_src = cur >> 1;
-        if east_src & prev != 0 && east_src & grids.east == 0 {
-            path.east |= east_src;
-            cur = east_src;
-            continue;
-        }
-        let west_src = cur << 1;
-        if west_src & prev != 0 && west_src & grids.west == 0 {
-            path.west |= west_src;
-            cur = west_src;
-            continue;
-        }
-        let south_src = cur >> FLOOD_STRIDE;
-        if south_src & prev != 0 && south_src & grids.south == 0 {
-            path.south |= south_src;
-            cur = south_src;
-            continue;
-        }
-        let north_src = cur << FLOOD_STRIDE;
-        if north_src & prev != 0 && north_src & grids.north == 0 {
-            path.north |= north_src;
-            cur = north_src;
-            continue;
-        }
+        let pred_mask = expand_wave(cur, grids) & prev;
         // Every layer-i cell was reached from layer i-1 by construction.
-        debug_assert!(false, "no predecessor for path backtrack");
-        return (None, visited);
+        debug_assert!(pred_mask != 0, "no predecessor for path backtrack");
+        if pred_mask == 0 {
+            return (None, visited);
+        }
+        // Pick the lowest-set-bit predecessor deterministically.
+        let pred = pred_mask & pred_mask.wrapping_neg();
+        // Direction from the bit-position difference: cur_bit - pred_bit.
+        //   +1            → pred is west  of cur → path steps east  from pred
+        //   -1            → pred is east  of cur → path steps west  from pred
+        //   +FLOOD_STRIDE → pred is north of cur → path steps south from pred
+        //   -FLOOD_STRIDE → pred is south of cur → path steps north from pred
+        let diff = cur.trailing_zeros() as i32 - pred.trailing_zeros() as i32;
+        match diff {
+            1 => path.east |= pred,
+            -1 => path.west |= pred,
+            d if d == FLOOD_STRIDE as i32 => path.south |= pred,
+            d if d == -(FLOOD_STRIDE as i32) => path.north |= pred,
+            _ => unreachable!("invalid predecessor direction"),
+        }
+        cur = pred;
     }
     (Some(path), visited)
 }
