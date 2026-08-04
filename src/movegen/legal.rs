@@ -10,7 +10,7 @@ use crate::movegen::pawn_bits::{
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{
     bff_path_to_goal, bff_path_to_goal_cached_with_visited, bff_path_to_goal_with_visited,
-    bff_resume_path_to_goal, bff_to_goal, bff_to_goal_cached, bff_wall_legal,
+    bff_resume_path_to_goal, bff_to_goal, bff_wall_legal,
     delta_touches_visited, pawn_bit, wall_delta, CachedPathResult, PathWitness, WallGrids,
     MAX_PATH_LAYERS, P1_GOAL_BITS, P2_GOAL_BITS,
 };
@@ -827,6 +827,7 @@ struct WallTrialCtx {
     p2_resume_layers: Option<Box<[u128; MAX_PATH_LAYERS]>>,
     p2_resume_depth: usize,
     p2_resume_visited: u128,
+    p2_resume_delta: WallGrids,
     grids_last_delta: WallGrids,
 }
 
@@ -846,6 +847,7 @@ impl WallTrialCtx {
             p2_resume_layers: None,
             p2_resume_depth: 0,
             p2_resume_visited: 0,
+            p2_resume_delta: WallGrids::default(),
             grids_last_delta: WallGrids::default(),
         };
         witness.w1.retain_valid(&ctx.grids, ctx.p1_bit);
@@ -939,24 +941,17 @@ impl WallTrialCtx {
                 };
             }
             // P2 in doubt.  Try to resume from stored pre-theft layers first.
-            // If the new delta doesn't block any edge within P2's pre-theft
-            // visited region, the layers are still valid and we can resume
-            // the flood from where P2 left off before bit-theft.
+            // The layers were computed with the bootstrap trial wall placed.
+            // Resume is sound only if NEITHER the bootstrap delta NOR the
+            // current delta blocks an edge within P2's pre-theft visited
+            // region — otherwise the stored layer distances are stale and
+            // the backtrack could fail.
             let p2_full = witness.w2.len >= MAX_WITNESS_PATHS;
             let delta = self.grids_last_delta;
             if let Some(ref layers) = self.p2_resume_layers {
-                if !delta_touches_visited(&delta, self.p2_resume_visited) {
-                    if p2_full {
-                        // Skip backtrack — just check legality via resume flood.
-                        let (path, _) = bff_resume_path_to_goal(
-                            layers,
-                            self.p2_resume_depth,
-                            self.p2_resume_visited,
-                            &self.grids,
-                            P2_GOAL_BITS,
-                        );
-                        return path.is_some();
-                    }
+                let bootstrap_ok = !delta_touches_visited(&self.p2_resume_delta, self.p2_resume_visited);
+                let current_ok = !delta_touches_visited(&delta, self.p2_resume_visited);
+                if bootstrap_ok && current_ok {
                     let (path, _) = bff_resume_path_to_goal(
                         layers,
                         self.p2_resume_depth,
@@ -964,16 +959,15 @@ impl WallTrialCtx {
                         &self.grids,
                         P2_GOAL_BITS,
                     );
-                    return match path {
-                        Some(p) => {
+                    if let Some(p) = path {
+                        if !p2_full {
                             witness.w2.push(p);
-                            true
                         }
-                        None => false,
-                    };
+                        return true;
+                    }
+                    // Resume flood stagnated — fall through to fresh flood.
                 }
             }
-            // No stored layers or delta touches them — restart from scratch.
             if p2_full {
                 let (ok, _) = bff_to_goal(self.p2_bit, &self.grids, P2_GOAL_BITS);
                 return ok;
@@ -1014,12 +1008,13 @@ impl WallTrialCtx {
         if let Some(p) = p1_path {
             witness.w1.push(p);
         }
-        match bff_path_to_goal_cached_with_visited(
+        let cached_result = bff_path_to_goal_cached_with_visited(
             self.p2_bit,
             p1_visited,
             &self.grids,
             P2_GOAL_BITS,
-        ) {
+        );
+        match cached_result {
             CachedPathResult::Path(p2_path, _) => {
                 if !p2_full {
                     witness.w2.push(p2_path);
@@ -1031,10 +1026,7 @@ impl WallTrialCtx {
                 layers,
                 depth,
             } => {
-                // Store pre-theft layers for later resume.
                 if depth > 0 {
-                    // Reconstruct pre-theft visited from layers (not the
-                    // post-theft visited that came back).
                     let mut v = 0u128;
                     for i in 0..=depth {
                         v |= layers[i];
@@ -1042,6 +1034,7 @@ impl WallTrialCtx {
                     self.p2_resume_visited = v;
                     self.p2_resume_depth = depth;
                     self.p2_resume_layers = Some(layers);
+                    self.p2_resume_delta = self.grids_last_delta;
                 }
                 true
             }

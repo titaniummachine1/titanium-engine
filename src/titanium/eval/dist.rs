@@ -115,6 +115,15 @@ fn materialize_distance_layers_inner(layers: &[u128; 81], depth: usize, out: &mu
     }
 }
 
+/// Materialize layers into a dense `[u8; 81]` array, returned by value.
+/// Only for debug/trace paths that need the full field — the hot search path
+/// uses `dist_in_layers` for single-square lookups instead.
+pub fn materialize_distance_layers_inline(layers: &[u128; 81], depth: usize) -> [u8; 81] {
+    let mut out = [255u8; 81];
+    materialize_distance_layers_inner(layers, depth, &mut out);
+    out
+}
+
 /// BFS distance of square `sq` from the layer masks (255 = unreachable). O(depth)
 /// bit tests — replaces a dense `dist[sq]` random read.
 #[inline]
@@ -157,23 +166,30 @@ pub fn wall_incr_probe_squares(m: i16) -> Option<(usize, usize, usize, usize)> {
 
 /// True when a newly placed wall may change this player's goal-distance field.
 ///
-/// Uses the ACE incremental test: a wall only affects shortest-path distances
-/// when it blocks an edge between cells whose goal-distance differs (BFS
-/// gradient edge on some shortest route).
+/// A wall only affects shortest-path distances when it blocks an edge between
+/// cells whose goal-distance differs (a gradient edge on some shortest route).
+/// `dist_at` is called only for the 4 probe squares, so pass a layer-based
+/// lookup — no dense array needed.
 #[inline]
-pub fn wall_incr_cuts_player_dist(d: &[u8; 81], m: i16) -> bool {
+pub fn wall_incr_cuts_player_dist<F: Fn(usize) -> u8>(dist_at: F, m: i16) -> bool {
     let Some((a, b2, c2, e2)) = wall_incr_probe_squares(m) else {
         return false;
     };
-    d[a] != d[b2] || d[c2] != d[e2]
+    dist_at(a) != dist_at(b2) || dist_at(c2) != dist_at(e2)
 }
 
-/// Per-player incremental refresh flags for a single wall added on top of `d0`/`d1`.
+/// Per-player incremental refresh flags for a single wall added on top of the
+/// current distance layers. Each `dist_at` closure is called only for the 4
+/// probe squares of the wall.
 #[inline]
-pub fn wall_incr_refresh_flags(d0: &[u8; 81], d1: &[u8; 81], m: i16) -> (bool, bool) {
+pub fn wall_incr_refresh_flags<F0: Fn(usize) -> u8, F1: Fn(usize) -> u8>(
+    dist_p0: F0,
+    dist_p1: F1,
+    m: i16,
+) -> (bool, bool) {
     (
-        wall_incr_cuts_player_dist(d0, m),
-        wall_incr_cuts_player_dist(d1, m),
+        wall_incr_cuts_player_dist(dist_p0, m),
+        wall_incr_cuts_player_dist(dist_p1, m),
     )
 }
 
@@ -675,12 +691,14 @@ mod tests {
                 g.make_move(moves[(lcg(&mut rng) as usize) % n]);
             }
 
-            let mut d0 = [0u8; 81];
-            let mut d1 = [0u8; 81];
-            fill_ace_dist_to_goal(&g, 0, &mut d0);
-            fill_ace_dist_to_goal(&g, 1, &mut d1);
-            let pre0 = d0[g.pawn[0]];
-            let pre1 = d1[g.pawn[1]];
+            use crate::pathfinding::masks::DirMasks;
+            let masks = DirMasks::from_ace_game(&g);
+            let mut layers_p0 = [0u128; 81];
+            let mut layers_p1 = [0u128; 81];
+            let depth_p0 = fill_ace_dist_layers_to_goal_p0(masks, &mut layers_p0);
+            let depth_p1 = fill_ace_dist_layers_to_goal_p1(masks, &mut layers_p1);
+            let pre0 = dist_in_layers(&layers_p0, depth_p0, g.pawn[0] as u8);
+            let pre1 = dist_in_layers(&layers_p1, depth_p1, g.pawn[1] as u8);
 
             for wt in 0..2usize {
                 for slot in 0..64usize {
@@ -693,18 +711,18 @@ mod tests {
                         crate::titanium::MOVE_VW_BASE
                     }) + slot as i16;
                     wall_trials += 1;
-                    let (refresh0, refresh1) = wall_incr_refresh_flags(&d0, &d1, m);
+                    let (refresh0, refresh1) = wall_incr_refresh_flags(
+                        |sq| dist_in_layers(&layers_p0, depth_p0, sq as u8),
+                        |sq| dist_in_layers(&layers_p1, depth_p1, sq as u8),
+                        m,
+                    );
                     if refresh0 || refresh1 {
                         continue;
                     }
                     no_edge_trials += 1;
                     g.make_move(m);
-                    let mut child_d0 = [0u8; 81];
-                    let mut child_d1 = [0u8; 81];
-                    fill_ace_dist_to_goal(&g, 0, &mut child_d0);
-                    fill_ace_dist_to_goal(&g, 1, &mut child_d1);
-                    let post0 = child_d0[g.pawn[0]];
-                    let post1 = child_d1[g.pawn[1]];
+                    let post0 = g.dist_to_goal_for_pawn(0);
+                    let post1 = g.dist_to_goal_for_pawn(1);
                     if post0 != pre0 || post1 != pre1 {
                         false_negatives += 1;
                     }
@@ -764,5 +782,149 @@ mod tests {
             contested.iter().any(|&v| v == 16),
             "startpos has fully contested corridor cells"
         );
+    }
+
+    // ── Layer vs dense equivalence: behavior-correctness tests ───────────
+    //
+    // These tests verify that the layer-based lookups (dist_in_layers,
+    // width_in_layers, materialize_distance_layers_inline) produce identical
+    // results to the dense [u8; 81] scatter flood for every square and every
+    // distance. They test behavior, not implementation patterns.
+
+    fn layer_test_positions() -> Vec<GameState> {
+        vec![
+            GameState::new(),
+            pos(&["e2", "e8", "e3", "e7", "d3h", "f5v"]),
+            pos(&["e2", "e8", "e3", "e7", "d4h"]),
+            pos(&["e2", "e8", "e3", "e7", "d4h", "f4v", "c3h", "g5v"]),
+        ]
+    }
+
+    #[test]
+    fn layer_dist_matches_scatter_for_every_square() {
+        for g in layer_test_positions() {
+            let masks = DirMasks::from_ace_game(&g);
+            for player in [0usize, 1] {
+                let mut dense = [0u8; 81];
+                fill_ace_dist_to_goal_with_masks(player, masks, &mut dense);
+
+                let mut layers = [0u128; 81];
+                let depth = fill_ace_dist_layers_to_goal(player, masks, &mut layers);
+
+                for sq in 0..81u8 {
+                    let from_layer = dist_in_layers(&layers, depth, sq);
+                    assert_eq!(
+                        from_layer, dense[sq as usize],
+                        "player {player} sq {sq}: layer={} dense={}",
+                        from_layer, dense[sq as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layer_materialize_matches_scatter_flood() {
+        for g in layer_test_positions() {
+            let masks = DirMasks::from_ace_game(&g);
+            for player in [0usize, 1] {
+                let mut dense = [0u8; 81];
+                fill_ace_dist_to_goal_with_masks(player, masks, &mut dense);
+
+                let mut layers = [0u128; 81];
+                let depth = fill_ace_dist_layers_to_goal(player, masks, &mut layers);
+                let materialized = materialize_distance_layers_inline(&layers, depth);
+
+                assert_eq!(
+                    materialized, dense,
+                    "player {player}: materialized layers != scatter flood"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layer_width_matches_dense_count() {
+        for g in layer_test_positions() {
+            let masks = DirMasks::from_ace_game(&g);
+            for player in [0usize, 1] {
+                let mut dense = [0u8; 81];
+                fill_ace_dist_to_goal_with_masks(player, masks, &mut dense);
+
+                let mut layers = [0u128; 81];
+                let depth = fill_ace_dist_layers_to_goal(player, masks, &mut layers);
+
+                for d in 0..depth as u8 {
+                    let from_layer = width_in_layers(&layers, depth, d);
+                    let from_dense = dense.iter().filter(|&&v| v == d).count() as u32;
+                    assert_eq!(
+                        from_layer, from_dense,
+                        "player {player} d={d}: layer width={} dense count={}",
+                        from_layer, from_dense
+                    );
+                }
+
+                let beyond = width_in_layers(&layers, depth, depth as u8);
+                assert_eq!(beyond, 0, "width beyond depth must be 0");
+            }
+        }
+    }
+
+    #[test]
+    fn dist_to_goal_for_pawn_matches_compute_dist() {
+        for g in layer_test_positions() {
+            for player in [0usize, 1] {
+                let mut dense = [0u8; 81];
+                g.compute_dist(player, &mut dense);
+                let expected = dense[g.pawn[player]];
+                let got = g.dist_to_goal_for_pawn(player);
+                assert_eq!(
+                    got, expected,
+                    "player {player} pawn at {}: dist_to_goal_for_pawn={} compute_dist={}",
+                    g.pawn[player], got, expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dist_from_pawn_to_goal_matches_compute_dist() {
+        for g in layer_test_positions() {
+            for pawn_player in [0usize, 1] {
+                for goal_player in [0usize, 1] {
+                    let mut dense = [0u8; 81];
+                    g.compute_dist(goal_player, &mut dense);
+                    let expected = dense[g.pawn[pawn_player]];
+                    let got = g.dist_from_pawn_to_goal(pawn_player, goal_player);
+                    assert_eq!(
+                        got, expected,
+                        "pawn_player={pawn_player} goal_player={goal_player}: \
+                         dist_from_pawn_to_goal={} compute_dist={}",
+                        got, expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layer_flood_unreachable_squares_are_255() {
+        let g = pos(&["e2", "e8", "e3", "e7", "d4h", "e4h", "f4h", "g4h"]);
+        let masks = DirMasks::from_ace_game(&g);
+        for player in [0usize, 1] {
+            let mut dense = [0u8; 81];
+            fill_ace_dist_to_goal_with_masks(player, masks, &mut dense);
+            let mut layers = [0u128; 81];
+            let depth = fill_ace_dist_layers_to_goal(player, masks, &mut layers);
+            for sq in 0..81u8 {
+                if dense[sq as usize] == 255 {
+                    assert_eq!(
+                        dist_in_layers(&layers, depth, sq),
+                        255,
+                        "player {player} sq {sq}: dense says unreachable but layer found a distance"
+                    );
+                }
+            }
+        }
     }
 }

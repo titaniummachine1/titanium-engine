@@ -3,10 +3,12 @@
 //! evaluation, and timing heuristics used by the native engine.
 
 use crate::titanium::dist::{
-    fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
-    fill_ace_dist_to_goal_with_masks_p0, fill_ace_dist_to_goal_with_masks_p1, fill_choke_points,
-    fill_contested, fill_corridor_delta, fill_sparse_route_masks, materialize_distance_layers,
-    shortest_route_bits, wall_incr_refresh_flags, width_in_layers,
+    dist_in_layers, fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0,
+    fill_ace_dist_layers_to_goal_p1, fill_ace_dist_to_goal_with_masks_p0,
+    fill_ace_dist_to_goal_with_masks_p1, fill_choke_points, fill_contested, fill_corridor_delta,
+    fill_sparse_route_masks, materialize_distance_layers,
+    materialize_distance_layers_inline, shortest_route_bits, wall_incr_refresh_flags,
+    width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot,
@@ -563,8 +565,6 @@ struct DistTopoEntry {
     key: u64,
     d0_depth: u16,
     d1_depth: u16,
-    d0: [u8; 81],
-    d1: [u8; 81],
     d0_layers: [u128; DIST_LAYER_INLINE],
     d1_layers: [u128; DIST_LAYER_INLINE],
 }
@@ -575,8 +575,6 @@ impl Default for DistTopoEntry {
             key: u64::MAX,
             d0_depth: 0,
             d1_depth: 0,
-            d0: [255; 81],
-            d1: [255; 81],
             d0_layers: [0; DIST_LAYER_INLINE],
             d1_layers: [0; DIST_LAYER_INLINE],
         }
@@ -2296,8 +2294,6 @@ pub struct TitaniumSearch {
     cont_hist: Vec<i32>,
     path_lo: [u32; MAX_PLY],
     path_hi: [u32; MAX_PLY],
-    d0: [[u8; 81]; MAX_PLY],
-    d1: [[u8; 81]; MAX_PLY],
     d0_layers: [[u128; 81]; MAX_PLY],
     d1_layers: [[u128; 81]; MAX_PLY],
     d0_layer_depth: [usize; MAX_PLY],
@@ -2575,8 +2571,6 @@ impl TitaniumSearch {
             killers: [[0; 2]; MAX_PLY],
             path_lo: [0; MAX_PLY],
             path_hi: [0; MAX_PLY],
-            d0: [[0; 81]; MAX_PLY],
-            d1: [[0; 81]; MAX_PLY],
             d0_layers: [[0; 81]; MAX_PLY],
             d1_layers: [[0; 81]; MAX_PLY],
             d0_layer_depth: [0; MAX_PLY],
@@ -3272,8 +3266,8 @@ impl TitaniumSearch {
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
         let net_eval = self.compute_net_eval_trace().eval;
         let eval = self.evaluate(0);
-        let d0_scalar = self.d0[self.dist0_idx][self.g.pawn[0]];
-        let d1_scalar = self.d1[self.dist1_idx][self.g.pawn[1]];
+        let d0_scalar = self.d0_sq(self.g.pawn[0] as u8);
+        let d1_scalar = self.d1_sq(self.g.pawn[1] as u8);
         let bits = |arr: &[u8; 64]| {
             let mut s = String::new();
             for (i, b) in arr.iter().enumerate() {
@@ -3304,8 +3298,14 @@ impl TitaniumSearch {
             }
             s
         };
-        let d0f = self.d0[self.dist0_idx];
-        let d1f = self.d1[self.dist1_idx];
+        let d0f = materialize_distance_layers_inline(
+            &self.d0_layers[self.dist0_idx],
+            self.d0_layer_depth[self.dist0_idx],
+        );
+        let d1f = materialize_distance_layers_inline(
+            &self.d1_layers[self.dist1_idx],
+            self.d1_layer_depth[self.dist1_idx],
+        );
         let mut p0_steps = [255u8; 81];
         let mut p1_steps = [255u8; 81];
         let mut delta0 = [255u8; 81];
@@ -3339,14 +3339,16 @@ impl TitaniumSearch {
         };
         let legal_walls = 0;
         let (cross_p0, cross_p1) = (0, 0);
-        let width_me = self.d0[self.dist0_idx]
-            .iter()
-            .filter(|&&d| d as i32 == d0_scalar as i32)
-            .count();
-        let width_opp = self.d1[self.dist1_idx]
-            .iter()
-            .filter(|&&d| d as i32 == d1_scalar as i32)
-            .count();
+        let width_me = width_in_layers(
+            &self.d0_layers[self.dist0_idx],
+            self.d0_layer_depth[self.dist0_idx],
+            d0_scalar,
+        );
+        let width_opp = width_in_layers(
+            &self.d1_layers[self.dist1_idx],
+            self.d1_layer_depth[self.dist1_idx],
+            d1_scalar,
+        );
         format!(
             "{{\"turn\":{},\"pawn0\":{},\"pawn1\":{},\"wl0\":{},\"wl1\":{},\
              \"d0\":{},\"d1\":{},\"legal_wall_count\":{},\"legal_path_cross_p0\":{},\"legal_path_cross_p1\":{},\
@@ -3456,14 +3458,14 @@ impl TitaniumSearch {
         let me = self.g.turn;
         let opp = 1 - me;
         let d_me_u = if me == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]]
+            self.d0_sq(self.g.pawn[0] as u8)
         } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]]
+            self.d1_sq(self.g.pawn[1] as u8)
         };
         let d_opp_u = if opp == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]]
+            self.d0_sq(self.g.pawn[0] as u8)
         } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]]
+            self.d1_sq(self.g.pawn[1] as u8)
         };
         let w_me_i = self.g.wl[me];
         let w_opp_i = self.g.wl[opp];
@@ -3533,30 +3535,18 @@ impl TitaniumSearch {
                 }
             }
         }
-        let width_opp = if self.net.route_active {
-            (if me == 0 {
-                width_in_layers(
-                    &self.d1_layers[self.dist1_idx],
-                    self.d1_layer_depth[self.dist1_idx],
-                    d_opp_u,
-                )
-            } else {
-                width_in_layers(
-                    &self.d0_layers[self.dist0_idx],
-                    self.d0_layer_depth[self.dist0_idx],
-                    d_opp_u,
-                )
-            }) as f64
-        } else if me == 0 {
-            self.d1[self.dist1_idx]
-                .iter()
-                .filter(|&&d| d as i32 == d_opp_i)
-                .count() as f64
+        let width_opp = if me == 0 {
+            width_in_layers(
+                &self.d1_layers[self.dist1_idx],
+                self.d1_layer_depth[self.dist1_idx],
+                d_opp_u,
+            ) as f64
         } else {
-            self.d0[self.dist0_idx]
-                .iter()
-                .filter(|&&d| d as i32 == d_opp_i)
-                .count() as f64
+            width_in_layers(
+                &self.d0_layers[self.dist0_idx],
+                self.d0_layer_depth[self.dist0_idx],
+                d_opp_u,
+            ) as f64
         };
         let width_contrib = ws[15] * width_opp;
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
@@ -3653,8 +3643,8 @@ impl TitaniumSearch {
         self.stream_last_emit_ms = elapsed_ms;
         self.stream_last_emit_nodes = self.nodes;
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_PROGRESS);
-        let white_dist = self.d0[self.dist0_idx][self.g.pawn[0]];
-        let black_dist = self.d1[self.dist1_idx][self.g.pawn[1]];
+        let white_dist = self.d0_sq(self.g.pawn[0] as u8);
+        let black_dist = self.d1_sq(self.g.pawn[1] as u8);
         let elapsed_ms = self.stream_t0.elapsed().as_millis() as u64;
         emit_ace_progress(
             &self.stream_label,
@@ -3821,17 +3811,15 @@ impl TitaniumSearch {
             return (0.0, 0, 0);
         }
         let masks = self.current_dir_masks();
-        let d0f = &self.d0[self.dist0_idx];
-        let d1f = &self.d1[self.dist1_idx];
         let route0 = shortest_route_bits(
             self.g.pawn[0],
-            d0f[self.g.pawn[0]],
+            self.d0_sq(self.g.pawn[0] as u8),
             &self.d0_layers[self.dist0_idx],
             masks,
         );
         let route1 = shortest_route_bits(
             self.g.pawn[1],
-            d1f[self.g.pawn[1]],
+            self.d1_sq(self.g.pawn[1] as u8),
             &self.d1_layers[self.dist1_idx],
             masks,
         );
@@ -3870,6 +3858,30 @@ impl TitaniumSearch {
             k_hi ^= z.turn_hi;
         }
         (k_lo, k_hi)
+    }
+
+    /// P0's distance-to-goal at square `sq` from the current layer flood.
+    #[inline]
+    fn d0_sq(&self, sq: u8) -> u8 {
+        self.d0_sq_at(self.dist0_idx, sq)
+    }
+
+    /// P1's distance-to-goal at square `sq` from the current layer flood.
+    #[inline]
+    fn d1_sq(&self, sq: u8) -> u8 {
+        self.d1_sq_at(self.dist1_idx, sq)
+    }
+
+    /// P0's distance-to-goal at square `sq` from layer flood at index `idx`.
+    #[inline]
+    fn d0_sq_at(&self, idx: usize, sq: u8) -> u8 {
+        dist_in_layers(&self.d0_layers[idx], self.d0_layer_depth[idx], sq)
+    }
+
+    /// P1's distance-to-goal at square `sq` from layer flood at index `idx`.
+    #[inline]
+    fn d1_sq_at(&self, idx: usize, sq: u8) -> u8 {
+        dist_in_layers(&self.d1_layers[idx], self.d1_layer_depth[idx], sq)
     }
 
     fn current_dir_masks(&mut self) -> DirMasks {
@@ -4009,7 +4021,7 @@ impl TitaniumSearch {
         self.dist_layer_spill.insert(wkey, spill);
     }
 
-    /// Copy one player's fields for `wkey` from the topology cache into ply slot.
+    /// Copy one player's layer flood for `wkey` from the topology cache into ply slot.
     fn dist_lru_load(&mut self, wkey: u64, ply: usize, player: usize) -> bool {
         let slot = dist_lru_slot(wkey, self.dist_lru_bits);
         if self.dist_lru[slot].key != wkey {
@@ -4018,57 +4030,45 @@ impl TitaniumSearch {
         crate::bench_instr::record(
             |b| &mut b.dist_lru_hit,
             || {
-                if self.net.route_active {
-                    crate::bench_instr::bump(|b| &mut b.dist_lru_hit_layers);
-                } else {
-                    crate::bench_instr::bump(|b| &mut b.dist_lru_hit_scalar);
-                }
+                crate::bench_instr::bump(|b| &mut b.dist_lru_hit_layers);
                 if player == 0 {
-                    self.d0[ply] = self.dist_lru[slot].d0;
-                    if self.net.route_active {
-                        let d = self.dist_lru[slot].d0_depth as usize;
-                        self.d0_layer_depth[ply] = d;
-                        crate::bench_instr::record(
-                            |b| &mut b.dist_lru_layer_copy,
-                            || {
-                                // Common (~99.96%): depth fits inline — copy `d`
-                                // words only. Spill map is never consulted.
-                                if d <= DIST_LAYER_INLINE {
-                                    self.d0_layers[ply][..d].copy_from_slice(
-                                        &self.dist_lru[slot].d0_layers[..d],
-                                    );
-                                } else {
-                                    self.dist_lru_load_spill_layers(slot, ply, 0, d);
-                                }
-                            },
-                        );
-                        crate::bench_instr::add_u64(
-                            |b| &mut b.dist_lru_layer_copy_bytes,
-                            (d * std::mem::size_of::<u128>()) as u64,
-                        );
-                    }
+                    let d = self.dist_lru[slot].d0_depth as usize;
+                    self.d0_layer_depth[ply] = d;
+                    crate::bench_instr::record(
+                        |b| &mut b.dist_lru_layer_copy,
+                        || {
+                            if d <= DIST_LAYER_INLINE {
+                                self.d0_layers[ply][..d].copy_from_slice(
+                                    &self.dist_lru[slot].d0_layers[..d],
+                                );
+                            } else {
+                                self.dist_lru_load_spill_layers(slot, ply, 0, d);
+                            }
+                        },
+                    );
+                    crate::bench_instr::add_u64(
+                        |b| &mut b.dist_lru_layer_copy_bytes,
+                        (d * std::mem::size_of::<u128>()) as u64,
+                    );
                 } else {
-                    self.d1[ply] = self.dist_lru[slot].d1;
-                    if self.net.route_active {
-                        let d = self.dist_lru[slot].d1_depth as usize;
-                        self.d1_layer_depth[ply] = d;
-                        crate::bench_instr::record(
-                            |b| &mut b.dist_lru_layer_copy,
-                            || {
-                                if d <= DIST_LAYER_INLINE {
-                                    self.d1_layers[ply][..d].copy_from_slice(
-                                        &self.dist_lru[slot].d1_layers[..d],
-                                    );
-                                } else {
-                                    self.dist_lru_load_spill_layers(slot, ply, 1, d);
-                                }
-                            },
-                        );
-                        crate::bench_instr::add_u64(
-                            |b| &mut b.dist_lru_layer_copy_bytes,
-                            (d * std::mem::size_of::<u128>()) as u64,
-                        );
-                    }
+                    let d = self.dist_lru[slot].d1_depth as usize;
+                    self.d1_layer_depth[ply] = d;
+                    crate::bench_instr::record(
+                        |b| &mut b.dist_lru_layer_copy,
+                        || {
+                            if d <= DIST_LAYER_INLINE {
+                                self.d1_layers[ply][..d].copy_from_slice(
+                                    &self.dist_lru[slot].d1_layers[..d],
+                                );
+                            } else {
+                                self.dist_lru_load_spill_layers(slot, ply, 1, d);
+                            }
+                        },
+                    );
+                    crate::bench_instr::add_u64(
+                        |b| &mut b.dist_lru_layer_copy_bytes,
+                        (d * std::mem::size_of::<u128>()) as u64,
+                    );
                 }
             },
         );
@@ -4094,36 +4094,26 @@ impl TitaniumSearch {
         let old_was_deep = old_d0 > DIST_LAYER_INLINE || old_d1 > DIST_LAYER_INLINE;
 
         self.dist_lru[slot].key = wkey;
-        self.dist_lru[slot].d0 = self.d0[i0];
-        self.dist_lru[slot].d1 = self.d1[i1];
 
-        if self.net.route_active {
-            crate::bench_instr::bump(|b| &mut b.dist_lru_store_layers);
-            let d0 = self.d0_layer_depth[i0];
-            let d1 = self.d1_layer_depth[i1];
-            self.dist_lru[slot].d0_depth = d0 as u16;
-            self.dist_lru[slot].d1_depth = d1 as u16;
-            crate::bench_instr::bump_dist_layer_depth(d0);
-            crate::bench_instr::bump_dist_layer_depth(d1);
+        crate::bench_instr::bump(|b| &mut b.dist_lru_store_layers);
+        let d0 = self.d0_layer_depth[i0];
+        let d1 = self.d1_layer_depth[i1];
+        self.dist_lru[slot].d0_depth = d0 as u16;
+        self.dist_lru[slot].d1_depth = d1 as u16;
+        crate::bench_instr::bump_dist_layer_depth(d0);
+        crate::bench_instr::bump_dist_layer_depth(d1);
 
-            let n0 = d0.min(DIST_LAYER_INLINE);
-            let n1 = d1.min(DIST_LAYER_INLINE);
-            self.dist_lru[slot].d0_layers[..n0]
-                .copy_from_slice(&self.d0_layers[i0][..n0]);
-            self.dist_lru[slot].d1_layers[..n1]
-                .copy_from_slice(&self.d1_layers[i1][..n1]);
+        let n0 = d0.min(DIST_LAYER_INLINE);
+        let n1 = d1.min(DIST_LAYER_INLINE);
+        self.dist_lru[slot].d0_layers[..n0]
+            .copy_from_slice(&self.d0_layers[i0][..n0]);
+        self.dist_lru[slot].d1_layers[..n1]
+            .copy_from_slice(&self.d1_layers[i1][..n1]);
 
-            if d0 > DIST_LAYER_INLINE || d1 > DIST_LAYER_INLINE {
-                self.dist_lru_store_spill(wkey, i0, i1, d0, d1, old_key, old_was_deep);
-            } else if old_was_deep {
-                self.dist_spill_remove(old_key);
-            }
-            // else: common→common — spill map untouched.
+        if d0 > DIST_LAYER_INLINE || d1 > DIST_LAYER_INLINE {
+            self.dist_lru_store_spill(wkey, i0, i1, d0, d1, old_key, old_was_deep);
         } else if old_was_deep {
-            crate::bench_instr::bump(|b| &mut b.dist_lru_store_scalar);
             self.dist_spill_remove(old_key);
-        } else {
-            crate::bench_instr::bump(|b| &mut b.dist_lru_store_scalar);
         }
         if self.dist_lru_growable
             && self.dist_lru_filled * 2 >= self.dist_lru.len()
@@ -4175,8 +4165,11 @@ impl TitaniumSearch {
             // (|dist diff| === 1); equal-dist edges lie on no shortest path.
             let m = self.g.hist_m[self.g.hist_len - 1];
             if is_wall_move(m) {
-                let (refresh0, refresh1) =
-                    wall_incr_refresh_flags(&self.d0[self.dist0_idx], &self.d1[self.dist1_idx], m);
+                let (refresh0, refresh1) = wall_incr_refresh_flags(
+                    |sq| self.d0_sq(sq as u8),
+                    |sq| self.d1_sq(sq as u8),
+                    m,
+                );
                 if !refresh0
                     && !refresh1
                     && crate::bench_instr::active_refresh_site()
@@ -4210,22 +4203,10 @@ impl TitaniumSearch {
                             crate::bench_instr::record(
                                 |b| &mut b.dist_lru_miss,
                                 || {
-                                    if self.net.route_active {
-                                        self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal_p0(
-                                            masks.expect("refresh masks"),
-                                            &mut self.d0_layers[ply],
-                                        );
-                                        materialize_distance_layers(
-                                            &self.d0_layers[ply],
-                                            self.d0_layer_depth[ply],
-                                            &mut self.d0[ply],
-                                        );
-                                    } else {
-                                        fill_ace_dist_to_goal_with_masks_p0(
-                                            masks.expect("refresh masks"),
-                                            &mut self.d0[ply],
-                                        );
-                                    }
+                                    self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal_p0(
+                                        masks.expect("refresh masks"),
+                                        &mut self.d0_layers[ply],
+                                    );
                                 },
                             );
                         }
@@ -4241,22 +4222,10 @@ impl TitaniumSearch {
                             crate::bench_instr::record(
                                 |b| &mut b.dist_lru_miss,
                                 || {
-                                    if self.net.route_active {
-                                        self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal_p1(
-                                            masks.expect("refresh masks"),
-                                            &mut self.d1_layers[ply],
-                                        );
-                                        materialize_distance_layers(
-                                            &self.d1_layers[ply],
-                                            self.d1_layer_depth[ply],
-                                            &mut self.d1[ply],
-                                        );
-                                    } else {
-                                        fill_ace_dist_to_goal_with_masks_p1(
-                                            masks.expect("refresh masks"),
-                                            &mut self.d1[ply],
-                                        );
-                                    }
+                                    self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal_p1(
+                                        masks.expect("refresh masks"),
+                                        &mut self.d1_layers[ply],
+                                    );
                                 },
                             );
                         }
@@ -4298,56 +4267,27 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.shortest_path,
                 || {
-                    if self.net.route_active {
-                        if d0_todo {
-                            crate::bench_instr::record(
-                                |b| &mut b.dist_lru_miss,
-                                || {
-                                    self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal_p0(
-                                        masks,
-                                        &mut self.d0_layers[ply],
-                                    );
-                                    materialize_distance_layers(
-                                        &self.d0_layers[ply],
-                                        self.d0_layer_depth[ply],
-                                        &mut self.d0[ply],
-                                    );
-                                },
-                            );
-                        }
-                        if d1_todo {
-                            crate::bench_instr::record(
-                                |b| &mut b.dist_lru_miss,
-                                || {
-                                    self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal_p1(
-                                        masks,
-                                        &mut self.d1_layers[ply],
-                                    );
-                                    materialize_distance_layers(
-                                        &self.d1_layers[ply],
-                                        self.d1_layer_depth[ply],
-                                        &mut self.d1[ply],
-                                    );
-                                },
-                            );
-                        }
-                    } else {
-                        if d0_todo {
-                            crate::bench_instr::record(
-                                |b| &mut b.dist_lru_miss,
-                                || {
-                                    fill_ace_dist_to_goal_with_masks_p0(masks, &mut self.d0[ply]);
-                                },
-                            );
-                        }
-                        if d1_todo {
-                            crate::bench_instr::record(
-                                |b| &mut b.dist_lru_miss,
-                                || {
-                                    fill_ace_dist_to_goal_with_masks_p1(masks, &mut self.d1[ply]);
-                                },
-                            );
-                        }
+                    if d0_todo {
+                        crate::bench_instr::record(
+                            |b| &mut b.dist_lru_miss,
+                            || {
+                                self.d0_layer_depth[ply] = fill_ace_dist_layers_to_goal_p0(
+                                    masks,
+                                    &mut self.d0_layers[ply],
+                                );
+                            },
+                        );
+                    }
+                    if d1_todo {
+                        crate::bench_instr::record(
+                            |b| &mut b.dist_lru_miss,
+                            || {
+                                self.d1_layer_depth[ply] = fill_ace_dist_layers_to_goal_p1(
+                                    masks,
+                                    &mut self.d1_layers[ply],
+                                );
+                            },
+                        );
                     }
                 },
             );
@@ -5073,14 +5013,14 @@ impl TitaniumSearch {
         let me = self.g.turn;
         let opp = 1 - me;
         let mut d_me_i = if me == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            self.d0_sq(self.g.pawn[0] as u8) as i32
         } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            self.d1_sq(self.g.pawn[1] as u8) as i32
         };
         let mut d_opp_i = if opp == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            self.d0_sq(self.g.pawn[0] as u8) as i32
         } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            self.d1_sq(self.g.pawn[1] as u8) as i32
         };
         let w_me_i = self.g.wl[me];
         let w_opp_i = self.g.wl[opp];
@@ -5088,10 +5028,10 @@ impl TitaniumSearch {
         let bff_d_opp_i = d_opp_i;
 
         if self.race_proof && w_me_i == 0 && w_opp_i == 0 {
-            let d0 = &self.d0[self.dist0_idx];
-            let d1 = &self.d1[self.dist1_idx];
+            let dist_p0 = self.d0_sq(self.g.pawn[0] as u8);
+            let dist_p1 = self.d1_sq(self.g.pawn[1] as u8);
             self.race_outcome_stats.jump_dist_calls += 1;
-            if bff_tempo_margin_close(&self.g, d0, d1) {
+            if bff_tempo_margin_close(&self.g, dist_p0, dist_p1) {
                 let ja = jump_aware_goal_distances(&mut self.g);
                 self.race_outcome_stats.jump_dist_upgrades += 1;
                 let new_me = if me == 0 { ja.d0 } else { ja.d1 };
@@ -5216,31 +5156,19 @@ impl TitaniumSearch {
         // ws[15]: opponent corridor width on their goal field (matches halfpw.py).
         let width_opp = {
             let _width_timer = crate::bench_instr::OpTimer::start(|b| &mut b.eval_width_opp);
-            if self.net.route_active {
-                (if me == 0 {
-                    width_in_layers(
-                        &self.d1_layers[self.dist1_idx],
-                        self.d1_layer_depth[self.dist1_idx],
-                        d_opp_i as u8,
-                    )
-                } else {
-                    width_in_layers(
-                        &self.d0_layers[self.dist0_idx],
-                        self.d0_layer_depth[self.dist0_idx],
-                        d_opp_i as u8,
-                    )
-                }) as usize
-            } else if me == 0 {
-                self.d1[self.dist1_idx]
-                    .iter()
-                    .filter(|&&d| d as i32 == d_opp_i)
-                    .count()
+            (if me == 0 {
+                width_in_layers(
+                    &self.d1_layers[self.dist1_idx],
+                    self.d1_layer_depth[self.dist1_idx],
+                    d_opp_i as u8,
+                )
             } else {
-                self.d0[self.dist0_idx]
-                    .iter()
-                    .filter(|&&d| d as i32 == d_opp_i)
-                    .count()
-            }
+                width_in_layers(
+                    &self.d0_layers[self.dist0_idx],
+                    self.d0_layer_depth[self.dist0_idx],
+                    d_opp_i as u8,
+                )
+            }) as usize
         } as f64;
         out += ws[15] * width_opp;
         // ws[16]/ws[17] path-cross inputs are retired from live search. They
@@ -5396,14 +5324,14 @@ impl TitaniumSearch {
             self.g.make_move(c);
             self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_RACE_PICK);
             let d_me = if me == 0 {
-                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+                self.d0_sq(self.g.pawn[0] as u8) as i32
             } else {
-                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+                self.d1_sq(self.g.pawn[1] as u8) as i32
             };
             let d_opp = if me == 0 {
-                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+                self.d1_sq(self.g.pawn[1] as u8) as i32
             } else {
-                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+                self.d0_sq(self.g.pawn[0] as u8) as i32
             };
             let tie_eval = d_opp - d_me;
             self.g.unmake_move();
@@ -5603,10 +5531,10 @@ impl TitaniumSearch {
         prev_move: i16,
         cat_prior: Option<(&[i32; HIST_SPAN], u32)>,
     ) {
-        let dist_me = if self.g.turn == 0 {
-            &self.d0[self.dist0_idx]
+        let dist_to_goal_at: &dyn Fn(u8) -> u8 = if self.g.turn == 0 {
+            &|sq| self.d0_sq(sq)
         } else {
-            &self.d1[self.dist1_idx]
+            &|sq| self.d1_sq(sq)
         };
         let k = &self.killers[ply];
         let n = moves.len();
@@ -5616,7 +5544,7 @@ impl TitaniumSearch {
             sc[i] = if m == tt_move {
                 2_000_000_000
             } else if is_pawn_move(m) {
-                let progress = 1_000_000 - dist_me[m as usize] as i32 * 1000;
+                let progress = 1_000_000 - dist_to_goal_at(m as u8) as i32 * 1000;
                 // History is only a ±499 tie-break; one shortest-path step
                 // remains worth 1000 points.
                 progress + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
@@ -5708,18 +5636,18 @@ impl TitaniumSearch {
         let me = self.g.turn;
         let from = self.g.pawn[me] as usize;
         let dcur = if me == 0 {
-            self.d0[self.dist0_idx][from]
+            self.d0_sq(from as u8)
         } else {
-            self.d1[self.dist1_idx][from]
+            self.d1_sq(from as u8)
         };
         let mut buf = [0i16; 16];
         let n = self.g.gen_pawn_moves(&mut buf, 0);
         for i in 0..n {
             let to = buf[i] as usize;
             let d = if me == 0 {
-                self.d0[self.dist0_idx][to]
+                self.d0_sq(to as u8)
             } else {
-                self.d1[self.dist1_idx][to]
+                self.d1_sq(to as u8)
             };
             if d <= dcur.saturating_sub(2) {
                 return true;
@@ -5732,17 +5660,17 @@ impl TitaniumSearch {
         if !is_wall_move(wall_move) || self.g.hist_len == 0 {
             return false;
         }
-        let p0 = self.g.pawn[0] as usize;
-        let p1 = self.g.pawn[1] as usize;
-        let d0_now = self.d0[self.dist0_idx][p0];
-        let d1_now = self.d1[self.dist1_idx][p1];
+        let p0 = self.g.pawn[0] as u8;
+        let p1 = self.g.pawn[1] as u8;
+        let d0_now = self.d0_sq(p0);
+        let d1_now = self.d1_sq(p1);
         self.g.unmake_move();
         self.refresh_dist_site(
             ply.saturating_sub(1),
             crate::bench_instr::REFRESH_SITE_QSEARCH_UNMAKE,
         );
-        let d0_was = self.d0[self.dist0_idx][p0];
-        let d1_was = self.d1[self.dist1_idx][p1];
+        let d0_was = self.d0_sq(p0);
+        let d1_was = self.d1_sq(p1);
         self.g.make_move(wall_move);
         self.refresh_dist_site(ply, crate::bench_instr::REFRESH_SITE_QSEARCH_REMAKE);
         d0_now != d0_was || d1_now != d1_was
@@ -5870,11 +5798,26 @@ impl TitaniumSearch {
             // may cut only when it crosses the current window.  A PV/wide
             // window falls through to the exact retrograde or ordinary search.
             {
-                let d0 = &self.d0[self.dist0_idx];
-                let d1 = &self.d1[self.dist1_idx];
+                let dist_p0 = self.d0_sq(self.g.pawn[0] as u8);
+                let dist_p1 = self.d1_sq(self.g.pawn[1] as u8);
+                let eta0 = crate::titanium::endgame::race::arrival_ply(0, self.g.turn, dist_p0);
+                let eta1 = crate::titanium::endgame::race::arrival_ply(1, self.g.turn, dist_p1);
+                let runner = if eta0 < eta1 { 0 } else { 1 };
+                let chaser = runner ^ 1;
+                let chaser_dist_to_runner_goal = if runner == 0 {
+                    self.d0_sq(self.g.pawn[chaser] as u8)
+                } else {
+                    self.d1_sq(self.g.pawn[chaser] as u8)
+                };
                 let bound = crate::bench_instr::record(
                     |b| &mut b.eval_race_bound,
-                    || race_outcome_with_dist(&self.g, d0, d1, &mut self.race_outcome_stats),
+                    || race_outcome_with_dist(
+                        &self.g,
+                        dist_p0,
+                        dist_p1,
+                        chaser_dist_to_runner_goal,
+                        &mut self.race_outcome_stats,
+                    ),
                 );
                 match bound {
                     RaceBound::Lower(v) if v >= beta => {
@@ -6197,8 +6140,8 @@ impl TitaniumSearch {
                 self.lazy_root_visits.push(original_idx);
             }
             let mover = self.g.turn;
-            let pre_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
-            let pre_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
+            let pre_d0 = self.d0_sq(self.g.pawn[0] as u8);
+            let pre_d1 = self.d1_sq(self.g.pawn[1] as u8);
             crate::bench_instr::record(
                 |b| &mut b.make_move,
                 || {
@@ -6258,8 +6201,8 @@ impl TitaniumSearch {
                     if cat_lmr_active && v16_plan.final_reduction > 0 {
                         crate::bench_instr::bump_u64(|b| &mut b.cat_edge_test_calls);
                         let (refresh0, refresh1) = wall_incr_refresh_flags(
-                            &self.d0[self.dist0_idx],
-                            &self.d1[self.dist1_idx],
+                            |sq| self.d0_sq(sq as u8),
+                            |sq| self.d1_sq(sq as u8),
                             m,
                         );
                         if !refresh0 && !refresh1 {
@@ -6278,8 +6221,8 @@ impl TitaniumSearch {
                                 crate::bench_instr::REFRESH_SITE_CAT_PATH_LMR,
                             );
                             self.pending_cat_child_ply = Some(ply + 1);
-                            let post_d0 = self.d0[self.dist0_idx][self.g.pawn[0]];
-                            let post_d1 = self.d1[self.dist1_idx][self.g.pawn[1]];
+                            let post_d0 = self.d0_sq(self.g.pawn[0] as u8);
+                            let post_d1 = self.d1_sq(self.g.pawn[1] as u8);
                             let (pre_our, pre_opp, post_our, post_opp) = if mover == 0 {
                                 (pre_d0, pre_d1, post_d0, post_d1)
                             } else {
@@ -6331,8 +6274,8 @@ impl TitaniumSearch {
             {
                 // Pawn moves do not change wall topology, so the parent distance
                 // fields remain valid after the pawn coordinate changes.
-                let post_d0 = self.d0[nd0][self.g.pawn[0]];
-                let post_d1 = self.d1[nd1][self.g.pawn[1]];
+                let post_d0 = self.d0_sq_at(nd0, self.g.pawn[0] as u8);
+                let post_d1 = self.d1_sq_at(nd1, self.g.pawn[1] as u8);
                 let (pre_our, post_our) = if mover == 0 {
                     (pre_d0, post_d0)
                 } else {
@@ -6694,9 +6637,9 @@ impl TitaniumSearch {
 
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_ROOT_DEF_INIT);
         let own_dist_before: i32 = if root_side == 0 {
-            self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+            self.d0_sq(self.g.pawn[0] as u8) as i32
         } else {
-            self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+            self.d1_sq(self.g.pawn[1] as u8) as i32
         };
 
         for i in 0..n {
@@ -6733,14 +6676,14 @@ impl TitaniumSearch {
                 }
             };
             let own_dist_after: i32 = if root_side == 0 {
-                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+                self.d0_sq(self.g.pawn[0] as u8) as i32
             } else {
-                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+                self.d1_sq(self.g.pawn[1] as u8) as i32
             };
             let opp_dist_after: i32 = if root_side == 0 {
-                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+                self.d1_sq(self.g.pawn[1] as u8) as i32
             } else {
-                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+                self.d0_sq(self.g.pawn[0] as u8) as i32
             };
             let search_score = match self.ab(child_depth, -INF, INF, 1, true, m, 0) {
                 Ok(s) => -s,
@@ -6888,9 +6831,9 @@ impl TitaniumSearch {
                 }
             };
             let opp_dist_after: i32 = if root_side == 0 {
-                self.d1[self.dist1_idx][self.g.pawn[1]] as i32
+                self.d1_sq(self.g.pawn[1] as u8) as i32
             } else {
-                self.d0[self.dist0_idx][self.g.pawn[0]] as i32
+                self.d0_sq(self.g.pawn[0] as u8) as i32
             };
             let search_score = match self.ab(child_depth, -INF, INF, 1, true, m, 0) {
                 Ok(s) => -s,
@@ -6966,8 +6909,8 @@ impl TitaniumSearch {
                 root_visits: Vec::new(),
                 root_move_ids: Vec::new(),
                 ms: t0.elapsed().as_millis() as u64,
-                white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
-                black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
+                white_dist: self.d0_sq(self.g.pawn[0] as u8),
+                black_dist: self.d1_sq(self.g.pawn[1] as u8),
                 depth_log: Vec::new(),
                 stop_reason: "opening-book",
                 race_outcome_stats: self.race_outcome_stats,
@@ -6990,8 +6933,8 @@ impl TitaniumSearch {
                         solution.legal_moves as u64,
                         solution.score,
                         &[],
-                        self.d0[self.dist0_idx][self.g.pawn[0]],
-                        self.d1[self.dist1_idx][self.g.pawn[1]],
+                        self.d0_sq(self.g.pawn[0] as u8),
+                        self.d1_sq(self.g.pawn[1] as u8),
                         rt0.elapsed().as_millis() as u64,
                         self.root_scores,
                         self.multipv,
@@ -7017,8 +6960,8 @@ impl TitaniumSearch {
                     root_visits: Vec::new(),
                     root_move_ids: Vec::new(),
                     ms: rt0.elapsed().as_millis() as u64,
-                    white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
-                    black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
+                    white_dist: self.d0_sq(self.g.pawn[0] as u8),
+                    black_dist: self.d1_sq(self.g.pawn[1] as u8),
                     depth_log: Vec::new(),
                     stop_reason: if solution.exact {
                         "semi_terminal_race_exact"
@@ -7073,8 +7016,8 @@ impl TitaniumSearch {
                         root_visits: Vec::new(),
                         root_move_ids: Vec::new(),
                         ms: rt0.elapsed().as_millis() as u64,
-                        white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
-                        black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
+                        white_dist: self.d0_sq(self.g.pawn[0] as u8),
+                        black_dist: self.d1_sq(self.g.pawn[1] as u8),
                         depth_log: Vec::new(),
                         stop_reason: "race_proof_root_table",
                         race_outcome_stats: self.race_outcome_stats,
@@ -7173,8 +7116,8 @@ impl TitaniumSearch {
                 root_visits: Vec::new(),
                 root_move_ids: Vec::new(),
                 ms: t0.elapsed().as_millis() as u64,
-                white_dist: self.d0[self.dist0_idx][self.g.pawn[0]],
-                black_dist: self.d1[self.dist1_idx][self.g.pawn[1]],
+                white_dist: self.d0_sq(self.g.pawn[0] as u8),
+                black_dist: self.d1_sq(self.g.pawn[1] as u8),
                 depth_log: Vec::new(),
                 stop_reason: "opening-book",
                 race_outcome_stats: self.race_outcome_stats,
@@ -7904,8 +7847,8 @@ impl TitaniumSearch {
         }
 
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_THINK_FINAL);
-        let white_dist = self.d0[self.dist0_idx][self.g.pawn[0]];
-        let black_dist = self.d1[self.dist1_idx][self.g.pawn[1]];
+        let white_dist = self.d0_sq(self.g.pawn[0] as u8);
+        let black_dist = self.d1_sq(self.g.pawn[1] as u8);
         let ms = t0.elapsed().as_millis() as u64;
 
         if log {

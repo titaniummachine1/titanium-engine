@@ -404,45 +404,42 @@ pub fn jump_aware_goal_distances(g: &mut GameState) -> JumpAwareDist {
 }
 
 /// True when BFF dual distances put the race inside the ±1-tempo band.
-pub fn bff_tempo_margin_close(g: &GameState, d0: &[u8; 81], d1: &[u8; 81]) -> bool {
-    let r0 = d0[g.pawn[0]];
-    let r1 = d1[g.pawn[1]];
-    if r0 == u8::MAX || r1 == u8::MAX {
+pub fn bff_tempo_margin_close(g: &GameState, dist_p0: u8, dist_p1: u8) -> bool {
+    if dist_p0 == u8::MAX || dist_p1 == u8::MAX {
         return false;
     }
-    let eta0 = arrival_ply(0, g.turn, r0);
-    let eta1 = arrival_ply(1, g.turn, r1);
+    let eta0 = arrival_ply(0, g.turn, dist_p0);
+    let eta1 = arrival_ply(1, g.turn, dist_p1);
     (eta0 - eta1).abs() <= 1
 }
 
 /// Gate 1 only (ETA `delta_eta > 1` interception-impossible). Gate 2 is
 /// non-decisive (Case B — see the body). Used by audits and by
 /// [`race_outcome_detailed`] before the winner-table tier.
-pub fn race_outcome_gates_ab_with_dist(g: &GameState, d0: &[u8; 81], d1: &[u8; 81]) -> RaceBound {
+pub fn race_outcome_gates_ab_with_dist(
+    g: &GameState,
+    dist_p0: u8,
+    dist_p1: u8,
+    chaser_dist_to_runner_goal: u8,
+) -> RaceBound {
     debug_assert!(
         g.pawn[0] >= 9 && g.pawn[1] < 72,
         "race_outcome on terminal state"
     );
 
-    let r0 = d0[g.pawn[0]];
-    let r1 = d1[g.pawn[1]];
-    if r0 == u8::MAX || r1 == u8::MAX {
+    if dist_p0 == u8::MAX || dist_p1 == u8::MAX {
         return RaceBound::Unknown;
     }
 
-    let eta0 = arrival_ply(0, g.turn, r0);
-    let eta1 = arrival_ply(1, g.turn, r1);
+    let eta0 = arrival_ply(0, g.turn, dist_p0);
+    let eta1 = arrival_ply(1, g.turn, dist_p1);
 
     if eta0 != eta1 {
         let runner: usize = if eta0 < eta1 { 0 } else { 1 };
-        let chaser = runner ^ 1;
         let runner_eta = if runner == 0 { eta0 } else { eta1 };
 
-        let d_runner_goal: &[u8; 81] = if runner == 0 { d0 } else { d1 };
-        let chaser_d = d_runner_goal[g.pawn[chaser]];
-
-        let fires = chaser_d == u8::MAX || {
-            let chaser_eta = arrival_ply(chaser, g.turn, chaser_d);
+        let fires = chaser_dist_to_runner_goal == u8::MAX || {
+            let chaser_eta = arrival_ply(runner ^ 1, g.turn, chaser_dist_to_runner_goal);
             chaser_eta - runner_eta > 1
         };
 
@@ -467,11 +464,14 @@ pub fn race_outcome_gates_ab_with_dist(g: &GameState, d0: &[u8; 81], d1: &[u8; 8
 }
 
 fn race_outcome_gates_ab(g: &mut GameState) -> RaceBound {
-    let mut d0 = [0u8; 81];
-    let mut d1 = [0u8; 81];
-    g.compute_dist(0, &mut d0);
-    g.compute_dist(1, &mut d1);
-    race_outcome_gates_ab_with_dist(g, &d0, &d1)
+    let dist_p0 = g.dist_to_goal_for_pawn(0);
+    let dist_p1 = g.dist_to_goal_for_pawn(1);
+    let eta0 = arrival_ply(0, g.turn, dist_p0);
+    let eta1 = arrival_ply(1, g.turn, dist_p1);
+    let runner = if eta0 < eta1 { 0 } else { 1 };
+    let chaser = runner ^ 1;
+    let chaser_dist_to_runner_goal = g.dist_from_pawn_to_goal(chaser, runner);
+    race_outcome_gates_ab_with_dist(g, dist_p0, dist_p1, chaser_dist_to_runner_goal)
 }
 
 /// Counters for the cached-distance race fast path (think-level aggregate).
@@ -586,15 +586,16 @@ impl RaceOutcomeStats {
 /// Search leaf path: decisive bound here, `Unknown` → `race_tbl(false)` LRU (ACE v13).
 pub fn race_outcome_with_dist(
     g: &GameState,
-    d0: &[u8; 81],
-    d1: &[u8; 81],
+    dist_p0: u8,
+    dist_p1: u8,
+    chaser_dist_to_runner_goal: u8,
     stats: &mut RaceOutcomeStats,
 ) -> RaceBound {
     stats.calls += 1;
 
     let ab = crate::bench_instr::record(
         |b| &mut b.race_gate_cached,
-        || race_outcome_gates_ab_with_dist(g, d0, d1),
+        || race_outcome_gates_ab_with_dist(g, dist_p0, dist_p1, chaser_dist_to_runner_goal),
     );
 
     if ab != RaceBound::Unknown {
@@ -1799,10 +1800,15 @@ mod tests {
         let mut exact = vec![0i16; RACE_STATES];
         solve_race_config_reference(&mut g, &mut exact_scratch, &mut exact);
 
-        let mut d0 = [0u8; 81];
-        let mut d1 = [0u8; 81];
-        g.compute_dist(0, &mut d0);
-        g.compute_dist(1, &mut d1);
+        use crate::pathfinding::masks::DirMasks;
+        use crate::titanium::dist::{
+            dist_in_layers, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
+        };
+        let masks = DirMasks::from_ace_game(&g);
+        let mut layers_p0 = [0u128; 81];
+        let mut layers_p1 = [0u128; 81];
+        let depth_p0 = fill_ace_dist_layers_to_goal_p0(masks, &mut layers_p0);
+        let depth_p1 = fill_ace_dist_layers_to_goal_p1(masks, &mut layers_p1);
 
         let mut lower = 0usize;
         let mut upper = 0usize;
@@ -1819,7 +1825,24 @@ mod tests {
                     }
                     g.pawn = [p0, p1];
                     g.turn = turn;
-                    match race_outcome_gates_ab_with_dist(&g, &d0, &d1) {
+                    let dist_p0 = dist_in_layers(&layers_p0, depth_p0, p0 as u8);
+                    let dist_p1 = dist_in_layers(&layers_p1, depth_p1, p1 as u8);
+                    let eta0 = arrival_ply(0, turn, dist_p0);
+                    let eta1 = arrival_ply(1, turn, dist_p1);
+                    let runner = if eta0 < eta1 { 0 } else { 1 };
+                    let chaser = runner ^ 1;
+                    let chaser_pawn = if chaser == 0 { p0 } else { p1 };
+                    let chaser_dist_to_runner_goal = if runner == 0 {
+                        dist_in_layers(&layers_p0, depth_p0, chaser_pawn as u8)
+                    } else {
+                        dist_in_layers(&layers_p1, depth_p1, chaser_pawn as u8)
+                    };
+                    match race_outcome_gates_ab_with_dist(
+                        &g,
+                        dist_p0,
+                        dist_p1,
+                        chaser_dist_to_runner_goal,
+                    ) {
                         RaceBound::Lower(_) => {
                             lower += 1;
                             assert!(exact[id] > 0, "Lower on exact loss id={id}");
@@ -2150,11 +2173,9 @@ mod tests {
         g.pawn[0] = 46;
         g.pawn[1] = 37;
         g.turn = 0;
-        let mut d0 = [0u8; 81];
-        let mut d1 = [0u8; 81];
-        g.compute_dist(0, &mut d0);
-        g.compute_dist(1, &mut d1);
-        assert!(bff_tempo_margin_close(&g, &d0, &d1));
+        let dist_p0 = g.dist_to_goal_for_pawn(0);
+        let dist_p1 = g.dist_to_goal_for_pawn(1);
+        assert!(bff_tempo_margin_close(&g, dist_p0, dist_p1));
     }
 
     #[test]
@@ -4175,12 +4196,15 @@ mod tests {
         let mut g = topo.g;
         g.pawn = [21, 20];
         g.turn = 1;
-        let mut d0 = [0u8; 81];
-        let mut d1 = [0u8; 81];
-        g.compute_dist(0, &mut d0);
-        g.compute_dist(1, &mut d1);
+        let dist_p0 = g.dist_to_goal_for_pawn(0);
+        let dist_p1 = g.dist_to_goal_for_pawn(1);
+        let eta0 = arrival_ply(0, 1, dist_p0);
+        let eta1 = arrival_ply(1, 1, dist_p1);
+        let runner = if eta0 < eta1 { 0 } else { 1 };
+        let chaser = runner ^ 1;
+        let chaser_dist_to_runner_goal = g.dist_from_pawn_to_goal(chaser, runner);
         assert_eq!(
-            race_outcome_gates_ab_with_dist(&g, &d0, &d1),
+            race_outcome_gates_ab_with_dist(&g, dist_p0, dist_p1, chaser_dist_to_runner_goal),
             RaceBound::Unknown
         );
     }
@@ -5693,8 +5717,13 @@ mod tests {
         let mut g = GameState::new();
         let mut out = Vec::new();
         for (ply, &mv) in moves.iter().enumerate() {
-            // Validate: skip if move ID is out of range or game already over.
             if g.winner() >= 0 {
+                break;
+            }
+            if !crate::titanium::is_pawn_move(mv)
+                && !crate::titanium::is_hwall_move(mv)
+                && !crate::titanium::is_vwall_move(mv)
+            {
                 break;
             }
             g.make_move(mv);

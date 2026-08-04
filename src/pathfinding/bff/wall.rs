@@ -570,15 +570,11 @@ pub fn bff_resume_path_to_goal(
     grids: &WallGrids,
     goal: u128,
 ) -> (Option<PathWitness>, u128) {
-    // Work buffer: copy of the immutable pre-theft layers.  Resume flood
-    // appends new layers into this buffer so the backtrack can walk the
-    // full stack.
     let mut work_layers = *layers;
     let origin = work_layers[0];
     let mut wave = work_layers[depth];
     let mut visited = visited;
     let mut depth = depth;
-    // Check if we already reached the goal in the stored layers.
     if visited & goal != 0 {
         for i in (1..=depth).rev() {
             if work_layers[i] & goal != 0 {
@@ -588,8 +584,6 @@ pub fn bff_resume_path_to_goal(
             }
         }
     } else {
-        // Continue flooding from the stored frontier with the new grids,
-        // appending each new layer into the work buffer.
         loop {
             wave = expand_wave(wave, grids) & !visited;
             if wave == 0 {
@@ -607,7 +601,6 @@ pub fn bff_resume_path_to_goal(
         }
     }
 
-    // Walk back goal -> start using the full work buffer.
     let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
     let mut path = PathWitness {
         start: origin,

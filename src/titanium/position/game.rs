@@ -441,7 +441,7 @@ impl GameState {
             self.hash_lo ^= z.hw_lo[s0];
             self.hash_hi ^= z.hw_hi[s0];
             self.last_wall_ply = hl + 1;
-        } else {
+        } else if crate::titanium::is_vwall_move(m) {
             let s1 = crate::titanium::wall_slot(m);
             self.vw[s1] = 1;
             self.vw_bits |= 1u64 << s1;
@@ -451,6 +451,8 @@ impl GameState {
             self.hash_lo ^= z.vw_lo[s1];
             self.hash_hi ^= z.vw_hi[s1];
             self.last_wall_ply = hl + 1;
+        } else {
+            panic!("make_move: invalid move value {m}");
         }
         self.turn ^= 1;
         self.hash_lo ^= z.turn_lo;
@@ -487,7 +489,7 @@ impl GameState {
             self.wall_stamp -= 1;
             self.hash_lo ^= z.hw_lo[s0];
             self.hash_hi ^= z.hw_hi[s0];
-        } else {
+        } else if crate::titanium::is_vwall_move(m) {
             let s1 = crate::titanium::wall_slot(m);
             self.vw[s1] = 0;
             self.vw_bits &= !(1u64 << s1);
@@ -496,6 +498,8 @@ impl GameState {
             self.wall_stamp -= 1;
             self.hash_lo ^= z.vw_lo[s1];
             self.hash_hi ^= z.vw_hi[s1];
+        } else {
+            panic!("unmake_move: invalid move value {m}");
         }
         #[cfg(debug_assertions)]
         self.assert_wall_bits_sync();
@@ -515,6 +519,44 @@ impl GameState {
         } else {
             fill_ace_dist_to_goal_with_masks_p1(masks, dist);
         }
+    }
+
+    /// Distance from `player`'s pawn to its goal row, using a layer flood
+    /// (no dense scatter). Returns 255 if unreachable.
+    pub fn dist_to_goal_for_pawn(&self, player: usize) -> u8 {
+        use crate::pathfinding::masks::DirMasks;
+        use crate::titanium::dist::{
+            dist_in_layers, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
+        };
+
+        let masks = DirMasks::from_ace_game(self);
+        let mut layers = [0u128; 81];
+        if player == 0 {
+            let depth = fill_ace_dist_layers_to_goal_p0(masks, &mut layers);
+            dist_in_layers(&layers, depth, self.pawn[0] as u8)
+        } else {
+            let depth = fill_ace_dist_layers_to_goal_p1(masks, &mut layers);
+            dist_in_layers(&layers, depth, self.pawn[1] as u8)
+        }
+    }
+
+    /// Distance from `pawn_player`'s pawn to `goal_player`'s goal row.
+    /// Used by the race gate to check if the chaser can intercept the runner
+    /// at the runner's goal. Returns 255 if unreachable.
+    pub fn dist_from_pawn_to_goal(&self, pawn_player: usize, goal_player: usize) -> u8 {
+        use crate::pathfinding::masks::DirMasks;
+        use crate::titanium::dist::{
+            dist_in_layers, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
+        };
+
+        let masks = DirMasks::from_ace_game(self);
+        let mut layers = [0u128; 81];
+        let depth = if goal_player == 0 {
+            fill_ace_dist_layers_to_goal_p0(masks, &mut layers)
+        } else {
+            fill_ace_dist_layers_to_goal_p1(masks, &mut layers)
+        };
+        dist_in_layers(&layers, depth, self.pawn[pawn_player] as u8)
     }
 
     /// Bitboard flood steps from `start` cell (255 = unreachable).
