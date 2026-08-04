@@ -21,7 +21,8 @@ use super::v16_lmr::{
 use crate::cat::prune::{cat_v16_lmr_fringe_pct_for_worker, move_impact_heat};
 use crate::core::board::{Board, Move as BoardMove, Undo, WallOrientation};
 use crate::movegen::{
-    generate_legal_moves_slice_cached, GeometricWallCache, GeometricWallCacheStats, MAX_LEGAL_MOVES,
+    generate_legal_moves_slice_cached, GeometricWallCache, GeometricWallCacheStats, NodeWitness,
+    MAX_LEGAL_MOVES,
 };
 use crate::pathfinding::bff::expand_frontier;
 use crate::pathfinding::masks::DirMasks;
@@ -922,7 +923,14 @@ pub struct TiBridge {
     undo_stack: Vec<Undo>,
     geometric_walls: Option<GeometricWallCache>,
     pub wall_cache_stats: GeometricWallCacheStats,
+    /// Shortest-path witnesses, one set per ply. A node starts from its parent's
+    /// surviving paths instead of from nothing, and hands new discoveries back
+    /// up so the parent's later children inherit them too.
+    witness: Vec<NodeWitness>,
 }
+
+/// Ply capacity for the witness stack — matches the search's own ply bound.
+const WITNESS_PLIES: usize = 128;
 
 impl TiBridge {
     fn from_game(g: &GameState) -> Box<Self> {
@@ -936,6 +944,7 @@ impl TiBridge {
             undo_stack: Vec::with_capacity(256),
             geometric_walls: None,
             wall_cache_stats: GeometricWallCacheStats::default(),
+            witness: vec![NodeWitness::default(); WITNESS_PLIES],
         })
     }
 
@@ -951,15 +960,50 @@ impl TiBridge {
     }
 
     /// Full legal moves via Titanium `movegen` → dense encoding.
-    fn gen_legal_ace(&mut self, out: &mut [i16; 160]) -> usize {
+    ///
+    /// The node starts from its parent's shortest-path witnesses rather than
+    /// from nothing, so a wall candidate that cuts no known path is proven legal
+    /// without a flood. Inherited paths are taken unchecked and pruned inside
+    /// `WallTrialCtx::new`, which is what keeps this sound for every move kind —
+    /// wall, pawn, or null — without decoding the move.
+    fn gen_legal_ace(&mut self, ply: usize, out: &mut [i16; 160]) -> usize {
         let mut ti_buf = [BoardMove::Pawn { row: 0, col: 0 }; MAX_LEGAL_MOVES];
+        let Self {
+            geometric_walls,
+            board,
+            bfs,
+            wall_cache_stats,
+            witness,
+            ..
+        } = self;
+
+        let p = ply.min(WITNESS_PLIES - 1);
+        // Only a node that can actually place a wall will consult the witnesses,
+        // so nodes with an empty hand skip the inherit/propagate copies.
+        let uses_walls = board.walls_remaining[board.side_to_move as usize] > 0;
+        if uses_walls && p > 0 {
+            let (parent, cur) = witness.split_at_mut(p);
+            cur[0] = parent[p - 1];
+        } else if p > 0 {
+            witness[p].clear();
+        }
+
         let n = generate_legal_moves_slice_cached(
-            &mut self.geometric_walls,
-            &mut self.board,
+            geometric_walls,
+            board,
             &mut ti_buf,
-            &mut self.bfs,
-            Some(&mut self.wall_cache_stats),
+            bfs,
+            Some(wall_cache_stats),
+            &mut witness[p],
         );
+
+        // Anything discovered here is valid under the parent's (smaller) wall
+        // set too, so later siblings inherit it instead of re-flooding.
+        if uses_walls && p > 0 {
+            let (parent, cur) = witness.split_at_mut(p);
+            cur[0].propagate_up(&mut parent[p - 1]);
+        }
+
         for i in 0..n {
             out[i] = board_move_to_move_id(ti_buf[i]);
         }
@@ -5498,7 +5542,7 @@ impl TitaniumSearch {
         self.bridge
             .as_mut()
             .expect("ti movegen needs bridge")
-            .gen_legal_ace(out)
+            .gen_legal_ace(_ply, out)
     }
 
     fn order_moves(&self, ply: usize, moves: &mut [i16], tt_move: i16, cm_move: i16) {
@@ -7883,5 +7927,48 @@ impl TitaniumSearch {
             race: RaceResultInfo::from_score(last_score),
             timing,
         }
+    }
+}
+
+#[cfg(test)]
+mod witness_inheritance_tests {
+    use super::*;
+    use crate::util::perft::{PERFT3_STARTPOS, PERFT4_STARTPOS};
+
+    /// Perft driven through `TiBridge::gen_legal_ace`, so the per-ply witness
+    /// stack is live at every node and each node really does inherit its
+    /// parent's paths.
+    ///
+    /// The ordinary perft entry points hand movegen a fresh witness on every
+    /// call, so they cannot catch a wrongly-inherited path — which would show up
+    /// as an illegal wall being accepted, i.e. an inflated node count.
+    fn perft_bridge(b: &mut TiBridge, depth: u32, ply: usize) -> u64 {
+        let mut moves = [0i16; 160];
+        let n = b.gen_legal_ace(ply, &mut moves);
+        if depth == 1 {
+            return n as u64;
+        }
+        let mut total = 0u64;
+        for &m in moves.iter().take(n) {
+            b.push(m);
+            total += perft_bridge(b, depth - 1, ply + 1);
+            b.pop();
+        }
+        total
+    }
+
+    #[test]
+    fn inherited_witnesses_keep_perft3_exact() {
+        let g = GameState::new();
+        let mut b = TiBridge::from_game(&g);
+        assert_eq!(perft_bridge(&mut b, 3, 0), PERFT3_STARTPOS);
+    }
+
+    #[test]
+    #[ignore]
+    fn inherited_witnesses_keep_perft4_exact() {
+        let g = GameState::new();
+        let mut b = TiBridge::from_game(&g);
+        assert_eq!(perft_bridge(&mut b, 4, 0), PERFT4_STARTPOS);
     }
 }

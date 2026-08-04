@@ -296,9 +296,22 @@ pub struct PathWitness {
     pub west: u128,
     pub north: u128,
     pub south: u128,
+    /// Square this path starts from. A path only proves anything for a player
+    /// standing on it, so an inherited path is checked against the pawn before
+    /// it is trusted.
+    pub start: u128,
 }
 
 impl PathWitness {
+    /// True when this path still proves `pawn` reaches its goal on a board whose
+    /// full blocked-step set is `grids`. Cheap enough to re-check on every reuse,
+    /// which is what makes inheriting a parent's paths sound no matter which
+    /// move produced this node.
+    #[inline]
+    pub fn valid_for(&self, grids: &WallGrids, pawn: u128) -> bool {
+        self.start == pawn && !self.cut_by(grids)
+    }
+
     /// True when `delta` blocks at least one step of this path — i.e. the path
     /// alone no longer proves the player still gets home, so doubt remains.
     #[inline]
@@ -331,8 +344,15 @@ pub fn bff_path_to_goal_with_visited(
     let mut layers = [0u128; MAX_PATH_LAYERS];
     let mut visited = start & FLOOD_PLAYABLE;
     layers[0] = visited;
+    let origin = visited;
     if visited & goal != 0 {
-        return (Some(PathWitness::default()), visited);
+        return (
+            Some(PathWitness {
+                start: origin,
+                ..PathWitness::default()
+            }),
+            visited,
+        );
     }
     let mut wave = visited;
     let mut depth = 0usize;
@@ -357,7 +377,10 @@ pub fn bff_path_to_goal_with_visited(
     // `cur` sits at `cur >> 1` and must not itself be east-blocked.  The stride
     // leaves buffer columns, so an off-board shift can never land in a layer.
     let mut cur = (wave & goal) & (wave & goal).wrapping_neg();
-    let mut path = PathWitness::default();
+    let mut path = PathWitness {
+        start: origin,
+        ..PathWitness::default()
+    };
     for i in (1..=depth).rev() {
         let prev = layers[i - 1];
         let east_src = cur >> 1;

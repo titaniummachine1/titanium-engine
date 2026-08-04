@@ -88,7 +88,7 @@ pub fn generate_legal_moves_slice(
     }
     let mut n = generate_pawn_moves_o1(board, out);
     if board.walls_remaining[board.side_to_move as usize] > 0 {
-        n += generate_wall_moves_slice(board, &mut out[n..], scratch);
+        n += generate_wall_moves_slice(board, &mut out[n..], scratch, &mut NodeWitness::default());
     }
     debug_assert!(n <= MAX_LEGAL_MOVES);
     n
@@ -110,7 +110,7 @@ pub fn generate_legal_moves_slice_mode(
         generate_pawn_moves_with_mode(board, scratch, out, mode)
     };
     if board.walls_remaining[board.side_to_move as usize] > 0 {
-        n += generate_wall_moves_slice(board, &mut out[n..], scratch);
+        n += generate_wall_moves_slice(board, &mut out[n..], scratch, &mut NodeWitness::default());
     }
     debug_assert!(n <= MAX_LEGAL_MOVES);
     n
@@ -243,7 +243,7 @@ pub fn generate_wall_moves_into(board: &mut Board, out: &mut Vec<Move>, scratch:
         col: 0,
         orientation: WallOrientation::Horizontal,
     }; MAX_LEGAL_MOVES];
-    let n = generate_wall_moves_slice(board, &mut buf, scratch);
+    let n = generate_wall_moves_slice(board, &mut buf, scratch, &mut NodeWitness::default());
     out.extend_from_slice(&buf[..n]);
 }
 
@@ -323,10 +323,11 @@ pub fn geometric_wall_len_cached(
     scratch: &mut BfsScratch,
     role: GeometricWallCacheRole,
     stats: Option<&mut GeometricWallCacheStats>,
+    witness: &mut NodeWitness,
 ) -> usize {
     crate::bench_instr::record(
         |b| &mut b.wall_legality,
-        || geometric_wall_len_cached_inner(cache, board, scratch, role, stats),
+        || geometric_wall_len_cached_inner(cache, board, scratch, role, stats, witness),
     )
 }
 
@@ -336,6 +337,7 @@ fn geometric_wall_len_cached_inner(
     scratch: &mut BfsScratch,
     role: GeometricWallCacheRole,
     stats: Option<&mut GeometricWallCacheStats>,
+    witness: &mut NodeWitness,
 ) -> usize {
     let key = GeometricWallKey::from_board(board);
     if cache.as_ref().is_some_and(|c| c.key == key) {
@@ -359,7 +361,7 @@ fn geometric_wall_len_cached_inner(
         col: 0,
         orientation: WallOrientation::Horizontal,
     }; MAX_LEGAL_MOVES];
-    let len = generate_wall_moves_slice(board, &mut moves, scratch);
+    let len = generate_wall_moves_slice(board, &mut moves, scratch, witness);
     *cache = Some(GeometricWallCache { key, moves, len });
     len
 }
@@ -378,6 +380,7 @@ pub fn generate_legal_moves_slice_cached(
     out: &mut [Move],
     scratch: &mut BfsScratch,
     stats: Option<&mut GeometricWallCacheStats>,
+    witness: &mut NodeWitness,
 ) -> usize {
     if board.is_terminal().is_some() {
         return 0;
@@ -391,6 +394,7 @@ pub fn generate_legal_moves_slice_cached(
             scratch,
             GeometricWallCacheRole::Movegen,
             stats,
+            witness,
         );
         let cached = cache.as_ref().expect("filled by geometric_wall_len_cached");
         n += copy_geometric_walls_cached(cached, &mut out[n..]);
@@ -403,6 +407,7 @@ fn generate_wall_moves_slice(
     board: &mut Board,
     out: &mut [Move],
     _scratch: &mut BfsScratch,
+    witness: &mut NodeWitness,
 ) -> usize {
     let masks = wall_masks(board);
     generate_wall_moves_slice_with_topo(
@@ -412,6 +417,7 @@ fn generate_wall_moves_slice(
         masks.l12_v,
         masks.topo_h,
         masks.topo_v,
+        witness,
     )
 }
 
@@ -425,7 +431,16 @@ pub fn generate_wall_moves_slice_anchor_baseline(
     let masks = wall_masks(board);
     let (topo_h, topo_v) =
         crate::movegen::wall_masks::wall_needs_flood_masks_anchor_baseline(board);
-    generate_wall_moves_slice_with_topo(board, out, masks.l12_h, masks.l12_v, topo_h, topo_v)
+    let mut witness = NodeWitness::default();
+    generate_wall_moves_slice_with_topo(
+        board,
+        out,
+        masks.l12_h,
+        masks.l12_v,
+        topo_h,
+        topo_v,
+        &mut witness,
+    )
 }
 
 fn generate_wall_moves_slice_with_topo(
@@ -435,6 +450,7 @@ fn generate_wall_moves_slice_with_topo(
     l12_v: u64,
     topo_h: u64,
     topo_v: u64,
+    witness: &mut NodeWitness,
 ) -> usize {
     let mut ctx: Option<WallTrialCtx> = None;
     let mut n = 0usize;
@@ -445,6 +461,7 @@ fn generate_wall_moves_slice_with_topo(
         WallOrientation::Horizontal,
         &mut out[n..],
         &mut ctx,
+        witness,
     );
     n += collect_wall_orientation(
         board,
@@ -453,6 +470,7 @@ fn generate_wall_moves_slice_with_topo(
         WallOrientation::Vertical,
         &mut out[n..],
         &mut ctx,
+        witness,
     );
     n
 }
@@ -469,13 +487,14 @@ fn count_wall_orientation(
     if heavy == 0 {
         return count;
     }
-    let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board));
+    let mut witness = NodeWitness::default();
+    let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board, &mut witness));
     while heavy != 0 {
         let bit = heavy.trailing_zeros();
         heavy &= heavy - 1;
         let row = (bit / 8) as u8;
         let col = (bit % 8) as u8;
-        if ctx.wall_keeps_paths_open(row, col, orientation) {
+        if ctx.wall_keeps_paths_open(row, col, orientation, &mut witness) {
             count += 1;
         }
     }
@@ -490,10 +509,15 @@ fn collect_wall_orientation(
     orientation: WallOrientation,
     out: &mut [Move],
     ctx: &mut Option<WallTrialCtx>,
+    witness: &mut NodeWitness,
 ) -> usize {
     crate::bench_instr::record(
         |b| &mut b.collect_wall_orientation,
-        || collect_wall_orientation_inner(board, candidates, needs_flood, orientation, out, ctx),
+        || {
+            collect_wall_orientation_inner(
+                board, candidates, needs_flood, orientation, out, ctx, witness,
+            )
+        },
     )
 }
 
@@ -504,6 +528,7 @@ fn collect_wall_orientation_inner(
     orientation: WallOrientation,
     out: &mut [Move],
     ctx: &mut Option<WallTrialCtx>,
+    witness: &mut NodeWitness,
 ) -> usize {
     let mut n = 0usize;
 
@@ -521,7 +546,7 @@ fn collect_wall_orientation_inner(
 
     let mut heavy = candidates & needs_flood;
     if heavy != 0 {
-        let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board));
+        let ctx = ctx.get_or_insert_with(|| WallTrialCtx::new(board, witness));
         while heavy != 0 {
             let bit = heavy.trailing_zeros();
             heavy &= heavy - 1;
@@ -535,7 +560,7 @@ fn collect_wall_orientation_inner(
             ));
             let legal = crate::bench_instr::record(
                 |b| &mut b.wall_legality,
-                || ctx.wall_keeps_paths_open(row, col, orientation),
+                || ctx.wall_keeps_paths_open(row, col, orientation, witness),
             );
             if legal {
                 out[n] = Move::Wall {
@@ -634,9 +659,9 @@ impl WallSealTopology {
 /// never survives a wall the other four failed to survive.
 const MAX_WITNESS_PATHS: usize = 4;
 
-/// The accumulated path witnesses for one player at one node.
+/// The accumulated path witnesses for one player.
 #[derive(Default, Clone, Copy)]
-struct WitnessSet {
+pub struct WitnessSet {
     paths: [PathWitness; MAX_WITNESS_PATHS],
     len: usize,
 }
@@ -663,43 +688,112 @@ impl WitnessSet {
             self.len += 1;
         }
     }
+
+    /// `push`, skipping a path already present — propagation up would otherwise
+    /// fill the parent with copies of one path and starve it of alternatives.
+    #[inline]
+    fn push_unique(&mut self, path: PathWitness) {
+        if self.len >= MAX_WITNESS_PATHS {
+            return;
+        }
+        for i in 0..self.len {
+            if self.paths[i] == path {
+                return;
+            }
+        }
+        self.push(path);
+    }
+
+    /// Drop every path that no longer proves anything on this board — cut by a
+    /// wall, or rooted on a square the pawn has since left.  Run once per node
+    /// when the trial context is built, which is what lets a node inherit its
+    /// parent's set wholesale without having to reason about the move between
+    /// them.
+    #[inline]
+    fn retain_valid(&mut self, grids: &WallGrids, pawn: u128) {
+        let mut kept = 0usize;
+        for i in 0..self.len {
+            if self.paths[i].valid_for(grids, pawn) {
+                self.paths[kept] = self.paths[i];
+                kept += 1;
+            }
+        }
+        self.len = kept;
+    }
+}
+
+/// Both players' witnesses for one search node.
+///
+/// A node inherits its parent's set minus whatever the move into it cut, and
+/// hands anything it newly discovers back up — a path found under MORE walls is
+/// valid under fewer, so the parent (and therefore the parent's later children)
+/// can reuse it.
+#[derive(Default, Clone, Copy)]
+pub struct NodeWitness {
+    pub w1: WitnessSet,
+    pub w2: WitnessSet,
+}
+
+impl NodeWitness {
+    #[inline]
+    pub fn clear(&mut self) {
+        self.w1.len = 0;
+        self.w2.len = 0;
+    }
+
+    /// Hand paths discovered here up to `parent`.  Always sound: a path found
+    /// under this node's walls holds under the parent's (a superset of edges),
+    /// and anything that does not apply is dropped by `retain_valid` the next
+    /// time the parent's set is used.
+    #[inline]
+    pub fn propagate_up(&self, parent: &mut NodeWitness) {
+        for i in 0..self.w1.len {
+            parent.w1.push_unique(self.w1.paths[i]);
+        }
+        for i in 0..self.w2.len {
+            parent.w2.push_unique(self.w2.paths[i]);
+        }
+    }
 }
 
 struct WallTrialCtx {
     grids: WallGrids,
     p1_bit: u128,
     p2_bit: u128,
-    /// Shortest-path witnesses shared by every wall candidate at this node.
-    /// A path found while testing one candidate stays valid for its siblings —
-    /// a sibling has the same walls plus a different one, so any path it does
-    /// not cut still holds — which is why a child's discovery is pushed back
-    /// here rather than kept locally.
-    w1: WitnessSet,
-    w2: WitnessSet,
     occupied_walls: u128,
     seal_topology: Option<WallSealTopology>,
 }
 
 impl WallTrialCtx {
-    fn new(board: &Board) -> Self {
+    /// Builds the trial context and, in the same pass, prunes `witness` down to
+    /// the paths that are still meaningful here.  Inherited paths arrive
+    /// unchecked; this is where they earn their place.
+    fn new(board: &Board, witness: &mut NodeWitness) -> Self {
         let (r1, c1) = board.pawn(Player::One);
         let (r2, c2) = board.pawn(Player::Two);
-        Self {
+        let ctx = Self {
             grids: WallGrids::from_board(board),
             p1_bit: pawn_bit(r1, c1),
             p2_bit: pawn_bit(r2, c2),
-            w1: WitnessSet::default(),
-            w2: WitnessSet::default(),
             occupied_walls: wall_occupied_mask(board),
             seal_topology: None,
-        }
+        };
+        witness.w1.retain_valid(&ctx.grids, ctx.p1_bit);
+        witness.w2.retain_valid(&ctx.grids, ctx.p2_bit);
+        ctx
     }
 
 
     /// Speculative trial: place the wall's blocked-edge delta, run binary flood fill
     /// for both players (P2 reuses P1's visited bits), then roll back.
     #[inline]
-    fn wall_keeps_paths_open(&mut self, row: u8, col: u8, orientation: WallOrientation) -> bool {
+    fn wall_keeps_paths_open(
+        &mut self,
+        row: u8,
+        col: u8,
+        orientation: WallOrientation,
+        witness: &mut NodeWitness,
+    ) -> bool {
         // Cheapest-and-most-effective FIRST, most expensive LAST.
         //
         //   1. seal topology   pure lookup after one lazy component build; needs
@@ -727,19 +821,19 @@ impl WallTrialCtx {
         // the flood, which mints one.  That is the whole bootstrap: no separate
         // seeding pass exists.
         let delta = wall_delta(row, col, orientation);
-        let p1_safe = self.w1.survives(delta);
-        let p2_safe = self.w2.survives(delta);
+        let p1_safe = witness.w1.survives(delta);
+        let p2_safe = witness.w2.survives(delta);
         if p1_safe && p2_safe {
             crate::bench_instr::bump(|b| &mut b.wall_proof_skip);
             return true;
         }
 
         crate::bench_instr::bump(|b| &mut b.wall_flood_exact);
-        if self.w1.len > 0 && self.w2.len > 0 {
+        if witness.w1.len > 0 && witness.w2.len > 0 {
             crate::bench_instr::bump(|b| &mut b.wall_witness_cut);
         }
         self.grids.place(delta);
-        let ok = self.trial_and_learn(p1_safe, p2_safe);
+        let ok = self.trial_and_learn(p1_safe, p2_safe, witness);
         self.grids.remove(delta);
         ok
     }
@@ -748,7 +842,12 @@ impl WallTrialCtx {
     /// placed in `self.grids`, and back-propagate whatever path the flood finds
     /// into the shared sets so every later candidate at this node can use it.
     #[inline]
-    fn trial_and_learn(&mut self, p1_safe: bool, p2_safe: bool) -> bool {
+    fn trial_and_learn(
+        &mut self,
+        p1_safe: bool,
+        p2_safe: bool,
+        witness: &mut NodeWitness,
+    ) -> bool {
         if p1_safe != p2_safe {
             // Only one side is in doubt, so only that side floods — and the
             // shortest path that comes back is simultaneously the verdict and
@@ -761,9 +860,9 @@ impl WallTrialCtx {
             return match bff_path_to_goal(start, &self.grids, goal) {
                 Some(path) => {
                     if is_p1 {
-                        self.w1.push(path);
+                        witness.w1.push(path);
                     } else {
-                        self.w2.push(path);
+                        witness.w2.push(path);
                     }
                     true
                 }
@@ -783,7 +882,7 @@ impl WallTrialCtx {
         if !bff_to_goal_cached(self.p2_bit, p1_visited, &self.grids, P2_GOAL_BITS) {
             return false;
         }
-        self.w1.push(p1_path);
+        witness.w1.push(p1_path);
         true
     }
 
@@ -809,7 +908,7 @@ pub fn wall_path_ok_after_place(
     col: u8,
     orientation: WallOrientation,
 ) -> bool {
-    let mut ctx = WallTrialCtx::new(board);
+    let mut ctx = WallTrialCtx::new(board, &mut NodeWitness::default());
     ctx.wall_keeps_paths_open_exact(row, col, orientation)
 }
 
@@ -1037,7 +1136,7 @@ mod tests {
 
     fn audit_shortcuts(board: &Board, audit: &mut ShortcutAudit) {
         let masks = wall_masks(board);
-        let mut ctx = WallTrialCtx::new(board);
+        let mut ctx = WallTrialCtx::new(board, &mut NodeWitness::default());
         let seal_topology = WallSealTopology::new(wall_occupied_mask(board));
         for (orientation, candidates, needs_flood) in [
             (WallOrientation::Horizontal, masks.l12_h, masks.topo_h),
@@ -1224,6 +1323,7 @@ mod tests {
             &mut scratch,
             GeometricWallCacheRole::Eval,
             Some(&mut stats),
+            &mut NodeWitness::default(),
         );
         assert!(geom > 0, "fixture should have geometric wall slots");
 
@@ -1234,6 +1334,7 @@ mod tests {
             &mut out,
             &mut scratch,
             Some(&mut stats),
+            &mut NodeWitness::default(),
         );
         assert!(n > 0);
         assert!(out[..n].iter().all(|m| matches!(m, Move::Pawn { .. })));
@@ -1265,6 +1366,7 @@ mod tests {
             &mut cached,
             &mut scratch,
             Some(&mut stats),
+            &mut NodeWitness::default(),
         );
         assert_eq!(n_uncached, n_cached);
         assert_eq!(&uncached[..n_uncached], &cached[..n_cached]);
@@ -1278,13 +1380,15 @@ mod tests {
             &mut scratch,
             GeometricWallCacheRole::Eval,
             Some(&mut stats),
+            &mut NodeWitness::default(),
         );
         let mut wall_only = [Move::Wall {
             row: 0,
             col: 0,
             orientation: WallOrientation::Horizontal,
         }; MAX_LEGAL_MOVES];
-        let n_walls = generate_wall_moves_slice(&mut board, &mut wall_only, &mut scratch);
+        let n_walls =
+            generate_wall_moves_slice(&mut board, &mut wall_only, &mut scratch, &mut NodeWitness::default());
         assert_eq!(count, n_walls);
         assert_eq!(stats.wall_generation_calls, 1);
         assert_eq!(stats.hits_eval, 1);
