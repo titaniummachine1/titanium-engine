@@ -5028,8 +5028,8 @@ impl TitaniumSearch {
         let bff_d_opp_i = d_opp_i;
 
         if self.race_proof && w_me_i == 0 && w_opp_i == 0 {
-            let dist_p0 = self.d0_sq(self.g.pawn[0] as u8);
-            let dist_p1 = self.d1_sq(self.g.pawn[1] as u8);
+            let dist_p0 = if me == 0 { d_me_i as u8 } else { d_opp_i as u8 };
+            let dist_p1 = if me == 0 { d_opp_i as u8 } else { d_me_i as u8 };
             self.race_outcome_stats.jump_dist_calls += 1;
             if bff_tempo_margin_close(&self.g, dist_p0, dist_p1) {
                 let ja = jump_aware_goal_distances(&mut self.g);
