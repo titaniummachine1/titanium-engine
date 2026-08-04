@@ -827,7 +827,6 @@ struct WallTrialCtx {
     p2_resume_layers: Option<Box<[u128; MAX_PATH_LAYERS]>>,
     p2_resume_depth: usize,
     p2_resume_visited: u128,
-    p2_resume_delta: WallGrids,
     grids_last_delta: WallGrids,
 }
 
@@ -847,7 +846,6 @@ impl WallTrialCtx {
             p2_resume_layers: None,
             p2_resume_depth: 0,
             p2_resume_visited: 0,
-            p2_resume_delta: WallGrids::default(),
             grids_last_delta: WallGrids::default(),
         };
         witness.w1.retain_valid(&ctx.grids, ctx.p1_bit);
@@ -941,17 +939,16 @@ impl WallTrialCtx {
                 };
             }
             // P2 in doubt.  Try to resume from stored pre-theft layers first.
-            // The layers were computed with the bootstrap trial wall placed.
-            // Resume is sound only if NEITHER the bootstrap delta NOR the
-            // current delta blocks an edge within P2's pre-theft visited
-            // region — otherwise the stored layer distances are stale and
-            // the backtrack could fail.
+            // The layers were computed with the bootstrap trial wall placed;
+            // if the current delta blocks an edge within P2's pre-theft visited
+            // region, the stored layer distances are stale.  Even when the check
+            // passes, the resume may stagnate (the pre-theft frontier can't
+            // reach the goal with the new wall) — in that case we fall through
+            // to a fresh flood.
             let p2_full = witness.w2.len >= MAX_WITNESS_PATHS;
             let delta = self.grids_last_delta;
             if let Some(ref layers) = self.p2_resume_layers {
-                let bootstrap_ok = !delta_touches_visited(&self.p2_resume_delta, self.p2_resume_visited);
-                let current_ok = !delta_touches_visited(&delta, self.p2_resume_visited);
-                if bootstrap_ok && current_ok {
+                if !delta_touches_visited(&delta, self.p2_resume_visited) {
                     let (path, _) = bff_resume_path_to_goal(
                         layers,
                         self.p2_resume_depth,
@@ -965,7 +962,6 @@ impl WallTrialCtx {
                         }
                         return true;
                     }
-                    // Resume flood stagnated — fall through to fresh flood.
                 }
             }
             if p2_full {
@@ -1034,7 +1030,6 @@ impl WallTrialCtx {
                     self.p2_resume_visited = v;
                     self.p2_resume_depth = depth;
                     self.p2_resume_layers = Some(layers);
-                    self.p2_resume_delta = self.grids_last_delta;
                 }
                 true
             }
