@@ -67,10 +67,6 @@ pub fn flood_into_layers(seed: u128, masks: DirMasks, layers: &mut [u128; 81]) -
         reached |= new;
         frontier = new;
     }
-    // Zero any stale tail so popcount/lookups over `..depth` stay clean on reuse.
-    for slot in layers.iter_mut().take(81).skip(depth) {
-        *slot = 0;
-    }
     depth
 }
 
