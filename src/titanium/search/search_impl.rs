@@ -25,6 +25,7 @@ use crate::movegen::{
     MAX_LEGAL_MOVES,
 };
 use crate::pathfinding::bff::expand_frontier;
+use crate::pathfinding::bff::wall::path_witness_from_eval_layers;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
 use crate::titanium::certify::{certify, CertifyOpts};
@@ -36,7 +37,7 @@ use crate::titanium::race::{
     race_outcome_with_dist, solve_race_config, PlyEstimate, RaceBound, RaceOutcomeStats,
     RaceScratch, RACE_MATE, RACE_STATES, RACE_WIN_FLOOR,
 };
-use crate::util::grid::FLOOD_PLAYABLE;
+use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_PLAYABLE};
 use std::collections::HashMap;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 use std::sync::Mutex;
@@ -4357,6 +4358,46 @@ impl TitaniumSearch {
             self.dist_lru_store(wkey);
         }
         self.cached_stamp = stamp;
+
+        // Extract witness paths from eval's layers so movegen can reuse them.
+        // Only when route_active (layers are populated) and only if the
+        // witness set doesn't already have paths for that player (don't
+        // overwrite inherited or previously-minted paths).
+        if self.net.route_active {
+            let masks = self.current_dir_masks();
+            let p0_bit = FLOOD_BIT_BY_SQ[self.g.pawn[0] as usize];
+            let p1_bit = FLOOD_BIT_BY_SQ[self.g.pawn[1] as usize];
+            let p0_path = if d0_todo {
+                path_witness_from_eval_layers(
+                    p0_bit,
+                    &self.d0_layers[ply],
+                    self.d0_layer_depth[ply],
+                    masks,
+                )
+            } else {
+                None
+            };
+            let p1_path = if d1_todo {
+                path_witness_from_eval_layers(
+                    p1_bit,
+                    &self.d1_layers[ply],
+                    self.d1_layer_depth[ply],
+                    masks,
+                )
+            } else {
+                None
+            };
+            if let Some(bridge) = self.bridge.as_mut() {
+                if ply < bridge.witness.len() {
+                    if let Some(p) = p0_path {
+                        bridge.witness[ply].seed_from_eval(0, p);
+                    }
+                    if let Some(p) = p1_path {
+                        bridge.witness[ply].seed_from_eval(1, p);
+                    }
+                }
+            }
+        }
     }
 
     /// Wall-topology key for `race_tbl` (pawns and turn XORed out).

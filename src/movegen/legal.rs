@@ -754,6 +754,55 @@ impl NodeWitness {
         self.w2.len = 0;
     }
 
+    /// Returns the shortest witness path length for the given player (0=P1, 1=P2)
+    /// if any valid witness exists, or None.  The length is the BFS depth when
+    /// the path was minted — i.e. the shortest distance from the pawn to goal.
+    /// Eval can use this instead of doing its own flood.
+    #[inline]
+    pub fn shortest_distance(&self, player: usize) -> Option<u8> {
+        let w = if player == 0 { &self.w1 } else { &self.w2 };
+        if w.len == 0 {
+            return None;
+        }
+        let mut min = u8::MAX;
+        for i in 0..w.len {
+            if w.paths[i].length < min {
+                min = w.paths[i].length;
+            }
+        }
+        if min == u8::MAX {
+            None
+        } else {
+            Some(min)
+        }
+    }
+
+    /// Seed a witness path for `player` (0=P1, 1=P2) from eval's layers.
+    /// Only seeds if the player's witness set is empty — inherited or
+    /// previously-minted paths take priority.
+    #[inline]
+    pub fn seed_from_eval(&mut self, player: usize, path: PathWitness) {
+        if player == 0 {
+            if self.w1.len == 0 {
+                self.w1.push(path);
+            }
+        } else {
+            if self.w2.len == 0 {
+                self.w2.push(path);
+            }
+        }
+    }
+
+    /// True if the witness set for `player` (0=P1, 1=P2) is empty.
+    #[inline]
+    pub fn is_empty(&self, player: usize) -> bool {
+        if player == 0 {
+            self.w1.len == 0
+        } else {
+            self.w2.len == 0
+        }
+    }
+
     /// Hand paths discovered here up to `parent`.  Always sound: a path found
     /// under this node's walls holds under the parent's (a superset of edges),
     /// and anything that does not apply is dropped by `retain_valid` the next

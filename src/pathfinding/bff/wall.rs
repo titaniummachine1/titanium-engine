@@ -31,6 +31,8 @@
 //!    is now goal-tested at theft time.
 
 use crate::core::board::{Board, Player, WallOrientation};
+use crate::pathfinding::bff::expand_frontier;
+use crate::pathfinding::masks::DirMasks;
 use crate::util::grid::{flood_bit_index, FLOOD_PLAYABLE, FLOOD_STRIDE};
 
 /// Per-direction blocked-step masks in flood-bit layout.
@@ -300,6 +302,10 @@ pub struct PathWitness {
     /// standing on it, so an inherited path is checked against the pawn before
     /// it is trusted.
     pub start: u128,
+    /// Number of steps in this path (BFS depth when minted).  This is the
+    /// shortest distance from `start` to the goal — eval can use it directly
+    /// instead of doing its own flood.
+    pub length: u8,
 }
 
 impl PathWitness {
@@ -338,6 +344,7 @@ impl PathWitness {
             return true;
         }
         let mut cur = self.start;
+        let mut steps_removed = 0u8;
         // Walk along the path, removing each step until we reach pawn.
         for _ in 0..80 {
             // Find the direction cur leaves in.
@@ -346,8 +353,10 @@ impl PathWitness {
                 let next = cur << 1;
                 self.east &= !cur;
                 cur = next;
+                steps_removed += 1;
                 if cur == pawn {
                     self.start = pawn;
+                    self.length -= steps_removed;
                     return true;
                 }
                 continue;
@@ -357,8 +366,10 @@ impl PathWitness {
                 let next = cur >> 1;
                 self.west &= !cur;
                 cur = next;
+                steps_removed += 1;
                 if cur == pawn {
                     self.start = pawn;
+                    self.length -= steps_removed;
                     return true;
                 }
                 continue;
@@ -368,8 +379,10 @@ impl PathWitness {
                 let next = cur << FLOOD_STRIDE;
                 self.south &= !cur;
                 cur = next;
+                steps_removed += 1;
                 if cur == pawn {
                     self.start = pawn;
+                    self.length -= steps_removed;
                     return true;
                 }
                 continue;
@@ -379,8 +392,10 @@ impl PathWitness {
                 let next = cur >> FLOOD_STRIDE;
                 self.north &= !cur;
                 cur = next;
+                steps_removed += 1;
                 if cur == pawn {
                     self.start = pawn;
+                    self.length -= steps_removed;
                     return true;
                 }
                 continue;
@@ -390,6 +405,68 @@ impl PathWitness {
         }
         false
     }
+}
+
+/// Extract a `PathWitness` from eval's goal-distance layers.  The layers are
+/// produced by `flood_into_layers(goal_bits, masks, ...)` — `layers[d]` = cells
+/// at distance d from the goal.  To find the pawn's shortest path, locate the
+/// pawn's layer (its distance), then backtrack from pawn at layer d through
+/// decreasing layers to layer 0 (the goal), recording each step's direction.
+///
+/// This lets eval's flood double as the witness bootstrap: no separate witness
+/// flood is needed at nodes where eval has already flooded.
+pub fn path_witness_from_eval_layers(
+    pawn_bit: u128,
+    layers: &[u128; 81],
+    depth: usize,
+    masks: DirMasks,
+) -> Option<PathWitness> {
+    // Find the pawn's distance (which layer it's in).
+    let mut pawn_dist = 0usize;
+    let mut found = false;
+    for d in 0..depth {
+        if layers[d] & pawn_bit != 0 {
+            pawn_dist = d;
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return None;
+    }
+    if pawn_dist == 0 {
+        // Pawn is already on the goal.
+        return Some(PathWitness {
+            start: pawn_bit,
+            length: 0,
+            ..PathWitness::default()
+        });
+    }
+    // Backtrack from pawn at layer pawn_dist down to layer 0.
+    let mut cur = pawn_bit;
+    let mut path = PathWitness {
+        start: pawn_bit,
+        length: pawn_dist as u8,
+        ..PathWitness::default()
+    };
+    for d in (1..=pawn_dist).rev() {
+        let prev_layer = layers[d - 1];
+        let pred_mask = expand_frontier(cur, masks) & prev_layer;
+        if pred_mask == 0 {
+            return None;
+        }
+        let pred = pred_mask & pred_mask.wrapping_neg();
+        let diff = cur.trailing_zeros() as i32 - pred.trailing_zeros() as i32;
+        match diff {
+            1 => path.east |= pred,
+            -1 => path.west |= pred,
+            d2 if d2 == FLOOD_STRIDE as i32 => path.south |= pred,
+            d2 if d2 == -(FLOOD_STRIDE as i32) => path.north |= pred,
+            _ => return None,
+        }
+        cur = pred;
+    }
+    Some(path)
 }
 
 /// Deepest BFS layer we will record.  A 9x9 board cannot need more.
@@ -417,6 +494,7 @@ pub fn bff_path_to_goal_with_visited(
         return (
             Some(PathWitness {
                 start: origin,
+                length: 0,
                 ..PathWitness::default()
             }),
             visited,
@@ -477,6 +555,7 @@ pub fn bff_path_to_goal_with_visited(
         }
         cur = pred;
     }
+    path.length = depth as u8;
     (Some(path), visited)
 }
 
@@ -585,6 +664,7 @@ pub fn bff_resume_path_to_goal(
         }
         cur = pred;
     }
+    path.length = depth as u8;
     (Some(path), visited)
 }
 
@@ -619,6 +699,7 @@ pub fn bff_path_to_goal_cached_with_visited(
         return CachedPathResult::Path(
             PathWitness {
                 start: origin,
+                length: 0,
                 ..PathWitness::default()
             },
             visited,
@@ -706,6 +787,7 @@ pub fn bff_path_to_goal_cached_with_visited(
         }
         cur = pred;
     }
+    path.length = depth as u8;
     CachedPathResult::Path(path, visited)
 }
 
