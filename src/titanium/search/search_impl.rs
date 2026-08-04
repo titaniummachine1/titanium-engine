@@ -6,8 +6,7 @@ use crate::titanium::dist::{
     fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0, fill_ace_dist_layers_to_goal_p1,
     fill_ace_dist_to_goal_with_masks_p0, fill_ace_dist_to_goal_with_masks_p1, fill_choke_points,
     fill_contested, fill_corridor_delta, fill_sparse_route_masks, materialize_distance_layers,
-    pawn_dist_straight_to_row0, pawn_dist_straight_to_row8, shortest_route_bits,
-    wall_incr_refresh_flags, width_in_layers,
+    shortest_route_bits, wall_incr_refresh_flags, width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot,
@@ -5899,54 +5898,6 @@ impl TitaniumSearch {
         None
     }
 
-    /// Straight-line race guard: when both players have 0 walls and all four
-    /// pawn-to-goal columns are clear (no horizontal wall crosses any of them),
-    /// compute the race bound from straight-line distances with **no flood**.
-    /// If the bound cuts (beta/alpha), skip the dist refresh + flood + eval entirely.
-    fn ab_straight_race_guard(&mut self, alpha: i32, beta: i32) -> Option<i32> {
-        if self.g.wl[0] != 0 || self.g.wl[1] != 0 {
-            return None;
-        }
-        // Pawns must not be on terminal squares (matches race_outcome_gates_ab debug_assert).
-        if self.g.pawn[0] < 9 || self.g.pawn[1] >= 72 {
-            return None;
-        }
-        let masks = self.current_dir_masks();
-        let d0_p0 = pawn_dist_straight_to_row0(self.g.pawn[0] as usize, masks)?;
-        let d1_p1 = pawn_dist_straight_to_row8(self.g.pawn[1] as usize, masks)?;
-        let d0_p1 = pawn_dist_straight_to_row0(self.g.pawn[1] as usize, masks)?;
-        let d1_p0 = pawn_dist_straight_to_row8(self.g.pawn[0] as usize, masks)?;
-
-        // Build minimal dist arrays — race_outcome_gates_ab_with_dist only reads
-        // d0[pawn0], d1[pawn1], and d_runner_goal[pawn_chaser].
-        let mut d0 = [255u8; 81];
-        let mut d1 = [255u8; 81];
-        d0[self.g.pawn[0] as usize] = d0_p0;
-        d0[self.g.pawn[1] as usize] = d0_p1;
-        d1[self.g.pawn[0] as usize] = d1_p0;
-        d1[self.g.pawn[1] as usize] = d1_p1;
-
-        let bound = crate::bench_instr::record(
-            |b| &mut b.eval_race_bound,
-            || {
-                crate::titanium::endgame::race::race_outcome_gates_ab_with_dist(
-                    &self.g, &d0, &d1,
-                )
-            },
-        );
-        match bound {
-            RaceBound::Lower(v) if v >= beta => {
-                self.race_outcome_stats.resolved_gate1 += 1;
-                Some(beta)
-            }
-            RaceBound::Upper(v) if v <= alpha => {
-                self.race_outcome_stats.resolved_gate1_loss += 1;
-                Some(alpha)
-            }
-            _ => None,
-        }
-    }
-
     fn ab(
         &mut self,
         depth: i32,
@@ -5958,12 +5909,6 @@ impl TitaniumSearch {
         q_left: i32,
     ) -> Result<i32, TimeUp> {
         if let Some(score) = self.ab_node_guard(ply)? {
-            return Ok(score);
-        }
-
-        // Straight-line race guard: skip dist refresh + flood + eval when the
-        // race is decided and all pawn-to-goal columns are clear (no h-walls).
-        if let Some(score) = self.ab_straight_race_guard(alpha, beta) {
             return Ok(score);
         }
 

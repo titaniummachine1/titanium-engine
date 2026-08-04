@@ -138,6 +138,23 @@ mod tests {
     use crate::util::perft::perft_fast;
 
     #[test]
+    fn canta_oracle_all_games_depth1_to_3() {
+        for game in 0..15 {
+            let mut board = board_after_canta_game(game);
+            for depth in 1..=3u32 {
+                let expected = PERFT_VALUES[game][depth as usize - 1];
+                let got = perft_fast(&mut board, depth);
+                assert_eq!(
+                    got, expected,
+                    "game {game} depth {depth}: got {got}, expected {expected}"
+                );
+            }
+            let legal = generate_legal_moves(&board).len() as u64;
+            assert_eq!(legal, PERFT_VALUES[game][0], "game {game} depth1 legal");
+        }
+    }
+
+    #[test]
     fn canta_game0_matches_manual_replay() {
         let board = board_after_canta_game(0);
         let mut scratch = BfsScratch::new();

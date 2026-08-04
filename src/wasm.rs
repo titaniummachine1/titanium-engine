@@ -339,32 +339,6 @@ impl WasmEngine {
         }
     }
 
-    /// Production Titanium v19 — witness-optimized movegen + eval-to-witness seeding.
-    #[wasm_bindgen]
-    pub fn new_v19(tier: u8) -> WasmEngine {
-        install_panic_hook();
-        let g = GameState::new();
-        let ceiling = match tier {
-            3 => 500,
-            5 => 1000,
-            _ => 800,
-        };
-        let mut search = TitaniumSearch::build(
-            g,
-            None,
-            ceiling,
-            crate::titanium::net::net(),
-        );
-        search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
-        WasmEngine {
-            search,
-            engine_label: "titanium-v19".to_string(),
-            last_depth: 0,
-            last_nodes: 0,
-            last_stop_reason: "none",
-        }
-    }
-
     pub fn reset(&mut self) {
         self.search.set_position(GameState::new());
     }
