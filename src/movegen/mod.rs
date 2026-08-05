@@ -20,3 +20,4 @@ pub use pawn_bits::{
     generate_pawn_moves_bitboard_slice, generate_pawn_moves_bitboard_with_masks,
     generate_pawn_moves_shift_slice,
 };
+pub use wall_masks::{wall_has_seal_potential, wall_occupied_from_game};

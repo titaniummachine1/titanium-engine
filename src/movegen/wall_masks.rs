@@ -93,6 +93,93 @@ pub fn wall_occupied_mask(board: &Board) -> u128 {
     board.horizontal_walls as u128 | ((board.vertical_walls as u128) << 64)
 }
 
+/// Build the wall occupied mask from GameState's packed bitmasks (no Board needed).
+#[inline]
+pub fn wall_occupied_from_game(hw_bits: u64, vw_bits: u64) -> u128 {
+    hw_bits as u128 | ((vw_bits as u128) << 64)
+}
+
+/// Check if a newly placed wall at `wall_bit` (0..127) has seal potential —
+/// i.e. it could close a cycle in the wall-barrier graph and disconnect the
+/// pawn grid. This happens when the wall touches 2+ walls from the same
+/// connected component (the board edge counts as one component).
+///
+/// Used by quiescence search to decide whether to extend when a wall move
+/// creates a sealing threat, even if distances haven't changed yet.
+pub fn wall_has_seal_potential(occupied: u128, wall_bit: usize) -> bool {
+    if occupied == 0 {
+        return false;
+    }
+
+    let contacts = occupied & WALL_TOUCH_MASKS[wall_bit];
+    if contacts == 0 {
+        // No wall contacts — can only seal if touching edge twice, which is
+        // impossible for a single wall piece.
+        return false;
+    }
+
+    // Build component labels for all occupied walls (same logic as WallSealTopology).
+    // Label 1 = boundary component (walls touching the board edge).
+    let mut labels = [0u8; 128];
+    let boundary = occupied & WALL_EDGE_MASK;
+    label_walls(&mut labels, boundary, 1);
+
+    let mut remaining = occupied & !boundary;
+    let mut next_label = 2u8;
+    while remaining != 0 {
+        let seed = 1u128 << remaining.trailing_zeros();
+        let component = bfs_wall_component(seed, occupied);
+        label_walls(&mut labels, component, next_label);
+        next_label += 1;
+        remaining &= !component;
+    }
+
+    // Check if the candidate touches 2+ walls with the same label,
+    // or touches the edge and a wall in the boundary component (label 1).
+    let touches_edge = WALL_EDGE_MASK & (1u128 << wall_bit) != 0;
+    let mut seen_labels: u32 = if touches_edge { 1u32 << 1 } else { 0 };
+
+    let mut remaining_contacts = contacts;
+    while remaining_contacts != 0 {
+        let wall = remaining_contacts.trailing_zeros() as usize;
+        remaining_contacts &= remaining_contacts - 1;
+        let label = labels[wall];
+        debug_assert!(label > 0, "wall {wall} in occupied but unlabeled");
+        let label_bit = 1u32 << label;
+        if seen_labels & label_bit != 0 {
+            return true;
+        }
+        seen_labels |= label_bit;
+    }
+
+    false
+}
+
+fn bfs_wall_component(seed: u128, occupied: u128) -> u128 {
+    let mut component = 0u128;
+    let mut frontier = seed & occupied;
+    while frontier != 0 {
+        component |= frontier;
+        let mut touching = 0u128;
+        let mut walls = frontier;
+        while walls != 0 {
+            let wall = walls.trailing_zeros() as usize;
+            walls &= walls - 1;
+            touching |= WALL_TOUCH_MASKS[wall];
+        }
+        frontier = touching & occupied & !component;
+    }
+    component
+}
+
+fn label_walls(labels: &mut [u8; 128], mut component: u128, label: u8) {
+    while component != 0 {
+        let wall = component.trailing_zeros() as usize;
+        component &= component - 1;
+        labels[wall] = label;
+    }
+}
+
 #[cfg(test)]
 #[inline]
 pub fn wall_is_strictly_isolated(board: &Board, slot: usize, horizontal: bool) -> bool {

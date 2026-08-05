@@ -72,6 +72,22 @@ pub struct Net {
     pub cat_propagated_opp: Vec<f64>,
     pub cat_propagated_combined: Vec<f64>,
     pub cat_active: bool,
+    /// Distance-field plane weights (81 each, h-independent, side-to-move
+    /// canonical). Added as scalar features to the eval output, like the route
+    /// planes. These give the net exact per-cell BFS distances instead of the
+    /// lossy binarized route planes.
+    ///   dist_me:    own per-cell distance to goal / 20.0
+    ///   dist_opp:   opponent per-cell distance to goal / 20.0
+    ///   dist_diff:  (d_opp - d_own) / 20.0, clamped [-1,1], broadcast
+    pub dist_me: Vec<f64>,
+    pub dist_opp: Vec<f64>,
+    pub dist_diff: Vec<f64>,
+    pub dist_field_active: bool,
+    /// Side-to-move canonicalized weight tables: `[turn][cell]` so the hot
+    /// path indexes by raw cell without re-applying NET_MIRC each time.
+    pub dist_me_canon: Box<[[f64; 81]; 2]>,
+    pub dist_opp_canon: Box<[[f64; 81]; 2]>,
+    pub dist_diff_canon: Box<[[f64; 81]; 2]>,
 }
 
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
@@ -111,11 +127,26 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
     let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
     let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
     let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
+    // Distance-field extension: 3 additional field planes (dist_me, dist_opp,
+    // dist_diff), each 81 f64s. Can be combined with any of the above variants.
+    let dist_field_extra = FIELD_PLANE_LEN * 3 * 8;
+    let expected_no_cat_dist = expected_no_cat + dist_field_extra;
+    let expected_cat_v5_dist = expected_cat_v5 + dist_field_extra;
+    let expected_cat_v5_witness_dist = expected_cat_v5_witness + dist_field_extra;
+    let expected_cat_v5_normalized_dist = expected_cat_v5_normalized + dist_field_extra;
+
     let has_cat_v5 = bytes.len() == expected_cat_v5;
     let has_cat_v5_witness = bytes.len() == expected_cat_v5_witness;
     let has_cat_v5_normalized = bytes.len() == expected_cat_v5_normalized;
+    let has_dist_only = bytes.len() == expected_no_cat_dist;
+    let has_cat_v5_dist = bytes.len() == expected_cat_v5_dist;
+    let has_cat_v5_witness_dist = bytes.len() == expected_cat_v5_witness_dist;
+    let has_cat_v5_normalized_dist = bytes.len() == expected_cat_v5_normalized_dist;
+    let has_dist = has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
+
     assert!(
-        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized,
+        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized
+        || has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist,
         "net_weights blob size mismatch for declared NET_H={h} \
          (got {} bytes, expected {expected_no_cat}, {expected_cat_v5}, or {expected_cat_v5_witness}) — \
          run training/freeze_baseline_weights.py",
@@ -141,7 +172,7 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&route_contested)
         .any(|&w| w != 0.0);
     let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
-        if has_cat_v5_normalized {
+        if has_cat_v5_normalized || has_cat_v5_normalized_dist {
             (
                 read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
                 read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
@@ -149,7 +180,7 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
                 read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
                 read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
             )
-        } else if has_cat_v5_witness {
+        } else if has_cat_v5_witness || has_cat_v5_witness_dist {
             let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
             let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
             let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
@@ -169,7 +200,7 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
                 vec![0.0; FIELD_PLANE_LEN],
                 combined,
             )
-        } else if has_cat_v5 {
+        } else if has_cat_v5 || has_cat_v5_dist {
             let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
             for w in &mut combined {
                 *w *= 400.0 / 256.0;
@@ -197,6 +228,35 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&cat_propagated_opp)
         .chain(&cat_propagated_combined)
         .any(|&w| w != 0.0);
+
+    // Distance-field extension weights (zero-padded if blob doesn't carry them)
+    let (dist_me, dist_opp, dist_diff) = if has_dist {
+        (
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+        )
+    } else {
+        (
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+        )
+    };
+    let dist_field_active = dist_me.iter().chain(&dist_opp).chain(&dist_diff).any(|&w| w != 0.0);
+
+    // Pre-compute side-to-move canonicalized weight tables for the hot path.
+    let mut dist_me_canon = Box::new([[0.0f64; 81]; 2]);
+    let mut dist_opp_canon = Box::new([[0.0f64; 81]; 2]);
+    let mut dist_diff_canon = Box::new([[0.0f64; 81]; 2]);
+    for turn in 0..2usize {
+        for sq in 0..FIELD_PLANE_LEN {
+            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
+            dist_me_canon[turn][sq] = dist_me[canon];
+            dist_opp_canon[turn][sq] = dist_opp[canon];
+            dist_diff_canon[turn][sq] = dist_diff[canon];
+        }
+    }
     let mut route_bybit = Box::new([[[0.0f64; 128]; 5]; 2]);
     for turn in 0..2usize {
         for sq in 0..FIELD_PLANE_LEN {
@@ -234,6 +294,13 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         cat_propagated_opp,
         cat_propagated_combined,
         cat_active,
+        dist_me,
+        dist_opp,
+        dist_diff,
+        dist_field_active,
+        dist_me_canon,
+        dist_opp_canon,
+        dist_diff_canon,
     }
 }
 
@@ -291,10 +358,15 @@ pub fn install_medium_weights(bytes: &[u8]) -> Result<(), &'static str> {
     let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
     let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
     let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
+    let dist_field_extra = FIELD_PLANE_LEN * 3 * 8;
     if bytes.len() != expected_no_cat
         && bytes.len() != expected_cat_v5
         && bytes.len() != expected_cat_v5_witness
         && bytes.len() != expected_cat_v5_normalized
+        && bytes.len() != expected_no_cat + dist_field_extra
+        && bytes.len() != expected_cat_v5 + dist_field_extra
+        && bytes.len() != expected_cat_v5_witness + dist_field_extra
+        && bytes.len() != expected_cat_v5_normalized + dist_field_extra
     {
         return Err("medium weights size mismatch");
     }

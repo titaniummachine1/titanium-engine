@@ -39,6 +39,7 @@ pub mod uci;
 pub mod ka_policy;
 pub mod lazy_seal;
 pub mod perft;
+pub mod policy;
 
 // Compatibility module paths (ownership lives under façades above).
 pub use endgame::cert_bridge;
