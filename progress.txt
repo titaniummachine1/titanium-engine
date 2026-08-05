@@ -1,0 +1,29 @@
+# Titanium Engine — Active Work Progress
+# Last updated: 2026-08-05
+# FULL HANDOFF: see TRAINING_HANDOFF.md
+
+## Status: Policy flywheel converged (17/20 iterations, plateaued)
+
+### What happened
+- Policy head architecture: 194K params, conv 14→64→6×ResBlock(64)→8→209, working
+- Pretraining: best val_loss=1.275, top1=71.5% (arena data dominated)
+- Flywheel: plateaued at val_loss ~1.52, top1 ~65% after 17 iterations
+- Root cause: policy was NEVER wired into search — self-play was identical each iteration
+- Critical gap: engine only logs final move played, not move ordering indices
+
+### Next steps (for GLMM 5.2)
+- See TRAINING_HANDOFF.md for full details
+- Key: add --dump-move-indices to engine, wire policy into move ordering, re-run flywheel
+
+### Completed this session
+- [x] v19 deployed to GitHub Pages + releases
+- [x] v16 retired from website
+- [x] Website engine versioning refactored to titaniumEngines.js registry
+- [x] CI build fixed (uncommitted engine files pushed)
+- [x] Policy flywheel completed (17/20, converged)
+- [x] TRAINING_HANDOFF.md written
+
+### Engine status
+- main branch: 14d2348 (all files committed, CI passes)
+- WASM: titanium-v19, 3.0MB, wasm-threads enabled
+- Website: https://titaniummachine1.github.io/Titanium-Website/
