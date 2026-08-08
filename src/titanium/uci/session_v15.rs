@@ -294,10 +294,6 @@ fn search_daemon(
                         }
                         Ok(Cmd::Quit) | Err(mpsc::TryRecvError::Disconnected) => return,
                         Ok(Cmd::SetGame(g)) => {
-                            // Command in hand: safe to clear now. Without this
-                            // `pending` stays true forever and pondering stalls
-                            // after the first position update.
-                            abort.store(false, Ordering::Relaxed);
                             // Position update mid-ponder. Credit the guess if the
                             // opponent walked into the node we were standing on;
                             // the nodes already spent stay on the tally either way
@@ -312,7 +308,15 @@ fn search_daemon(
                             last_mv = TITANIUM_NO_MOVE;
                             respeculate = true;
                         }
-                        Ok(_) | Err(mpsc::TryRecvError::Empty) => {}
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => {
+                            // Queue drained: nothing is in flight, so resuming
+                            // the search cannot swallow a pending command. This
+                            // is the only safe place to clear the flag, and it
+                            // is safe only because the sender queues before it
+                            // raises the flag.
+                            abort.store(false, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -519,7 +523,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 current_g = GameState::new();
                 applied.clear();
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(GameState::new())) };
+                let _ = { let r = cmd_tx.send(Cmd::SetGame(GameState::new())); abort_io.store(true, Ordering::Relaxed); r };
                 ok!("ready");
             }
             "position" => {
@@ -549,12 +553,12 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                         continue;
                     }
                     // Incremental update: send only the new game state.
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
+                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
                 } else {
                     match replay_moves(&moves) {
                         Ok(g) => {
                             current_g = g.clone();
-                            let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(g)) };
+                            let _ = { let r = cmd_tx.send(Cmd::SetGame(g)); abort_io.store(true, Ordering::Relaxed); r };
                         }
                         Err(msg) => {
                             err!(msg);
@@ -580,7 +584,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 current_g.make_move(mv);
                 applied.push((*mv_str).to_string());
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
+                let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
                 ok!("ready");
             }
             "go" => {
@@ -597,7 +601,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                     } else {
                         algebraic_to_move_id(pm_str)
                     };
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoInfinite(ponder_mv)) };
+                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(ponder_mv)); abort_io.store(true, Ordering::Relaxed); r };
                     // No reply expected — daemon starts pondering.
                 } else {
                     let time_ms = if arg1 == "rem" {
@@ -623,7 +627,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                         let time_sec: f64 = arg1.parse().unwrap_or(4.0);
                         (time_sec * 1000.0).max(1.0) as u64
                     };
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoTimed(time_ms)) };
+                    let _ = { let r = cmd_tx.send(Cmd::GoTimed(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
                     match reply_rx.recv() {
                         Ok(Reply::BestMove(mv, info, ponder)) => {
                             if let Some(r) = info.as_deref() {
@@ -637,8 +641,8 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                                 if auto_ponder && current_g.winner() < 0 {
                                     current_g.make_move(mv);
                                     applied.push(mv_text);
-                                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
-                                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE)) };
+                                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
+                                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE)); abort_io.store(true, Ordering::Relaxed); r };
                                 }
                             }
                         }
@@ -648,7 +652,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
             }
             "stop" => {
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::StopAndGet) };
+                let _ = { let r = cmd_tx.send(Cmd::StopAndGet); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -679,7 +683,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                     }
                     ponder_mv = TITANIUM_NO_MOVE;
                 }
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::PonderHit(time_ms)) };
+                let _ = { let r = cmd_tx.send(Cmd::PonderHit(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -715,7 +719,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
                 ponder_mv = TITANIUM_NO_MOVE;
                 let new_game = current_g.clone();
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::MoveMiss { new_game, time_ms }) };
+                let _ = { let r = cmd_tx.send(Cmd::MoveMiss { new_game, time_ms }); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -732,7 +736,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
             }
             "quit" => {
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::Quit) };
+                let _ = { let r = cmd_tx.send(Cmd::Quit); abort_io.store(true, Ordering::Relaxed); r };
                 break;
             }
             _ => err!("unknown command"),
