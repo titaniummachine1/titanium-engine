@@ -2415,8 +2415,8 @@ pub struct TitaniumSearch {
     cw_cache: std::collections::HashMap<(u32, u32, usize, i32, i32), i32, FxBuildHasher>,
     cw_think_calls: u32,
     cw_cap: u32,
-    /// Unrestricted DFPN certificate at eval leaves. A/B switch so both arms
-    /// come from one binary: `TITANIUM_DFPN_CERT=1`. Off by default until SPRT.
+    /// Unrestricted DFPN certificate at eval leaves. Enabled in this feature
+    /// branch; the unchanged main binary remains the A/B baseline.
     dfpn_cert: bool,
     dfpn_calls: u32,
     dfpn_cap: u32,
@@ -2643,7 +2643,7 @@ impl TitaniumSearch {
             cw_cache: std::collections::HashMap::default(),
             cw_think_calls: 0,
             cw_cap: 24,
-            dfpn_cert: std::env::var_os("TITANIUM_DFPN_CERT").is_some(),
+            dfpn_cert: true,
             dfpn_calls: 0,
             dfpn_cap: std::env::var("TITANIUM_DFPN_CAP")
                 .ok()
