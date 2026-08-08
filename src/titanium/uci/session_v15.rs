@@ -88,18 +88,27 @@ enum Reply {
     Error(String),
 }
 
-/// Ponder slice length, and therefore the worst-case delay before the daemon
-/// notices a `go`. That delay is charged to OUR clock by the match harness, so
-/// it is kept small: every blocking call in the ponder loop must be one slice.
-const PONDER_CHUNK_MS: u64 = 50;
+/// Effectively infinite ponder budget. The search is ended by the abort flag
+/// when a command arrives, not by this deadline -- it exists only so `think`
+/// has a number. Pondering is a genuine continuous search, as in Stockfish,
+/// rather than a stream of restarts.
+const PONDER_INFINITE_MS: u64 = 3_600_000;
+
+/// A ponder search returning more than this far short of its budget has solved
+/// the position out rather than run out of time; there is nothing left to
+/// compute and re-running it would spin.
+const PONDER_EXHAUSTED_MARGIN_MS: u64 = 1_000;
+
+/// Poll interval once the position is exhausted. Sleeping rather than
+/// re-searching keeps an exhausted ponder off the CPU, which matters because
+/// the core it would burn is one the opponent's search is entitled to.
+const PONDER_IDLE_POLL_MS: u64 = 20;
 
 /// Budget for choosing which reply to ponder on.
 ///
-/// Deliberately longer than one slice: the guess is committed to for the whole
-/// ponder window (seconds), so a cheap wrong guess is far more expensive than
-/// the probe that would have avoided it. Measured on 510 archived positions,
-/// a 0.4s probe predicts the played reply 61% of the time; a 0.1s probe is
-/// materially worse, and wall replies are the hard case (39% vs 80% for pawns).
+/// The guess is committed to for the whole ponder window, so a cheap wrong
+/// guess costs far more than the probe that would have avoided it. Measured
+/// hit rate in real games: 72%.
 const PONDER_PROBE_MS: u64 = 400;
 
 // ── Search daemon ─────────────────────────────────────────────────────────────
@@ -146,9 +155,9 @@ fn search_daemon(
                 let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r)), PonderTelemetry::default()));
             }
             Cmd::GoInfinite(hint_mv) => {
-                // Ponder mode: tt_gen and history are frozen across all chunks
-                // so the TT entries built during pondering stay fresh and history
-                // accumulates. Cleared to false before every real think() call.
+                // Ponder mode: tt_gen and history are frozen for the whole
+                // session so the TT entries pondering builds stay fresh and
+                // history accumulates.
                 search.set_pondering(true);
                 let mut tel = PonderTelemetry::default();
                 let mut last_mv = TITANIUM_NO_MOVE;
@@ -156,48 +165,41 @@ fn search_daemon(
                 let mut spec_hash: Option<(u32, u32)> = None;
                 let mut hint = hint_mv;
                 let mut respeculate = true;
-                // Probe progress, accumulated across polling slices.
-                let mut probe_ms: u64 = 0;
-                let mut probe_best: i16 = TITANIUM_NO_MOVE;
+                // The search has nothing left to compute at this position, so
+                // re-running it would spin. Set when a think returns far short
+                // of the budget it was given.
+                let mut exhausted = false;
 
                 loop {
-                    // Stand on the node we will actually have to search next:
-                    // the position *after* the opponent's likely reply. Searching
-                    // the opponent-to-move node instead spreads the effort over
-                    // every reply, so a correct guess buys almost nothing.
-                    // The probe accumulates across ordinary slices instead of
-                    // running as one long blocking call. The daemon only polls
-                    // for commands BETWEEN slices, so any single `think` is dead
-                    // time the opponent's clock is not paying for: a `go`
-                    // arriving mid-probe waited out the whole probe before the
-                    // real search even started, and the harness charges
-                    // go->bestmove to us. That cost this engine two games on
-                    // time in completely won positions, taking 620-730ms for
-                    // moves allocated 63ms while the non-pondering side
-                    // answered the same positions in 0-11ms.
-                    abort.store(false, Ordering::Relaxed);
-                    let r = search.think(PONDER_CHUNK_MS, 128, false, false, label);
-                    tel.nodes = tel.nodes.saturating_add(r.nodes);
-                    tel.ms = tel.ms.saturating_add(r.ms);
-                    tel.chunks += 1;
+                    // NEVER clear the stop flag speculatively. The I/O thread
+                    // raises it BEFORE putting the command on the channel, so
+                    // there is a window where the flag is set and the queue is
+                    // still empty. Clearing it there and re-entering an infinite
+                    // search parks the daemon for an hour on a command that
+                    // lands a microsecond later -- which is exactly how this
+                    // deadlocked, twice. The flag is cleared only once a command
+                    // is actually in hand, below.
+                    let pending = abort.load(Ordering::Relaxed);
 
-                    if respeculate {
-                        if r.mv != TITANIUM_NO_MOVE {
-                            probe_best = r.mv;
+                    if respeculate && !pending {
+                        respeculate = false;
+                        exhausted = false;
+                        spec_hash = None;
+                        tel.predicted = TITANIUM_NO_MOVE;
+                        // Stand on the node we will actually have to search
+                        // next: the position *after* the opponent's likely
+                        // reply. Searching the opponent-to-move node instead
+                        // spreads effort over every reply, so a correct guess
+                        // buys almost nothing.
+                        let mut predicted = std::mem::replace(&mut hint, TITANIUM_NO_MOVE);
+                        if predicted == TITANIUM_NO_MOVE {
+                            let probe = search.think(PONDER_PROBE_MS, 128, false, false, label);
+                            tel.nodes = tel.nodes.saturating_add(probe.nodes);
+                            tel.ms = tel.ms.saturating_add(probe.ms);
+                            tel.chunks += 1;
+                            predicted = probe.mv;
                         }
-                        probe_ms += PONDER_CHUNK_MS;
-                        let forced = std::mem::replace(&mut hint, TITANIUM_NO_MOVE);
-                        let predicted = if forced != TITANIUM_NO_MOVE {
-                            forced
-                        } else if probe_ms >= PONDER_PROBE_MS {
-                            probe_best
-                        } else {
-                            TITANIUM_NO_MOVE
-                        };
                         if predicted != TITANIUM_NO_MOVE {
-                            respeculate = false;
-                            probe_ms = 0;
-                            probe_best = TITANIUM_NO_MOVE;
                             let mut spec = cur_g.clone();
                             spec.make_move(predicted);
                             // Never ponder past a terminal node.
@@ -208,12 +210,43 @@ fn search_daemon(
                             }
                         }
                     }
-                    // Only meaningful as our own reply when we stand on the
-                    // speculative node; otherwise it is the opponent's move.
-                    if r.mv != TITANIUM_NO_MOVE && spec_hash.is_some() {
-                        last_mv = r.mv;
-                        last_score = r.score;
+
+                    // One continuous search rather than a stream of slices.
+                    // Slicing only ever existed so the daemon could notice a
+                    // command between calls; the abort flag does that within
+                    // ~63 nodes, so the slices bought nothing and cost a search
+                    // restart every time. Measured before this: 1188 think()
+                    // calls totalling 456ms of actual search for one turn --
+                    // almost all of it restart overhead and spin.
+                    if !exhausted && !pending {
+                        let r = search.think(PONDER_INFINITE_MS, 128, false, false, label);
+                        tel.nodes = tel.nodes.saturating_add(r.nodes);
+                        tel.ms = tel.ms.saturating_add(r.ms);
+                        tel.chunks += 1;
+                        if r.mv != TITANIUM_NO_MOVE && spec_hash.is_some() {
+                            last_mv = r.mv;
+                            last_score = r.score;
+                        }
+                        // Returning early means the tree is solved out, not that
+                        // time ran out. Stop searching and just wait: hammering
+                        // think() on an exhausted position burns a core, and
+                        // that core is one the opponent is entitled to.
+                        // An aborted search also returns early, so returning
+                        // short of budget alone does not mean the tree is
+                        // solved out -- check the flag to tell the two apart.
+                        // Getting this wrong would park a perfectly searchable
+                        // position in the idle poll.
+                        exhausted = !abort.load(Ordering::Relaxed)
+                            && r.ms + PONDER_EXHAUSTED_MARGIN_MS < PONDER_INFINITE_MS;
+                    } else {
+                        // Either the tree is solved out, or a command is in
+                        // flight and we must not start a search we cannot see
+                        // the end of. Wait rather than burn a core.
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            PONDER_IDLE_POLL_MS,
+                        ));
                     }
+
                     match rx.try_recv() {
                         Ok(Cmd::GoTimed(time_ms)) => {
                             search.set_pondering(false);
@@ -274,10 +307,16 @@ fn search_daemon(
                             search.set_position(g);
                             last_mv = TITANIUM_NO_MOVE;
                             respeculate = true;
-                            probe_ms = 0;
-                            probe_best = TITANIUM_NO_MOVE;
                         }
-                        Ok(_) | Err(mpsc::TryRecvError::Empty) => {}
+                        Ok(_) => {}
+                        Err(mpsc::TryRecvError::Empty) => {
+                            // Queue drained: nothing is in flight, so resuming
+                            // the search cannot swallow a pending command. This
+                            // is the only safe place to clear the flag, and it
+                            // is safe only because the sender queues before it
+                            // raises the flag.
+                            abort.store(false, Ordering::Relaxed);
+                        }
                     }
                 }
             }
@@ -484,7 +523,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 current_g = GameState::new();
                 applied.clear();
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(GameState::new())) };
+                let _ = { let r = cmd_tx.send(Cmd::SetGame(GameState::new())); abort_io.store(true, Ordering::Relaxed); r };
                 ok!("ready");
             }
             "position" => {
@@ -514,12 +553,12 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                         continue;
                     }
                     // Incremental update: send only the new game state.
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
+                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
                 } else {
                     match replay_moves(&moves) {
                         Ok(g) => {
                             current_g = g.clone();
-                            let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(g)) };
+                            let _ = { let r = cmd_tx.send(Cmd::SetGame(g)); abort_io.store(true, Ordering::Relaxed); r };
                         }
                         Err(msg) => {
                             err!(msg);
@@ -545,7 +584,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 current_g.make_move(mv);
                 applied.push((*mv_str).to_string());
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
+                let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
                 ok!("ready");
             }
             "go" => {
@@ -562,7 +601,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                     } else {
                         algebraic_to_move_id(pm_str)
                     };
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoInfinite(ponder_mv)) };
+                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(ponder_mv)); abort_io.store(true, Ordering::Relaxed); r };
                     // No reply expected — daemon starts pondering.
                 } else {
                     let time_ms = if arg1 == "rem" {
@@ -588,7 +627,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                         let time_sec: f64 = arg1.parse().unwrap_or(4.0);
                         (time_sec * 1000.0).max(1.0) as u64
                     };
-                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoTimed(time_ms)) };
+                    let _ = { let r = cmd_tx.send(Cmd::GoTimed(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
                     match reply_rx.recv() {
                         Ok(Reply::BestMove(mv, info, ponder)) => {
                             if let Some(r) = info.as_deref() {
@@ -602,8 +641,8 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                                 if auto_ponder && current_g.winner() < 0 {
                                     current_g.make_move(mv);
                                     applied.push(mv_text);
-                                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::SetGame(current_g.clone())) };
-                                    let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE)) };
+                                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
+                                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE)); abort_io.store(true, Ordering::Relaxed); r };
                                 }
                             }
                         }
@@ -613,7 +652,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
             }
             "stop" => {
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::StopAndGet) };
+                let _ = { let r = cmd_tx.send(Cmd::StopAndGet); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -644,7 +683,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                     }
                     ponder_mv = TITANIUM_NO_MOVE;
                 }
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::PonderHit(time_ms)) };
+                let _ = { let r = cmd_tx.send(Cmd::PonderHit(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -680,7 +719,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
                 ponder_mv = TITANIUM_NO_MOVE;
                 let new_game = current_g.clone();
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::MoveMiss { new_game, time_ms }) };
+                let _ = { let r = cmd_tx.send(Cmd::MoveMiss { new_game, time_ms }); abort_io.store(true, Ordering::Relaxed); r };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -697,7 +736,7 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                 }
             }
             "quit" => {
-                let _ = { abort_io.store(true, Ordering::Relaxed); cmd_tx.send(Cmd::Quit) };
+                let _ = { let r = cmd_tx.send(Cmd::Quit); abort_io.store(true, Ordering::Relaxed); r };
                 break;
             }
             _ => err!("unknown command"),
