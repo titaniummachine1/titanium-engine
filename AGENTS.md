@@ -47,7 +47,13 @@ A/B launcher; do not invent a new SPRT protocol. Its local match settings are:
 - one engine thread per client (`--engine-threads 1`)
 - `titanium-v17` session routing
 - native `go rem` time management for both engines
-- pondering disabled: the routed `titanium-v17` session does not expose the unrouted experimental `go infinite` protocol
+- pondering disabled explicitly by the harness (`pondering=False` for both clients)
+
+The feature branch enables automatic pondering in its routed `titanium-v17`
+session by default; set `TITANIUM_PONDERING=0` to disable it. The canonical
+harness passes that disable per client, so gate results never receive free ponder
+CPU. Use `--ponder-a` or `--ponder-b` only for a deliberately asymmetric ponder
+experiment, never for the canonical gate.
 
 The canonical harness is `tools/binary_match/parallel_engine_match.py`; its
 `preassign_openings()` function is the source of truth for deterministic pairing.

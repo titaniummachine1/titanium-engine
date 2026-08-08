@@ -97,6 +97,13 @@ fn search_daemon(engine_flag: String, rx: Receiver<Cmd>, tx: Sender<Reply>) {
                         last_score = r.score;
                     }
                     match rx.try_recv() {
+                        Ok(Cmd::GoTimed(time_ms)) => {
+                            search.set_pondering(false);
+                            let r2 = search.think(time_ms, 128, false, true, label);
+                            last_score = r2.score;
+                            let _ = tx.send(Reply::BestMove(r2.mv));
+                            break;
+                        }
                         Ok(Cmd::StopAndGet) => {
                             search.set_pondering(false);
                             let _ = tx.send(Reply::BestMove(last_mv));
@@ -167,6 +174,9 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
     let mut current_g = GameState::new();
     // Move the engine was asked to ponder on (TITANIUM_NO_MOVE if none).
     let mut ponder_mv: i16 = TITANIUM_NO_MOVE;
+    let auto_ponder = std::env::var("TITANIUM_PONDERING")
+        .map(|value| value != "0")
+        .unwrap_or(true);
 
     macro_rules! ok {
         ($msg:expr) => {{
@@ -292,15 +302,43 @@ pub fn run_v15_session_stdio(engine_flag: &str) {
                     let _ = cmd_tx.send(Cmd::GoInfinite(ponder_mv));
                     // No reply expected — daemon starts pondering.
                 } else {
-                    let time_sec: f64 = arg1.parse().unwrap_or(4.0);
-                    let time_ms = (time_sec * 1000.0).max(1.0) as u64;
+                    let time_ms = if arg1 == "rem" {
+                        let rem_sec: f64 = parts
+                            .get(2)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(4.0);
+                        let remaining_ms = (rem_sec * 1000.0).max(0.0) as u64;
+                        let ja = crate::titanium::race::jump_aware_goal_distances(&mut current_g);
+                        let d0 = (ja.d0 != u8::MAX).then_some(u32::from(ja.d0));
+                        let d1 = (ja.d1 != u8::MAX).then_some(u32::from(ja.d1));
+                        crate::titanium::time_alloc::allocate_move_budget_with_dists(
+                            remaining_ms,
+                            current_g.hist_len,
+                            current_g.turn,
+                            current_g.pawn,
+                            d0,
+                            d1,
+                        )
+                        .move_ms
+                        .max(1)
+                    } else {
+                        let time_sec: f64 = arg1.parse().unwrap_or(4.0);
+                        (time_sec * 1000.0).max(1.0) as u64
+                    };
                     let _ = cmd_tx.send(Cmd::GoTimed(time_ms));
                     match reply_rx.recv() {
                         Ok(Reply::BestMove(mv)) => {
                             if mv == TITANIUM_NO_MOVE {
                                 ok!("bestmove (none)");
                             } else {
-                                ok!(format!("bestmove {}", move_id_to_algebraic(mv)));
+                                let mv_text = move_id_to_algebraic(mv);
+                                ok!(format!("bestmove {mv_text}"));
+                                if auto_ponder && current_g.winner() < 0 {
+                                    current_g.make_move(mv);
+                                    applied.push(mv_text);
+                                    let _ = cmd_tx.send(Cmd::SetGame(current_g.clone()));
+                                    let _ = cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE));
+                                }
                             }
                         }
                         Ok(Reply::Error(msg)) => err!(msg),
