@@ -7608,7 +7608,19 @@ impl TitaniumSearch {
                     {
                         last_score = self.tt_score[ridx];
                     }
-                    (tt_depth - 2).max(1)
+                    // A position the TT already proves decided does not need
+                    // re-solving. Resuming at ~tt_depth makes the FIRST
+                    // iteration a full deep search purely to reconfirm a known
+                    // win, measured at 600-730ms per move; the same positions
+                    // answer in 0-1ms when the search restarts shallow, because
+                    // the TT is hot and `forced_mate_or_loss` breaks out after
+                    // one cheap iteration. The result is identical -- the only
+                    // thing given up is time spent proving it twice.
+                    if last_score.abs() > RACE_WIN_FLOOR {
+                        1
+                    } else {
+                        (tt_depth - 2).max(1)
+                    }
                 } else {
                     1
                 }
