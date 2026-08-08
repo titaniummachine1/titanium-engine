@@ -79,7 +79,14 @@ fn main() {
             // v15 uses the standard warm session (go TIME_SEC). session_v15 infinite
             // search is kept in-tree but disabled — it regressed vs ti-pure baseline.
             Some(flag) if uses_titanium_module(flag) => {
-                titanium::run_titanium_session_stdio(flag, parse_threads_arg(&args))
+                let pondering = std::env::var("TITANIUM_PONDERING")
+                    .map(|value| value != "0")
+                    .unwrap_or(true);
+                if pondering {
+                    titanium::run_v15_session_stdio(flag);
+                } else {
+                    titanium::run_titanium_session_stdio(flag, parse_threads_arg(&args));
+                }
             }
             Some(_) => {
                 eprintln!(

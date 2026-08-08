@@ -2377,6 +2377,13 @@ pub struct TitaniumSearch {
     /// chunks share one TT generation and history accumulates uninterrupted.
     /// Set true before the ponder loop, false before the real think() call.
     is_pondering: bool,
+    /// Cross-thread stop request. The search daemon owns `self` while blocked
+    /// in `think()`, so the I/O thread cannot reach the deadline; this is how it
+    /// interrupts a ponder search the instant a real command arrives.
+    external_stop: Option<std::sync::Arc<AtomicBool>>,
+    /// Set when `set_pondering(true)` advanced the generation up front, so the
+    /// following real search does not advance it a second time.
+    ponder_gen_pending: bool,
     // ---------- pathfix feature flags (gen11 shipping config) ----------
     /// Exact k=0 race endgame + last-wall gate (JS `raceProof`, ships true).
     race_proof: bool,
@@ -2609,6 +2616,8 @@ impl TitaniumSearch {
             root_best: crate::titanium::TITANIUM_NO_MOVE,
             root_score: 0,
             is_pondering: false,
+            external_stop: None,
+            ponder_gen_pending: false,
             race_proof: true,
             rc_key_lo: [0; RC_SLOTS],
             rc_key_hi: [0; RC_SLOTS],
@@ -3012,7 +3021,23 @@ impl TitaniumSearch {
     /// advance and history decay so all ponder chunks build on each other
     /// rather than aging their own work.  Call with `false` before the real
     /// think so it does the normal one-time decay and advances the generation.
+    /// Install the cross-thread stop flag. Setting it aborts the running
+    /// `think()` within ~63 nodes; the caller must clear it before a search it
+    /// actually wants to complete.
+    pub fn set_external_stop(&mut self, flag: std::sync::Arc<AtomicBool>) {
+        self.external_stop = Some(flag);
+    }
+
+    /// Entering ponder mode advances the TT generation once, up front, so
+    /// ponder entries carry the generation the following real search runs
+    /// under. Otherwise the real think advances past them and everything
+    /// pondering just produced is marked stale-generation -- first in line for
+    /// replacement, exactly backwards for the entries most likely to be probed.
     pub fn set_pondering(&mut self, on: bool) {
+        if on && !self.is_pondering {
+            self.tt_gen = self.tt_gen.wrapping_add(1);
+            self.ponder_gen_pending = true;
+        }
         self.is_pondering = on;
     }
 
@@ -3027,7 +3052,14 @@ impl TitaniumSearch {
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     fn apply_think_start_state(&mut self) {
         if !self.is_pondering {
-            self.tt_gen = self.tt_gen.wrapping_add(1);
+            // Pondering already advanced the generation on our behalf;
+            // advancing again would age the entries this search is about to
+            // probe. History still decays exactly once either way.
+            if self.ponder_gen_pending {
+                self.ponder_gen_pending = false;
+            } else {
+                self.tt_gen = self.tt_gen.wrapping_add(1);
+            }
             // Arithmetic division lets negative history entries converge to zero.
             // Correction history is not aged: eval bias per wall structure is
             // slow-moving knowledge rather than a tactical pattern.
@@ -3680,6 +3712,15 @@ impl TitaniumSearch {
         // next check. Checking every 63 nodes instead keeps the worst-case
         // overrun small regardless of per-node cost.
         if (self.nodes & 63) == 0 {
+            // Another thread asked us to stop. Sampled here rather than per
+            // node so it costs nothing measurable, and still aborts within
+            // microseconds -- which is what stops a ponder search from delaying
+            // the `go` that ends it. That delay is charged to our clock.
+            if let Some(flag) = self.external_stop.as_ref() {
+                if flag.load(Ordering::Relaxed) {
+                    return Err(TimeUp);
+                }
+            }
             if Instant::now() > self.deadline {
                 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
                 if let Some(runtime) = self.lazy_runtime.as_ref() {
