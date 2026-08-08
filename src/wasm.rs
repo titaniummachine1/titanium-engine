@@ -13,7 +13,9 @@ use crate::titanium::{
     algebraic_to_move_id, move_id_to_algebraic, GameState, TitaniumSearch, TITANIUM_NO_MOVE,
 };
 
-const ENGINE_VERSION: &str = "titanium-v19.2.0";
+// Single source of truth: the crate version. Hardcoding it here meant the
+// number drifted from Cargo.toml and the dashboard reported a stale engine.
+const ENGINE_VERSION: &str = concat!("titanium-v", env!("CARGO_PKG_VERSION"));
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
