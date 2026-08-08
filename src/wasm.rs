@@ -13,7 +13,7 @@ use crate::titanium::{
     algebraic_to_move_id, move_id_to_algebraic, GameState, TitaniumSearch, TITANIUM_NO_MOVE,
 };
 
-const ENGINE_VERSION: &str = "titanium-v19";
+const ENGINE_VERSION: &str = "titanium-v19.2.0";
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
