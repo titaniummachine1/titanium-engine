@@ -2415,6 +2415,11 @@ pub struct TitaniumSearch {
     cw_cache: std::collections::HashMap<(u32, u32, usize, i32, i32), i32, FxBuildHasher>,
     cw_think_calls: u32,
     cw_cap: u32,
+    /// Unrestricted DFPN certificate at eval leaves. A/B switch so both arms
+    /// come from one binary: `TITANIUM_DFPN_CERT=1`. Off by default until SPRT.
+    dfpn_cert: bool,
+    dfpn_calls: u32,
+    dfpn_cap: u32,
     /// Live `info json` during `think(..., log=true)` — cleared when search ends.
     stream_log: bool,
     stream_label: String,
@@ -2638,6 +2643,12 @@ impl TitaniumSearch {
             cw_cache: std::collections::HashMap::default(),
             cw_think_calls: 0,
             cw_cap: 24,
+            dfpn_cert: std::env::var_os("TITANIUM_DFPN_CERT").is_some(),
+            dfpn_calls: 0,
+            dfpn_cap: std::env::var("TITANIUM_DFPN_CAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(24),
             stream_log: false,
             stream_label: String::new(),
             stream_t0: Instant::now(),
@@ -5334,6 +5345,43 @@ impl TitaniumSearch {
                 && self.cert_win(me, 1200, 0)
             {
                 ret = 2500;
+            }
+        }
+        // Unrestricted DFPN certificate. Runs only where the legacy certificate
+        // above cannot: it is gated to `w_me == 0 && w_opp == 0`, so every
+        // position with a wall still in hand reaches here unproven. The budget
+        // policy refuses ~54% of positions outright on (weaker stock, distance),
+        // measured to keep 98.4% of reachable proofs for 15.3% of the time.
+        //
+        // Proving a LOSS matters as much as proving a win: it lets the search
+        // steer away from lines that are already decided, which is exactly what
+        // was missing in arena game 1922 (0 walls vs 7, provable in 1,364 nodes,
+        // legacy certificate proved nothing there).
+        if self.dfpn_cert && depth <= 0 && ret > -2400 && ret < 2400 {
+            let budget = crate::titanium::endgame::certify_dfpn::gated_budget(
+                self.g.wl[0],
+                self.g.wl[1],
+                d_me_i,
+                d_opp_i,
+                4000,
+            );
+            if budget > 0 && self.dfpn_calls < self.dfpn_cap {
+                self.dfpn_calls += 1;
+                use crate::titanium::endgame::certify_dfpn::{certify_dfpn, DfpnOpts};
+                let mut opts = DfpnOpts {
+                    node_cap: budget,
+                    deadline: None,
+                    side: me,
+                    want_certificate: false,
+                };
+                if certify_dfpn(&mut self.g, &opts).value_proven {
+                    ret = 2500;
+                } else {
+                    opts.side = 1 - me;
+                    if certify_dfpn(&mut self.g, &opts).value_proven {
+                        ret = -2500;
+                    }
+                }
             }
         }
         // Correction history: apply the learned per-wall-structure eval bias.

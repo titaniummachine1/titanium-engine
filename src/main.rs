@@ -70,6 +70,7 @@ fn main() {
         "eval-packed-batch" => run_eval_packed_batch(),
         "path-scan" => run_path_scan(),
         "cat-packed-batch" => run_cat_packed_batch(),
+        "certify-batch" => run_certify_batch(&args),
         "score-out" => run_score_out(&args),
         "tbgen" => run_tbgen(&args),
         "fields" => run_fields(&args),
@@ -804,6 +805,131 @@ fn run_eval_packed_batch() {
             }
             Err(err) => format!(
                 "{{\"row\":{row},\"ok\":false,\"protocol\":\"eval-packed-v1\",\"error\":\"{}\"}}",
+                json_escape(&err)
+            ),
+        })
+        .collect();
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+/// Run BOTH win certifiers over a packed batch and report each verdict.
+///
+/// Validation harness for `certify_dfpn` (unrestricted AND/OR) against the
+/// legacy `certify` (restricted subgame). Three things this is meant to show:
+///
+///   soundness   on hands-empty positions the verdicts must match `tb_zero`,
+///               which is exact ground truth
+///   consistency legacy PROVEN must imply dfpn PROVEN — dfpn searches a
+///               superset of the legacy move set, so it can only prove more.
+///               A legacy-proven / dfpn-disproven pair is a bug in dfpn.
+///   coverage    how many positions each can actually settle
+///
+/// Both solvers get the same node cap so the comparison is honest.
+fn run_certify_batch(args: &[String]) {
+    use rayon::prelude::*;
+    use titanium::titanium::endgame::certify::{certify, CertifyOpts};
+    use titanium::titanium::endgame::certify_dfpn::{certify_dfpn, gated_budget, DfpnOpts};
+    use titanium::titanium_game_from_packed;
+
+    let cap: u64 = args
+        .iter()
+        .position(|a| a == "--budget")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200_000);
+    // Apply the wall-relationship budget policy instead of a flat cap.
+    let gated = args.iter().any(|a| a == "--gated");
+
+    let rows = read_packed_batch("certify-batch");
+    let lines: Vec<String> = rows
+        .par_iter()
+        .map(|(row, packed)| match titanium_game_from_packed(packed) {
+            Ok(g) => {
+                // Ground truth, available only when both hands are empty:
+                // tb_zero via the hands-empty oracle. 1 = stm wins, 0 = stm
+                // loses, -1 = draw, -2 = not applicable.
+                let tb: i32 = if g.wl[0] == 0 && g.wl[1] == 0 {
+                    let mut gc = g.clone();
+                    match titanium::titanium::cert_bridge::hands_empty_race_stm_wins(&mut gc) {
+                        Some(true) => 1,
+                        Some(false) => 0,
+                        None => -1,
+                    }
+                } else {
+                    -2
+                };
+                // Distance-to-goal for each side. Proof depth is bounded by how
+                // far the winner still has to walk, so this should predict both
+                // solvability and cost independently of the wall stocks.
+                let (d0, d1) = {
+                    let mut gc = g.clone();
+                    let mut b0 = [0u8; 81];
+                    let mut b1 = [0u8; 81];
+                    gc.compute_dist(0, &mut b0);
+                    gc.compute_dist(1, &mut b1);
+                    (b0[gc.pawn[0]] as i32, b1[gc.pawn[1]] as i32)
+                };
+                let t_legacy = std::time::Instant::now();
+                let mut legacy = [false; 2];
+                let mut legacy_nodes = 0u64;
+                for s in 0..2usize {
+                    let mut gc = g.clone();
+                    let rep = certify(
+                        &mut gc,
+                        &CertifyOpts {
+                            budget: cap,
+                            deadline: None,
+                            mode_pruned: false,
+                            slack: 2,
+                            side: Some(s),
+                            recommit: true,
+                        },
+                    );
+                    legacy[s] = rep.proven == Some(s);
+                    legacy_nodes += rep.nodes as u64;
+                }
+                let legacy_us = t_legacy.elapsed().as_micros() as u64;
+                let t_dfpn = std::time::Instant::now();
+                let budget = if gated {
+                    gated_budget(g.wl[0], g.wl[1], d0, d1, cap)
+                } else {
+                    cap
+                };
+                let mut dfpn = [false; 2];
+                let mut dfpn_capped = [false; 2];
+                let mut dfpn_nodes = 0u64;
+                if budget > 0 {
+                    for s in 0..2usize {
+                        let mut gc = g.clone();
+                        let rep = certify_dfpn(
+                            &mut gc,
+                            &DfpnOpts {
+                                node_cap: budget,
+                                deadline: None,
+                                side: s,
+                                want_certificate: false,
+                            },
+                        );
+                        dfpn[s] = rep.value_proven;
+                        dfpn_capped[s] = rep.capped;
+                        dfpn_nodes += rep.nodes;
+                    }
+                }
+                let dfpn_us = t_dfpn.elapsed().as_micros() as u64;
+                format!(
+                    "{{\"row\":{row},\"ok\":true,\"turn\":{},\"wl0\":{},\"wl1\":{},\"tb\":{tb},\"d0\":{d0},\"d1\":{d1},\
+\"legacy0\":{},\"legacy1\":{},\"legacy_nodes\":{legacy_nodes},\"legacy_us\":{legacy_us},\
+\"dfpn0\":{},\"dfpn1\":{},\"dfpn_capped0\":{},\"dfpn_capped1\":{},\"dfpn_nodes\":{dfpn_nodes},\
+\"dfpn_us\":{dfpn_us},\"budget\":{budget}}}",
+                    g.turn, g.wl[0], g.wl[1],
+                    legacy[0], legacy[1], dfpn[0], dfpn[1],
+                    dfpn_capped[0], dfpn_capped[1]
+                )
+            }
+            Err(err) => format!(
+                "{{\"row\":{row},\"ok\":false,\"error\":\"{}\"}}",
                 json_escape(&err)
             ),
         })

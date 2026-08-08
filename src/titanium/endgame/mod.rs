@@ -4,6 +4,7 @@
 
 pub mod cert_bridge;
 pub mod certify;
+pub mod certify_dfpn;
 pub mod tb_zero;
 pub mod exact_dp;
 pub mod race;
