@@ -5370,7 +5370,7 @@ impl TitaniumSearch {
                 use crate::titanium::endgame::certify_dfpn::{certify_dfpn, DfpnOpts};
                 let mut opts = DfpnOpts {
                     node_cap: budget,
-                    deadline: None,
+                    deadline: Some(self.deadline),
                     side: me,
                     want_certificate: false,
                 };
