@@ -54,4 +54,51 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    emit_git_commit();
+}
+
+/// Stamp the build with the commit it came from.
+///
+/// `wasm.rs` already reads `GIT_COMMIT_HASH`, but nothing ever set it, so every
+/// build reported "unknown". Without it a gate result cannot be tied back to
+/// source: binaries are not bit-reproducible here (MSVC embeds paths and
+/// timestamps), so rebuilding a commit yields a different file and hashing the
+/// executable proves nothing. The commit has to be carried inside the binary.
+///
+/// A dirty tree is marked, because "built from abc1234" is a lie if the working
+/// copy had uncommitted edits — which is exactly how an untraceable binary got
+/// into a gate earlier today.
+fn emit_git_commit() {
+    use std::process::Command;
+
+    let hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    let stamp = if dirty {
+        format!("{hash}-dirty")
+    } else {
+        hash
+    };
+    println!("cargo:rustc-env=GIT_COMMIT_HASH={stamp}");
+
+    // Rebuild when HEAD moves, so the stamp cannot go stale behind a cached build.
+    for p in ["../.git/HEAD", "../.git/index", ".git/HEAD", ".git/index"] {
+        if std::path::Path::new(p).exists() {
+            println!("cargo:rerun-if-changed={p}");
+        }
+    }
 }

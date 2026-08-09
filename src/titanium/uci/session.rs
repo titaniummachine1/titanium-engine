@@ -31,6 +31,17 @@ use std::thread;
 /// cannot drift from Cargo.toml the way the old hardcoded constant did.
 pub const ENGINE_VERSION: &str = concat!("titanium-v", env!("CARGO_PKG_VERSION"));
 
+/// Commit this binary was built from, `-dirty` when the tree had uncommitted
+/// edits. Stamped by build.rs; "unknown" if git was unavailable at build time.
+///
+/// Gate results are worthless without it: the binaries are not bit-reproducible,
+/// so a checksum of the executable cannot be traced back to source. This is the
+/// only thing that ties a measured result to the code that produced it.
+pub const ENGINE_COMMIT: &str = match option_env!("GIT_COMMIT_HASH") {
+    Some(h) => h,
+    None => "unknown",
+};
+
 use crate::titanium::{
     algebraic_to_move_id, move_id_to_algebraic, GameState, ThinkResult, TitaniumSearch,
     TITANIUM_NO_MOVE,
@@ -465,9 +476,10 @@ fn emit_info_json(
 
     let _ = writeln!(
         stdout,
-        "info json {{\"engine\":\"{}\",\"engineVersion\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"mainThreadNodes\":{},\"helperNodes\":[{}],\"totalNodes\":{},\"mainCompletedDepth\":{},\"helperCompletedDepths\":[{}],\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"nps\":{},\"allocatedHardMs\":{},\"allocatedSoftMs\":{},\"searchableMs\":{},\"gateReserveMs\":{},\"hardOvershootMs\":{},\"softOvershootMs\":{},\"lastIterMs\":{},\"prevIterMs\":{},\"bestMoveChanges\":{},\"partialIterUsed\":{},\"softFractionBp\":{},\"ponderNodes\":{},\"ponderChunks\":{},\"ponderMs\":{},\"ponderPredicted\":\"{}\",\"ponderHit\":{},\"wallsP0\":{},\"wallsP1\":{},\"pawnP0\":{},\"pawnP1\":{},\"turn\":{},\"histLen\":{},\"distP0\":{},\"distP1\":{},\"jaDistP0\":{},\"jaDistP1\":{},\"minRemainingPlies\":{},\"wallDiffSide\":{}}}",
+        "info json {{\"engine\":\"{}\",\"engineVersion\":\"{}\",\"engineCommit\":\"{}\",\"stoppedBy\":\"{}\",\"searchDepth\":{},\"nodes\":{},\"mainThreadNodes\":{},\"helperNodes\":[{}],\"totalNodes\":{},\"mainCompletedDepth\":{},\"helperCompletedDepths\":[{}],\"rootScore\":{},\"rootScoreText\":\"{}\",\"whiteDist\":{},\"blackDist\":{},\"elapsedMs\":{},\"nps\":{},\"allocatedHardMs\":{},\"allocatedSoftMs\":{},\"searchableMs\":{},\"gateReserveMs\":{},\"hardOvershootMs\":{},\"softOvershootMs\":{},\"lastIterMs\":{},\"prevIterMs\":{},\"bestMoveChanges\":{},\"partialIterUsed\":{},\"softFractionBp\":{},\"ponderNodes\":{},\"ponderChunks\":{},\"ponderMs\":{},\"ponderPredicted\":\"{}\",\"ponderHit\":{},\"wallsP0\":{},\"wallsP1\":{},\"pawnP0\":{},\"pawnP1\":{},\"turn\":{},\"histLen\":{},\"distP0\":{},\"distP1\":{},\"jaDistP0\":{},\"jaDistP1\":{},\"minRemainingPlies\":{},\"wallDiffSide\":{}}}",
         engine_flag,
         ENGINE_VERSION,
+        ENGINE_COMMIT,
         r.stop_reason,
         r.depth,
         r.nodes,
