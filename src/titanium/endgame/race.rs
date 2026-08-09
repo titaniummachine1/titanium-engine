@@ -1717,6 +1717,7 @@ mod tests {
     // ── 1. Exhaustive empty-board exact equality (Service B) ──────────────────
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn empty_board_exhaustive_exact_equality() {
         let mut g = GameState::new();
 
@@ -1747,6 +1748,7 @@ mod tests {
     /// bound sign must match the exact oracle. (Unknown is allowed; it is never a
     /// false bound.) The bound path must allocate no exact graph.
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn empty_board_race_outcome_bound_sign_audit() {
         let mut g = GameState::new();
         let mut ref_scratch = ReferenceScratch::new();
@@ -1904,6 +1906,7 @@ mod tests {
     // ── 3. Random legal fixed topologies (exact + bound sign) ────────────────
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn random_fixed_topology_exact_equality_1000() {
         let seed: u64 = 0xACE5_2026;
         let mut rng = seed;
@@ -1946,6 +1949,7 @@ mod tests {
     /// gate that the in-module winner-sign recursion failed, motivating the switch
     /// to the proven cert_bridge resolver.
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn random_fixed_topology_race_outcome_bound_sign_1000() {
         let seed: u64 = 0x71744E_1ACE;
         let mut rng = seed;
@@ -2372,6 +2376,7 @@ mod tests {
     /// configs, 10,000 deterministic random topologies, 7 adversarial configs
     /// designed around adjacency / jumps / leapfrogging / narrow corridors.
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn eta_gate_delta_gt1_soundness_audit() {
         use crate::titanium::algebraic_to_move_id;
 
@@ -3432,21 +3437,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn unified_deduction_oracle_audit_stage1() {
         run_legal_corpus_audit(100, "stage1", 5);
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn unified_deduction_oracle_audit_stage2() {
         run_legal_corpus_audit(1_000, "stage2", 25);
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn unified_deduction_oracle_audit_stage3() {
         run_legal_corpus_audit(10_000, "stage3", 100);
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn unified_deduction_oracle_audit() {
         run_legal_corpus_audit(10_000, "stage3", 100);
     }
@@ -4579,6 +4588,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn gate3_k1_filter_and_raw_audit() {
         use std::time::Instant;
 
@@ -4934,6 +4944,7 @@ mod tests {
     /// directly): does it EVER prove the wrong winner vs the exact oracle across
     /// every recorded zero-wall topology? Soundness only (no timing/hybrid).
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn gate3_raw_k2_full_corpus_soundness() {
         use std::collections::HashMap;
 

@@ -178,23 +178,6 @@ impl WasmCatEngine {
         cat_snapshot_json(&mut self.board)
     }
 
-    /// LMR plan JSON — `lmr_aggression_percent` is viz tuning, -500..150.
-    pub fn lmr_snapshot(
-        &mut self,
-        moves: &str,
-        time_ms: u32,
-        id_depth: u32,
-        lmr_aggression_percent: i32,
-    ) -> String {
-        self.sync_to(moves);
-        crate::legacy_search::lmr_viz::lmr_snapshot_json(
-            &mut self.board,
-            u64::from(time_ms),
-            id_depth,
-            lmr_aggression_percent,
-        )
-    }
-
     /// Path tilt for CAT heat visualization (basis points). Visualization worker only.
     pub fn set_cat_distance_bias_bp(&mut self, bias: i16) {
         crate::cat::build::set_cat_distance_bias_bp(bias);

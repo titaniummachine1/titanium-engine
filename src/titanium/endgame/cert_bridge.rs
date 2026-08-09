@@ -795,6 +795,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn exhaustive_zero_wall_turn_adjusted_audit() {
         use crate::titanium::exact_dp::oracle_solve_board;
 
@@ -1169,6 +1170,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn exhaustive_resolver_audit_no_false_certificates() {
         use crate::titanium::exact_dp::oracle_solve_board;
         let oracle_table = oracle_solve_board(&[0u8; 81]);

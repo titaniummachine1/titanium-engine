@@ -8,12 +8,12 @@
 //!   titanium/{eval,endgame}/           Layer 2
 //!   titanium/search/                   Layer 3 — play search
 //!   titanium/uci/ + validation/ + weights/  Layer 4 + assets
-//!
-//! Historical (not under src/):
-//!   engine/legacy/{search,opening}/    αβ/CLI + crate-root opening book
 //! ```
 //! Training lives at repo-root `training/` — outside this crate.
-//! Do not put new play-engine code under `engine/legacy/`.
+//!
+//! There is exactly one search. The `engine/legacy/` αβ/CLI tree — reachable
+//! as `titanium uci` and via unknown-flag fallthrough — is deleted; do not
+//! reintroduce a second play engine.
 
 pub mod bench_instr;
 pub mod cat;

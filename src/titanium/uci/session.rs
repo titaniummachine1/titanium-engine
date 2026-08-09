@@ -151,8 +151,9 @@ fn timed_search(
     }
     #[cfg(target_arch = "wasm32")]
     {
+        // No Lazy SMP in the browser: same search, single-threaded.
         let _ = threads;
-        timed_search(&mut search, time_ms, label, threads)
+        search.think(time_ms, 128, false, true, label)
     }
 }
 

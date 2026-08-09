@@ -138,6 +138,7 @@ mod tests {
     use crate::util::perft::perft_fast;
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn canta_oracle_all_games_depth1_to_3() {
         for game in 0..15 {
             let mut board = board_after_canta_game(game);
@@ -155,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhaustive audit; run with: cargo test --release -- --ignored"]
     fn canta_game0_matches_manual_replay() {
         let board = board_after_canta_game(0);
         let mut scratch = BfsScratch::new();

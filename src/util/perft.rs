@@ -475,7 +475,7 @@ pub fn format_move(mv: Move) -> String {
 mod tests {
     use super::*;
     use crate::movegen::generate_legal_moves;
-    use crate::legacy_search::runtime::Engine;
+    use crate::util::perft_engine::Engine;
     use crate::util::clock::{Duration, Instant};
     use core_affinity::CoreId;
     use std::sync::mpsc;

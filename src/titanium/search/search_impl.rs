@@ -46,6 +46,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, RwLock,
 };
+// `external_stop` is not thread-gated, so single-threaded wasm needs these too.
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+use std::sync::atomic::{AtomicBool, Ordering};
 pub const MATE: i32 = 100_000;
 pub const MAX_PLY: usize = 64;
 const INF: i32 = 2 * MATE;
@@ -82,7 +85,7 @@ fn rfp_depth_for_budget(tc_adaptive: bool, allotted_ms: u64) -> i32 {
 }
 
 
-/// Late-move reduction plies — re-exported for LMR vision (`legacy_search::lmr_viz`).
+/// Late-move reduction plies.
 pub use super::v16_lmr::ace_graduated_lmr_reduction;
 
 
