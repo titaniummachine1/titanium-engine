@@ -28,8 +28,10 @@ use titanium::titanium::{move_id_to_algebraic, GameState, ThinkResult, TitaniumS
 /// constant and cannot drift from what `fresh_search` builds. It previously
 /// returned "titanium-v17" unconditionally while `fresh_search` defaulted to
 /// `grafted()` (v15), silently mislabeling every default profile.
+/// Reported build identity. Hardcoding this is how the bench spent a release
+/// claiming "titanium-v18" while running something else; derive it instead.
 fn engine_mode() -> &'static str {
-    "titanium-v18"
+    titanium::titanium::uci::session::ENGINE_VERSION
 }
 const TT_BITS: usize = 20;
 const MAX_DEPTH: i32 = 30;
@@ -155,9 +157,14 @@ fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
         Some(raw) if !raw.trim().is_empty() => load_position_from_moves(raw),
         _ => load_position(position),
     };
-    // The one production engine — same object the site and the match harness get.
-    // This used to default to `grafted()` (v15) while reporting "titanium-v17".
-    TitaniumSearch::build(g, Some(TT_BITS), 1000, titanium::titanium::net::net())
+    // The one production engine — literally the call the session makes.
+    //
+    // This has diverged twice now. It used to default to `grafted()` (v15) while
+    // reporting "titanium-v17"; then it hardcoded an LMR ceiling of 1000 against
+    // production's 800 and pinned the TT at 20 bits instead of the adaptive
+    // ladder. Both made every speed number describe an engine nobody ships.
+    // Construct it exactly as uci/session.rs does and nothing else.
+    TitaniumSearch::production(g, None)
 }
 
 fn run_think(
