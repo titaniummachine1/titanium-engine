@@ -676,6 +676,31 @@ const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 
+/// Table size for the Lazy SMP search, in bits.
+///
+/// The parallel path cannot use the adaptive ladder: resizing while other
+/// workers probe would invalidate the shared slots, so growth is switched off
+/// for the whole session. It therefore has to be sized correctly up front
+/// rather than left at [`TT_BITS`] — at 1M slots a 60s game stores ~34M
+/// entries and overwrites the table ~32 times, which is what "the TT is not
+/// used effectively" looks like in practice.
+///
+/// 22 bits is 4.2M slots (~170 MB shared, one RwLock per slot). Override with
+/// `TITANIUM_TT_BITS` to gate sizes against each other or to cap memory when
+/// many engines run in parallel.
+const TT_PARALLEL_BITS_DEFAULT: usize = 22;
+const TT_PARALLEL_BITS_MIN: usize = TT_BITS;
+const TT_PARALLEL_BITS_MAX: usize = 25;
+
+/// Lazy SMP table size from env, clamped to a sane range.
+fn tt_parallel_bits_from_env() -> usize {
+    std::env::var("TITANIUM_TT_BITS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|b| (TT_PARALLEL_BITS_MIN..=TT_PARALLEL_BITS_MAX).contains(b))
+        .unwrap_or(TT_PARALLEL_BITS_DEFAULT)
+}
+
 // The very last worker (worker_id == threads - 1, when there are at least 3
 // threads so it's a distinct role from main and the uniform-80% helpers)
 // skips the percentage schedule entirely and searches only this many
@@ -862,6 +887,40 @@ impl SharedTitaniumTt {
             mask: search.tt_mask,
             bits: search.tt_bits,
             filled: AtomicUsize::new(search.tt_filled),
+        }
+    }
+
+    /// Rebuild at `new_bits`, rehashing live entries into the larger table.
+    ///
+    /// Only legal between searches, with every helper joined: the slot vector is
+    /// one allocation, so it cannot be grown in place or freed piecewise while
+    /// anything probes it. Called from the move boundary, where the opponent is
+    /// on the clock and nothing is reading the table.
+    fn grown_to(&self, new_bits: usize) -> Self {
+        let new_size = 1usize << new_bits;
+        let new_mask = (new_size - 1) as u32;
+        let mut slots: Vec<RwLock<SharedTtEntry>> = (0..new_size)
+            .map(|_| RwLock::new(SharedTtEntry::default()))
+            .collect();
+        let mut filled = 0usize;
+        for slot in &self.slots {
+            let e = *slot.read().expect("shared TT read lock poisoned");
+            if e.meta == 0 {
+                continue;
+            }
+            let idx = (e.key_lo & new_mask) as usize;
+            let dst = slots[idx].get_mut().expect("fresh TT lock poisoned");
+            // Always-replace on collision, matching the live store policy.
+            if dst.meta == 0 {
+                filled += 1;
+            }
+            *dst = e;
+        }
+        Self {
+            slots,
+            mask: new_mask,
+            bits: new_bits,
+            filled: AtomicUsize::new(filled),
         }
     }
 
@@ -7255,9 +7314,13 @@ impl TitaniumSearch {
 
         // Parallel search uses a fixed shared allocation. Live adaptive growth is
         // intentionally disabled because resizing a TT while other workers probe
-        // it would invalidate the shared slots.
-        if self.shared_tt.is_none() && self.tt_bits < TT_BITS {
-            self.resize_tt(TT_BITS);
+        // it would invalidate the shared slots. Since it can never grow, size it
+        // for the whole session now instead of leaving it at the 1M-slot floor.
+        if self.shared_tt.is_none() {
+            let target = tt_parallel_bits_from_env();
+            if self.tt_bits < target {
+                self.resize_tt(target);
+            }
         }
         self.tt_adaptive = false;
         self.apply_think_start_state();
