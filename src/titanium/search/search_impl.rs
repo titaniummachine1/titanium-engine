@@ -692,6 +692,14 @@ const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 /// `TITANIUM_TT_BITS` raises the starting size for long-time-control testing,
 /// where one search really can want far more than a million entries.
 const TT_PARALLEL_BITS_DEFAULT: usize = TT_BITS;
+
+/// Ceiling for climbing several ladder rungs at one move boundary.
+///
+/// Everything up to here is a cache-tier step on a small table — 18 bits is
+/// ~10 MB — so the rehash is cheap and the climb should not be rationed to one
+/// rung per move. Above it the copy is large enough that it gets a move
+/// boundary of its own, where the opponent's clock pays for it.
+const TT_FAST_CLIMB_BITS: usize = 18;
 const TT_PARALLEL_BITS_MIN: usize = TT_BITS;
 const TT_PARALLEL_BITS_MAX: usize = 25;
 
@@ -7371,18 +7379,30 @@ impl TitaniumSearch {
         // the previous thinks actually overflowed it — a session of short moves
         // that never fills the table keeps the one it has, and a long think that
         // ran out of room gets a bigger table for the next move.
-        if let Some(existing) = self.shared_tt.clone() {
-            let filled = existing.filled.load(Ordering::Relaxed);
-            if existing.bits < self.tt_max
-                && filled.saturating_mul(2) >= (1usize << existing.bits)
-            {
-                let nb = self.next_tt_rung(existing.bits);
-                if nb > existing.bits {
-                    let grown = Arc::new(existing.grown_to(nb));
-                    self.tt_mask = grown.mask;
-                    self.tt_bits = grown.bits;
-                    self.shared_tt = Some(grown);
+        // The cache-tier rungs up to TT_FAST_CLIMB_BITS are cheap — 18 bits is a
+        // ~10 MB table — so climb all of them in one go rather than one rung per
+        // move. Above that a rehash is expensive enough to want a whole move of
+        // opponent time to itself, so it takes one rung at a time.
+        if let Some(mut table) = self.shared_tt.clone() {
+            let overflowing = |t: &Arc<SharedTitaniumTt>| {
+                t.filled.load(Ordering::Relaxed).saturating_mul(2) >= (1usize << t.bits)
+            };
+            let mut grew = false;
+            while table.bits < self.tt_max && overflowing(&table) {
+                let nb = self.next_tt_rung(table.bits);
+                if nb <= table.bits {
+                    break;
                 }
+                table = Arc::new(table.grown_to(nb));
+                grew = true;
+                if table.bits >= TT_FAST_CLIMB_BITS {
+                    break; // one expensive rung per move boundary
+                }
+            }
+            if grew {
+                self.tt_mask = table.mask;
+                self.tt_bits = table.bits;
+                self.shared_tt = Some(table);
             }
         }
         let shared_tt = self
