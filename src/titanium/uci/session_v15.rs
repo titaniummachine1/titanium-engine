@@ -98,10 +98,10 @@ enum Reply {
 /// rather than a stream of restarts.
 const PONDER_INFINITE_MS: u64 = 3_600_000;
 
-/// A ponder search returning more than this far short of its budget has solved
-/// the position out rather than run out of time; there is nothing left to
-/// compute and re-running it would spin.
-const PONDER_EXHAUSTED_MARGIN_MS: u64 = 1_000;
+/// A ponder search returning faster than this has solved the position out:
+/// there is nothing left to compute and re-running it immediately would spin.
+/// Anything slower did real work and should continue.
+const PONDER_SOLVED_MS: u64 = 20;
 
 /// Poll interval once the position is exhausted. Sleeping rather than
 /// re-searching keeps an exhausted ponder off the CPU, which matters because
@@ -116,6 +116,24 @@ const PONDER_IDLE_POLL_MS: u64 = 20;
 const PONDER_PROBE_MS: u64 = 400;
 
 // ── Search daemon ─────────────────────────────────────────────────────────────
+
+
+/// Is the engine's live position exactly `g`?
+///
+/// The Zobrist pair alone is not enough to act on: a 64-bit collision would let
+/// the engine continue a search rooted at a *different* position and then play
+/// a move that is illegal in the real game, with no way to recover mid-match.
+/// The hash is the cheap filter; these fields are the proof.
+fn position_is_exactly(live: &GameState, g: &GameState) -> bool {
+    live.hash_lo == g.hash_lo
+        && live.hash_hi == g.hash_hi
+        && live.pawn == g.pawn
+        && live.wl == g.wl
+        && live.turn == g.turn
+        && live.hist_len == g.hist_len
+        && live.hw_bits == g.hw_bits
+        && live.vw_bits == g.vw_bits
+}
 
 fn build_search(_engine_flag: &str, g: GameState) -> Box<TitaniumSearch> {
     // One engine; the label no longer selects a configuration.
@@ -135,6 +153,12 @@ fn search_daemon(
     // Mirror of the position the caller last set, so pondering can build the
     // speculative child position and recognise a correct prediction.
     let mut cur_g = GameState::new();
+    // The opponent played the reply we were pondering, so the search is already
+    // rooted at the position we are about to be asked about. Set here and
+    // consumed by the next timed search, which then continues instead of
+    // rebuilding -- this is what `ponderhit` does in the UCI protocol, derived
+    // from the position itself because this interface never sends one.
+    let mut hit_continue = false;
 
     loop {
         let cmd = match rx.recv() {
@@ -169,10 +193,6 @@ fn search_daemon(
                 let mut spec_hash: Option<(u32, u32)> = None;
                 let mut hint = hint_mv;
                 let mut respeculate = true;
-                // The search has nothing left to compute at this position, so
-                // re-running it would spin. Set when a think returns far short
-                // of the budget it was given.
-                let mut exhausted = false;
 
                 loop {
                     // NEVER clear the stop flag speculatively. The I/O thread
@@ -187,7 +207,6 @@ fn search_daemon(
 
                     if respeculate && !pending {
                         respeculate = false;
-                        exhausted = false;
                         spec_hash = None;
                         tel.predicted = TITANIUM_NO_MOVE;
                         // Stand on the node we will actually have to search
@@ -222,7 +241,7 @@ fn search_daemon(
                     // restart every time. Measured before this: 1188 think()
                     // calls totalling 456ms of actual search for one turn --
                     // almost all of it restart overhead and spin.
-                    if !exhausted && !pending {
+                    if !pending {
                         let r = search.think(PONDER_INFINITE_MS, 128, false, false, label);
                         tel.nodes = tel.nodes.saturating_add(r.nodes);
                         tel.ms = tel.ms.saturating_add(r.ms);
@@ -231,21 +250,21 @@ fn search_daemon(
                             last_mv = r.mv;
                             last_score = r.score;
                         }
-                        // Returning early means the tree is solved out, not that
-                        // time ran out. Stop searching and just wait: hammering
-                        // think() on an exhausted position burns a core, and
-                        // that core is one the opponent is entitled to.
-                        // An aborted search also returns early, so returning
-                        // short of budget alone does not mean the tree is
-                        // solved out -- check the flag to tell the two apart.
-                        // Getting this wrong would park a perfectly searchable
-                        // position in the idle poll.
-                        exhausted = !abort.load(Ordering::Relaxed)
-                            && r.ms + PONDER_EXHAUSTED_MARGIN_MS < PONDER_INFINITE_MS;
+                        // Only an essentially instant return means the tree is
+                        // solved out and there is nothing left to compute.
+                        // Anything else simply finished an iteration and should
+                        // carry on. Parking for the rest of the window on any
+                        // early return cost ~5% of ponder time and left 14% of
+                        // turns pondering nothing at all, measured against the
+                        // sliced version at 3min+2s.
+                        if !abort.load(Ordering::Relaxed) && r.ms < PONDER_SOLVED_MS {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                PONDER_IDLE_POLL_MS,
+                            ));
+                        }
                     } else {
-                        // Either the tree is solved out, or a command is in
-                        // flight and we must not start a search we cannot see
-                        // the end of. Wait rather than burn a core.
+                        // A command is in flight: do not start a search we
+                        // cannot see the end of.
                         std::thread::sleep(std::time::Duration::from_millis(
                             PONDER_IDLE_POLL_MS,
                         ));
@@ -255,11 +274,15 @@ fn search_daemon(
                         Ok(Cmd::GoTimed(time_ms)) => {
                             search.set_pondering(false);
                             abort.store(false, Ordering::Relaxed);
-                            // A `go` with no intervening position update would
+                            // On a confirmed hit the search is already rooted at
+                            // exactly this position, so leave it alone. Only
+                            // resync when we are standing somewhere else -- a
+                            // `go` with no intervening position update would
                             // otherwise search the speculative child.
-                            if spec_hash.is_some() {
+                            if !hit_continue && spec_hash.is_some() {
                                 search.set_position(cur_g.clone());
                             }
+                            hit_continue = false;
                             let r2 = search.think(time_ms, 128, false, true, label);
                             last_score = r2.score;
                             let mv = r2.mv;
@@ -298,19 +321,26 @@ fn search_daemon(
                         }
                         Ok(Cmd::Quit) | Err(mpsc::TryRecvError::Disconnected) => return,
                         Ok(Cmd::SetGame(g)) => {
-                            // Position update mid-ponder. Credit the guess if the
-                            // opponent walked into the node we were standing on;
-                            // the nodes already spent stay on the tally either way
-                            // because they are what the next think inherits.
-                            if let Some(h) = spec_hash {
-                                if (g.hash_lo, g.hash_hi) == h {
-                                    tel.hit = true;
-                                }
+                            // Did the opponent walk into the node we speculated
+                            // on? If so the live search is already rooted there:
+                            // keep it and keep searching. Resetting would throw
+                            // away the tree, the root ordering and the
+                            // accumulator for a position we already hold.
+                            let hit = spec_hash.is_some()
+                                && position_is_exactly(&search.g, &g);
+                            if hit {
+                                tel.hit = true;
+                                cur_g = g;
+                                hit_continue = true;
+                                // Deliberately no set_position and no
+                                // respeculate: the search continues untouched.
+                            } else {
+                                cur_g = g.clone();
+                                search.set_position(g);
+                                last_mv = TITANIUM_NO_MOVE;
+                                respeculate = true;
+                                hit_continue = false;
                             }
-                            cur_g = g.clone();
-                            search.set_position(g);
-                            last_mv = TITANIUM_NO_MOVE;
-                            respeculate = true;
                         }
                         Ok(_) => {}
                         Err(mpsc::TryRecvError::Empty) => {
