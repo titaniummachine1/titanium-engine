@@ -7,7 +7,7 @@
 //! onto the gen13 search core.  It is NOT just an ACE port — it is the
 //! Titanium engine, using ACE v13 as its search algorithm foundation.
 //! Session: `run_titanium_session_stdio` (warm TT, `go TIME_SEC`).  Optional
-//! `run_v15_session_stdio` (infinite search) is compiled but not routed.
+//! `run_titanium_session_stdio` (infinite search) is compiled but not routed.
 //!
 //! ## ACE v13 reference engines
 //! Faithful Rust ports of `ACEV13.html` ("pathfix gen11_ghi +
@@ -61,7 +61,6 @@ pub use research::wall_ignore_cert_tests;
 pub use research::wall_ignore_corridor;
 pub use timeman::time_alloc;
 pub use uci::session;
-pub use uci::session_v15;
 
 pub use game::GameState;
 pub use packed_state::{
@@ -69,7 +68,7 @@ pub use packed_state::{
     titanium_game_from_packed, FEATURE_SCHEMA, PACKED_STATE_LEN, POSITION_SCHEMA_VERSION,
 };
 pub use perft::{
-    default_timeout, oracle_nodes, perft_engine_timed, perft_titanium_native_timed,
+    default_timeout, oracle_nodes, perft_titanium_native_timed,
     perft_titanium_ti_timed, perft_titanium_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
 };
 pub use race::RaceOutcomeStats;
@@ -78,7 +77,6 @@ pub use search::{
     TitaniumSearch,
 };
 pub use session::run_titanium_session_stdio;
-pub use session_v15::run_v15_session_stdio;
 
 /// Sentinel — pawn move id `0` is legal (cell a9); do not use `0` for "no move".
 pub const TITANIUM_NO_MOVE: i16 = -1;

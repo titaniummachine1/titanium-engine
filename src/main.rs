@@ -5,10 +5,8 @@ use std::time::{Duration, Instant};
 
 use titanium::{
     both_players_reach_goals, cat_snapshot_json, format_move, generate_legal_moves,
-    genmove_algebraic, perft_divide, perft_fast_anchor_baseline,
-    perft_no_tt_anchor_baseline, run_search, run_session_stdio, Board, Engine, GameSearchSession,
-    GenmoveConfig, GenmoveEngine, MctsConfig, SearchConfig, DEFAULT_MAX_NODES, DEFAULT_TIME_MS,
-    MCTS_DEFAULT_MAX_SIMULATIONS, MCTS_DEFAULT_UCT, PERFT5_TIMEOUT_SECS,
+    perft_divide, perft_fast_anchor_baseline, perft_no_tt_anchor_baseline, Board, Engine,
+    PERFT5_TIMEOUT_SECS,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -63,7 +61,6 @@ fn main() {
         "perft-id" => run_perft_id(&args),
         "thread-bench" => run_thread_bench(&args),
         "moves" => run_moves(),
-        "genmove" => run_genmove(&args),
         "cat" => run_cat(&args),
         "eval" => run_eval(&args),
         "eval-batch" => run_eval_batch(),
@@ -73,29 +70,22 @@ fn main() {
         "score-out" => run_score_out(&args),
         "tbgen" => run_tbgen(&args),
         "fields" => run_fields(&args),
-        "match" => run_match(&args),
-        "uci" => titanium::run_uci_stdio(),
-        "session" => match ace_engine_flag(&args).or_else(|| session_engine_flag(&args)) {
-            // v15 uses the standard warm session (go TIME_SEC). session_v15 infinite
-            // search is kept in-tree but disabled — it regressed vs ti-pure baseline.
-            Some(flag) if uses_titanium_module(flag) => {
-                let pondering = std::env::var("TITANIUM_PONDERING")
-                    .map(|value| value != "0")
-                    .unwrap_or(true);
-                if pondering {
-                    titanium::run_v15_session_stdio(flag);
-                } else {
-                    titanium::run_titanium_session_stdio(flag, parse_threads_arg(&args));
-                }
-            }
-            Some(_) => {
-                eprintln!(
-                    "error: true ACE engines (ace, ace-v8, …) moved to the `ace` binary under engines/ace/"
-                );
+        // One engine, reached without ceremony. There used to be a flag, and an
+        // unrecognised value -- including none at all, or a version newer than
+        // the hardcoded list knew -- fell through to the legacy search
+        // *silently*. That is how a v19 engine answered only to
+        // "titanium-v17", with anything else playing at roughly a sixth of the
+        // node rate, six plies shallower, and no warning.
+        "uci" | "session" => {
+            // Only genuine ACE engines are rejected. `ace_engine_flag` also
+            // returns titanium-* names, so testing it directly rejected the very
+            // flag every existing caller passes.
+            if let Some(flag) = ace_engine_flag(&args).filter(|f| f.starts_with("ace-")) {
+                eprintln!("error: ACE engines ({flag}) live in the `ace` binary under engines/ace/");
                 std::process::exit(2);
             }
-            None => run_session_stdio(),
-        },
+            titanium::run_titanium_session_stdio(parse_threads_arg(&args));
+        }
         _ => print_usage(),
     }
 }
@@ -530,90 +520,6 @@ fn run_moves() {
     }
 }
 
-fn parse_genmove_config(args: &[String]) -> (GenmoveConfig, Vec<String>) {
-    let log = std::env::var("TITANIUM_LOG").is_ok();
-    let mut config = GenmoveConfig {
-        engine: GenmoveEngine::Minimax,
-        mcts: MctsConfig {
-            time_ms: DEFAULT_TIME_MS,
-            max_simulations: MCTS_DEFAULT_MAX_SIMULATIONS,
-            uct: MCTS_DEFAULT_UCT,
-            log,
-            use_cat_guidance: false, // bridge is activated by the genmove handoff
-            book_hint: None,
-        },
-        minimax: SearchConfig {
-            time_ms: DEFAULT_TIME_MS,
-            max_nodes: DEFAULT_MAX_NODES,
-            log,
-            book_hint: None,
-            ..SearchConfig::default()
-        },
-    };
-    let mut moves = Vec::new();
-
-    let mut i = 2usize;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--engine" {
-            if let Some(name) = args.get(i + 1) {
-                #[allow(deprecated)]
-                let engine = match name.as_str() {
-                    "minimax" | "ab" => GenmoveEngine::Minimax,
-                    "greedy" => GenmoveEngine::Greedy,
-                    _ => GenmoveEngine::Mcts,
-                };
-                config.engine = engine;
-                i += 2;
-                continue;
-            }
-        } else if arg == "--time" {
-            if let Some(sec) = args.get(i + 1).and_then(|s| s.parse::<f64>().ok()) {
-                let ms = (sec * 1000.0) as u64;
-                config.mcts.time_ms = ms;
-                config.minimax.time_ms = ms;
-                i += 2;
-                continue;
-            }
-        } else if arg == "--sims" {
-            if let Some(n) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                config.mcts.max_simulations = n;
-                i += 2;
-                continue;
-            }
-        } else if arg == "--uct" {
-            if let Some(u) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                config.mcts.uct = u;
-                i += 2;
-                continue;
-            }
-        } else if arg == "--nodes" {
-            if let Some(n) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                config.minimax.max_nodes = n;
-                i += 2;
-                continue;
-            }
-        } else if arg == "--log" {
-            config.mcts.log = true;
-            config.minimax.log = true;
-            i += 1;
-            continue;
-        } else if arg == "--cat" || arg == "--cat-guidance" || arg == "--bridge-mcts" {
-            config.mcts.use_cat_guidance = true;
-            i += 1;
-            continue;
-        } else if arg.starts_with("--") {
-            i += 1;
-            continue;
-        } else {
-            moves.push(arg.clone());
-        }
-        i += 1;
-    }
-
-    (config, moves)
-}
-
 fn run_cat(args: &[String]) {
     let mut board = Board::new();
     for mv in args.iter().skip(2) {
@@ -1009,6 +915,7 @@ fn run_score_out(args: &[String]) {
         return;
     }
 
+    let packed_for_engine = packed_hex.clone();
     let board = if let Some(hex) = packed_hex {
         match parse_packed_board(&hex) {
             Ok(board) => board,
@@ -1039,19 +946,53 @@ fn run_score_out(args: &[String]) {
 
     // A long deadline makes the node budget the controlling limit without
     // allowing a malformed/degenerate position to run indefinitely.
-    let config = SearchConfig {
-        time_ms: 86_400_000,
-        max_nodes: budget,
-        log: false,
-        book_hint: None,
-        cert_enabled: None,
-        ..SearchConfig::default()
+    // Runs the production engine. This used to drive the legacy search, so every
+    // teacher label the training pipeline collected through `score-out` was
+    // produced by an engine that reaches depth 7 / 162k nodes in 3s where this
+    // one reaches depth 13 / 985k. Labels from before this are not comparable.
+    //
+    // The old contract was a node budget; TitaniumSearch is time-bounded, so the
+    // budget is converted at the production search's measured rate rather than
+    // being silently ignored.
+    const SCORE_OUT_NODES_PER_MS: u64 = 400;
+    // Built from the same input the board was, because a Board carries no move
+    // history and a guessed position would be scored silently.
+    let game = if let Some(hex) = packed_for_engine {
+        let mut packed = [0u8; titanium::PACKED_STATE_LEN];
+        for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+            packed[i] = u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("zz"), 16)
+                .unwrap_or(0);
+        }
+        match titanium::titanium_game_from_packed(&packed) {
+            Ok(g) => g,
+            Err(message) => {
+                println!("{}", score_out_error_json(&message));
+                return;
+            }
+        }
+    } else {
+        let mut g = titanium::GameState::new();
+        for mv in &moves {
+            g.make_move(titanium::algebraic_to_move_id(mv));
+        }
+        g
     };
-    let mut session = GameSearchSession::new();
-    session.board = board.clone();
-    let Some(report) = run_search(&mut session, config) else {
+    let mut search = titanium::TitaniumSearch::production(game, None);
+    let time_ms = (budget / SCORE_OUT_NODES_PER_MS).clamp(1, 86_400_000);
+    let result = search.think(time_ms, 128, false, false, "score-out");
+    if result.mv == titanium::TITANIUM_NO_MOVE {
         println!("{}", score_out_error_json("no legal moves"));
         return;
+    }
+    struct ScoreOutReport {
+        root_score: i32,
+        search_depth: i32,
+        nodes: u64,
+    }
+    let report = ScoreOutReport {
+        root_score: result.score,
+        search_depth: result.depth,
+        nodes: result.nodes,
     };
     let score = report.root_score;
     let bound = if report.search_depth > 0 {
@@ -1073,7 +1014,7 @@ fn run_score_out(args: &[String]) {
         report.nodes,
         budget,
         report.search_depth,
-        json_escape(&format_move(report.best_move)),
+        json_escape(&titanium::move_id_to_algebraic(result.mv)),
     );
 }
 
@@ -1122,6 +1063,12 @@ fn score_out_error_json(message: &str) -> String {
     )
 }
 
+
+fn looks_like_algebraic_move(arg: &str) -> bool {
+    let b = arg.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_lowercase() && b[1].is_ascii_digit()
+}
+
 fn parse_packed_board(hex: &str) -> Result<Board, String> {
     if hex.len() != titanium::PACKED_STATE_LEN * 2 {
         return Err(format!(
@@ -1155,298 +1102,6 @@ fn parse_packed_board(hex: &str) -> Result<Board, String> {
     let mut board = board;
     board.hash = titanium::core::zobrist::hash_board(&board);
     Ok(board)
-}
-
-fn looks_like_algebraic_move(arg: &str) -> bool {
-    let b = arg.as_bytes();
-    b.len() >= 2 && b[0].is_ascii_lowercase() && b[1].is_ascii_digit()
-}
-/// STRENGTH MATCH — Titanium+endgame-certificate vs plain Titanium, head to
-/// head over `--games` games. Measures whether the v13 endgame proof oracle
-/// makes the engine *win more*, not whether it searches the same nodes.
-///
-/// Each color-swapped PAIR shares one seeded random opening, so the two configs
-/// face identical positions with both colors (fair + varied — a deterministic
-/// engine plays the same game every time from a fixed start otherwise).
-///
-/// Usage: `titanium match [--games N] [--time SEC] [--seed S] [--open PLIES]
-///         [--maxply N]`
-fn run_match(args: &[String]) {
-    use rayon::prelude::*;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-    use std::sync::Mutex;
-    use titanium::legacy_search::alphabeta::CERT_PROOFS;
-
-    let mut games = 100usize;
-    let mut time_sec = 2.0f64;
-    let mut seed = 1u64;
-    let mut open_plies = 4u32;
-    let mut max_ply = 200u32;
-    let mut threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let mut engine_a = MatchEngine::Live;
-    let mut engine_b = MatchEngine::Frozen;
-    let mut tt_bits: Option<usize> = None;
-    let mut early_stop = true;
-    let mut book_openings = false;
-    let mut dump_games = false;
-    let mut i = 2usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--games" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    games = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--time" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    time_sec = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--seed" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    seed = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--open" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    open_plies = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--maxply" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    max_ply = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--threads" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    threads = v;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--tt-bits" => {
-                if let Some(v) = args.get(i + 1).and_then(|s| s.parse().ok()) {
-                    tt_bits = Some(v);
-                    i += 2;
-                    continue;
-                }
-            }
-            "--a" => {
-                if let Some(e) = args.get(i + 1).and_then(|s| MatchEngine::parse(s)) {
-                    engine_a = e;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--b" | "--vs" => {
-                if let Some(e) = args.get(i + 1).and_then(|s| MatchEngine::parse(s)) {
-                    engine_b = e;
-                    i += 2;
-                    continue;
-                }
-            }
-            "--no-early-stop" => {
-                early_stop = false;
-                i += 1;
-                continue;
-            }
-            "--openings" => {
-                if let Some(v) = args.get(i + 1) {
-                    book_openings = v == "book";
-                    i += 2;
-                    continue;
-                }
-            }
-            "--dump-games" => {
-                dump_games = true;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    let time_ms = (time_sec * 1000.0).round() as u64;
-
-    // Halve threads: each "slot" runs TWO sequential games (a color-swapped pair).
-    // So `threads` parallel slots = `threads * 2` games at once.
-    let pair_threads = threads.max(1);
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(pair_threads)
-        .build_global()
-        .ok();
-
-    let a_w = AtomicU32::new(0);
-    let b_w = AtomicU32::new(0);
-    let draws = AtomicU32::new(0);
-    let cert_touched = AtomicU64::new(0);
-    let games_done = AtomicU32::new(0);
-    // Disaster guard: set when we're statistically confident A is ≥100 Elo worse.
-    // In-flight games still finish, but no new ones launch — saves a doomed run.
-    let aborted = AtomicBool::new(false);
-    let started = Instant::now();
-    let print_mu: Mutex<()> = Mutex::new(());
-
-    // Round pairs up to nearest multiple of thread count so every batch fills
-    // all cores — no thread sits idle waiting for 1 straggler to finish.
-    let raw_pairs = (games + 1) / 2;
-    let pairs = raw_pairs.div_ceil(pair_threads) * pair_threads;
-    let games = pairs * 2;
-
-    let tt_note = tt_bits
-        .map(|b| format!(", tt-bits={b}"))
-        .unwrap_or_default();
-    let open_note = if book_openings {
-        "book lines".to_string()
-    } else {
-        format!("{open_plies} random plies")
-    };
-    eprintln!(
-        "match: {games} games @ {time_sec}s/move, open={open_note}, \
-         maxply={max_ply}, threads={pair_threads}{tt_note}"
-    );
-    eprintln!("  A = {}   B = {}", engine_a.label(), engine_b.label());
-
-    (0..pairs).into_par_iter().for_each(|pair| {
-        let opening = if book_openings {
-            match_book_opening(seed.wrapping_add(pair as u64), open_plies)
-        } else {
-            match_random_opening(seed.wrapping_add(pair as u64), open_plies)
-        };
-
-        for flip in 0..2u32 {
-            let game_idx = pair * 2 + flip as usize;
-            if game_idx >= games {
-                break;
-            }
-            if aborted.load(Ordering::Relaxed) {
-                break;
-            } // disaster guard tripped
-              // Swap colors per game in the pair so the opening is played from both
-              // sides — `a_is_one` true means engine A holds Player::One this game.
-            let a_is_one = flip == 0;
-
-            let proofs_before = CERT_PROOFS.load(Ordering::Relaxed);
-            let (outcome, game_moves) = play_one_game(
-                &opening, a_is_one, time_ms, max_ply, engine_a, engine_b, tt_bits,
-            );
-            if CERT_PROOFS.load(Ordering::Relaxed) > proofs_before {
-                cert_touched.fetch_add(1, Ordering::Relaxed);
-            }
-
-            match outcome {
-                Some(titanium::Player::One) => {
-                    if a_is_one {
-                        a_w.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        b_w.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                Some(titanium::Player::Two) => {
-                    if a_is_one {
-                        b_w.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        a_w.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                None => {
-                    draws.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-
-            if dump_games {
-                // Dump game record BEFORE the progress eprintln so stdout stays clean.
-                let result_char = match outcome {
-                    Some(titanium::Player::One) => "W",
-                    Some(titanium::Player::Two) => "B",
-                    None => "D",
-                };
-                let _g = print_mu.lock().unwrap();
-                println!("GAME {}", game_moves.join(" "));
-                println!("RESULT {result_char}");
-            }
-
-            let played = games_done.fetch_add(1, Ordering::Relaxed) + 1;
-            let aw = a_w.load(Ordering::Relaxed);
-            let bw = b_w.load(Ordering::Relaxed);
-            let dr = draws.load(Ordering::Relaxed);
-            let ct = cert_touched.load(Ordering::Relaxed);
-            let score = aw as f64 + 0.5 * dr as f64;
-            let _g = print_mu.lock().unwrap();
-            eprintln!(
-                "  [{played}/{games}] A {aw} - {bw} B  ({dr} draws)  \
-                 A-score {score:.1}/{played}  cert-touched {ct} games  \
-                 {:.0}s elapsed",
-                started.elapsed().as_secs_f64()
-            );
-
-            // Disaster guard: once we have a small sample, abort if we're 97.5%
-            // confident A scores below 36% (≈ −100 Elo). p̂ + 1.96·SE < 0.36.
-            // -100 Elo ⇒ expected score 1/(1+10^(100/400)) ≈ 0.360.
-            if early_stop && !aborted.load(Ordering::Relaxed) && played >= 16 {
-                let n = played as f64;
-                let p = score / n;
-                let se = (p * (1.0 - p) / n).sqrt();
-                if p + 1.96 * se < 0.36 {
-                    aborted.store(true, Ordering::Relaxed);
-                    eprintln!(
-                        "  !! EARLY STOP: A-score {:.1}% (95% CI upper {:.1}%) < 36% \
-                         after {played} games — A is ≥100 Elo worse. Aborting \
-                         (use --no-early-stop to force a full run).",
-                        p * 100.0,
-                        (p + 1.96 * se) * 100.0
-                    );
-                }
-            }
-        }
-    });
-
-    let aw = a_w.load(Ordering::Relaxed);
-    let bw = b_w.load(Ordering::Relaxed);
-    let dr = draws.load(Ordering::Relaxed);
-    let ct = cert_touched.load(Ordering::Relaxed);
-    let was_aborted = aborted.load(Ordering::Relaxed);
-    // Use games actually played (abort may have cut the run short).
-    let played = games_done.load(Ordering::Relaxed) as usize;
-    let n = (played.max(1)) as f64;
-    let score = aw as f64 + 0.5 * dr as f64;
-    let p = score / n;
-    let se = (p * (1.0 - p) / n).sqrt();
-    let elo = if p > 0.0 && p < 1.0 {
-        -400.0 * ((1.0 - p) / p).log10()
-    } else {
-        f64::INFINITY * (p - 0.5).signum()
-    };
-    println!("=== STRENGTH MATCH RESULT ===");
-    println!(
-        "A = {},  B = {}{tt_note}",
-        engine_a.label(),
-        engine_b.label()
-    );
-    if was_aborted {
-        println!("EARLY-STOPPED after {played}/{games} games (A ≥100 Elo worse)");
-    } else {
-        println!("games {played} @ {time_sec}s/move");
-    }
-    println!("A wins {aw}  |  B wins {bw}  |  draws {dr}");
-    println!(
-        "A score {score:.1}/{played} = {:.1}% (±{:.1}%)  →  ~{elo:+.0} Elo",
-        p * 100.0,
-        se * 196.0
-    );
-    println!("Titanium-cert fired in {ct}/{played} games");
 }
 
 /// Build a seeded random legal opening of `plies` moves from startpos.
@@ -1693,23 +1348,6 @@ fn play_one_game(
         std::cmp::Ordering::Equal => None,
     };
     (winner, moves)
-}
-
-fn run_genmove(args: &[String]) {
-    if is_ace_engine(args) {
-        run_genmove_ace(args);
-        return;
-    }
-    let (config, moves) = parse_genmove_config(args);
-    let mut board = Board::new();
-    for mv in moves {
-        board.apply_algebraic(&mv);
-    }
-
-    match genmove_algebraic(&mut board, config) {
-        Some(algebraic) => println!("bestmove {}", algebraic),
-        None => println!("bestmove (none)"),
-    }
 }
 
 // ── ACE v7 port (pure) ───────────────────────────────────────────────────────

@@ -31,10 +31,10 @@ use crate::movegen::{
     generate_pawn_moves_slice_mode, PawnGenMode, MAX_LEGAL_MOVES,
 };
 use crate::pathfinding::BfsScratch;
-use crate::legacy_search::context::{SharedState, WorkerContext};
+use crate::util::perft_tt::{SharedState, WorkerContext};
 use std::collections::BTreeMap;
 
-/// Back-compat name — prefer [`WorkerContext`] + [`SharedState`] or [`crate::legacy_search::context::Engine`].
+/// Back-compat name -- prefer [`WorkerContext`] + [`SharedState`].
 pub type PerftContext = WorkerContext;
 
 pub fn perft_fast_ctx(
@@ -429,9 +429,10 @@ pub fn perft_naive(board: &Board, depth: u32) -> u64 {
     nodes
 }
 
-/// Default perft entry — single-thread [`crate::legacy_search::runtime::Engine`].
+/// Default perft entry.
 pub fn perft(board: &Board, depth: u32) -> u64 {
-    crate::legacy_search::runtime::Engine::new().perft(board, depth)
+    let mut b = board.clone();
+    perft_fast(&mut b, depth)
 }
 
 pub fn perft_divide(board: &Board, depth: u32) -> (u64, BTreeMap<String, u64>) {

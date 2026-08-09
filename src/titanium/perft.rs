@@ -7,7 +7,6 @@ use crate::core::board::Board;
 use crate::core::board::Undo;
 use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
 use crate::pathfinding::BfsScratch;
-use crate::legacy_search::runtime::Engine;
 use crate::titanium::game::GameState;
 use crate::titanium::search::board_move_to_move_id;
 use crate::util::perft::{perft_fast, PERFT3_STARTPOS, PERFT4_STARTPOS, PERFT4_TEST_TIMEOUT_SECS};
@@ -150,13 +149,6 @@ fn perft_titanium_timed_with_label(
 
 pub fn perft_titanium_timed(depth: u32, timeout: Duration) -> TimedPerftResult {
     perft_titanium_timed_with_label("titanium-perft_fast", depth, timeout)
-}
-
-pub fn perft_engine_timed(depth: u32, timeout: Duration) -> TimedPerftResult {
-    run_timed("engine", depth, timeout, move || {
-        let board = Board::new();
-        Engine::new().perft(&board, depth)
-    })
 }
 
 pub fn oracle_nodes(depth: u32) -> Option<u64> {

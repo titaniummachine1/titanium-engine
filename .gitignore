@@ -39,3 +39,6 @@ baseline/
 /ab_bench_results.json
 /cat_reuse_ab.json
 /scripts/*_results.txt
+
+# Gate binaries: 53MB of built .exe, never versioned
+gates/

@@ -8,7 +8,19 @@ use crate::cat::attention::CorridorAttention;
 use crate::cat::constants::{CAT_COLD_CM, CAT_HOT_CM, DIST_PENALTY};
 use crate::core::board::{Board, Move, Player, WallOrientation};
 use crate::movegen::{generate_legal_moves_slice, MAX_LEGAL_MOVES};
-use crate::opening::book::BookHint;
+/// Opening hint the CAT pruner will honour if one is supplied.
+///
+/// Every caller passes `None`: the legacy opening book this used to come from
+/// was never consulted by the real engine, which has its own book in
+/// `titanium::opening`. Kept as a local type so the plumbing survives if a hint
+/// source is ever wired up, without dragging the legacy book back in.
+#[derive(Clone, Copy, Debug)]
+pub struct BookHint {
+    pub mv: crate::core::board::Move,
+    /// Centimetres of race lead for the player who plays `mv`.
+    pub stm_bias: i16,
+    pub priority: u8,
+}
 use crate::pathfinding::bfs::layers::fill_dist_to_goal_row;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;

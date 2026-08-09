@@ -3,5 +3,7 @@
 pub mod clock;
 pub mod grid;
 pub mod perft;
+pub mod perft_tt;
+pub mod perft_engine;
 
 pub use perft::format_move;
