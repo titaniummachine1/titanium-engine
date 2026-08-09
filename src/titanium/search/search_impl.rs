@@ -676,19 +676,22 @@ const TT_BITS: usize = 20;
 const TT_SIZE: usize = 1 << TT_BITS;
 const TT_MASK: u32 = (TT_SIZE - 1) as u32;
 
-/// Table size for the Lazy SMP search, in bits.
+/// Starting table size for the Lazy SMP search, in bits.
 ///
-/// The parallel path cannot use the adaptive ladder: resizing while other
-/// workers probe would invalidate the shared slots, so growth is switched off
-/// for the whole session. It therefore has to be sized correctly up front
-/// rather than left at [`TT_BITS`] — at 1M slots a 60s game stores ~34M
-/// entries and overwrites the table ~32 times, which is what "the TT is not
-/// used effectively" looks like in practice.
+/// Deliberately the same [`TT_BITS`] floor the engine has always used. A single
+/// move at 60s sudden death searches roughly a million nodes into a million
+/// slots, so the floor is already about right for normal play, and a larger
+/// table only costs cache locality. (Counting a whole game's ~34M nodes against
+/// the table is the wrong unit: positions from move 5 are unreachable by move
+/// 25 and the generation counter evicts them on purpose.)
 ///
-/// 22 bits is 4.2M slots (~170 MB shared, one RwLock per slot). Override with
-/// `TITANIUM_TT_BITS` to gate sizes against each other or to cap memory when
-/// many engines run in parallel.
-const TT_PARALLEL_BITS_DEFAULT: usize = 22;
+/// What was actually broken is that the parallel path could never grow *past*
+/// this floor, so a genuinely long think had nowhere to go. That is fixed by
+/// growing at move boundaries, not by starting bigger.
+///
+/// `TITANIUM_TT_BITS` raises the starting size for long-time-control testing,
+/// where one search really can want far more than a million entries.
+const TT_PARALLEL_BITS_DEFAULT: usize = TT_BITS;
 const TT_PARALLEL_BITS_MIN: usize = TT_BITS;
 const TT_PARALLEL_BITS_MAX: usize = 25;
 
