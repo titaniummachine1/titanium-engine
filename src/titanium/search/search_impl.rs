@@ -2384,6 +2384,9 @@ pub struct TitaniumSearch {
     /// overwrite; entries from a prior generation are always replaced.
     tt_gen: u8,
     tt_entry_gen: Vec<u8>,
+    /// Research: skip NNUE inference, score from HCE scalars only.
+    /// Set once from TITANIUM_HCE_ONLY=1 so the eval path stays branch-cheap.
+    hce_only: bool,
     /// `wl[0] + wl[1]` at the root of the current search, 0..=20. Fixed for the
     /// whole search: walls are never returned, so any stored position holding
     /// more walls than this belongs to an earlier phase and is unreachable.
@@ -2690,6 +2693,7 @@ impl TitaniumSearch {
             tt_anc_lo: vec![0; TT_SIZE],
             tt_anc_hi: vec![0; TT_SIZE],
             tt_gen: 0,
+            hce_only: std::env::var("TITANIUM_HCE_ONLY").map(|v| v == "1").unwrap_or(false),
             // Full complement until the first search sets the real phase.
             root_walls: 20,
             tt_entry_gen: vec![0; TT_SIZE],
@@ -5434,6 +5438,12 @@ impl TitaniumSearch {
 
         let b0 = NET_BKT[self.g.pawn[0]] as i32;
         let b1 = NET_BKT[NET_MIRC[self.g.pawn[1]]] as i32;
+        // Research: skip the net entirely and score from the hand-crafted scalar
+        // terms already accumulated into `out` (distance differential, walls,
+        // race/oracle paths). Measured cost of what this skips: eval_nnue_prep
+        // 8.1% of search time plus eval_nnue_infer 3.6%. The question is whether
+        // the resulting speedup buys back more than the eval accuracy it loses.
+        if !self.hce_only {
         {
             let _nnue_prep = crate::bench_instr::OpTimer::start(|b| &mut b.eval_nnue_prep);
             self.ensure_nnue_wall_accumulators(nw, b0, b1);
@@ -5458,6 +5468,7 @@ impl TitaniumSearch {
                 }
             },
         );
+        }
         let entry = EvalCacheEntry {
             key: hash64,
             val: out as f32,
