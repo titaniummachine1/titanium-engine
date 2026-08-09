@@ -672,13 +672,14 @@ pub fn run_titanium_session_stdio(threads: usize) {
                         let ja = crate::titanium::race::jump_aware_goal_distances(&mut current_g);
                         let d0 = (ja.d0 != u8::MAX).then_some(u32::from(ja.d0));
                         let d1 = (ja.d1 != u8::MAX).then_some(u32::from(ja.d1));
-                        crate::titanium::time_alloc::allocate_move_budget_with_dists(
+                        crate::titanium::time_alloc::allocate_move_budget_with_dists_and_walls(
                             remaining_ms,
                             current_g.hist_len,
                             current_g.turn,
                             current_g.pawn,
                             d0,
                             d1,
+                            current_g.wl,
                         )
                         .move_ms
                         .max(1)

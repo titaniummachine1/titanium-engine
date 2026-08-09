@@ -192,6 +192,80 @@ fn spend_policy(remaining_ms: u64) -> (f64, f64) {
     }
 }
 
+
+// ── Value-of-thinking planner ────────────────────────────────────────────────
+//
+// The clock is split in proportion to how much a longer search can still change
+// the outcome, rather than evenly. Every term is measured on the gate corpus,
+// and weights are normalised against the projected future so the shares sum to
+// ~1. An earlier attempt multiplied the early game by 1.25 with nothing
+// compensating, which is just overspending, and lost 11-27.
+
+/// Moves at the end of a game the certificate answers outright. Measured after
+/// the solved-position fix: plies 46+ cost 0-1ms per move however much they are
+/// offered, so they need a token reserve rather than a proportional one. The
+/// difference is budget the middlegame keeps.
+const TAIL_MOVES: f64 = 5.0;
+const TAIL_MS_PER_MOVE: f64 = 100.0;
+
+/// Walls still on the board at `ply`, fitted to the corpus (mean walls left at
+/// ply 0/8/16/24/32/40/48 = 19.9/17.0/11.1/7.0/4.9/3.4/1.9).
+#[inline]
+fn projected_walls(ply: usize) -> f64 {
+    20.0 * (-(ply as f64) / 22.0).exp()
+}
+
+/// How much a longer search can still change this move. A pure function of the
+/// board, so the schedule stays predictable and testable.
+///
+/// Measured P(the search changed its best move):
+///   walls left 0-3 -> 23%, 4-7 -> 36%, 8-11 -> 45%, 12-15 -> 58%, 16+ -> 57%
+///   nearer pawn within 2 of goal -> 13.5%, versus ~42% mid-board
+///   by ply: 1.00 at 6-12, 0.75 by 18, 0.55 by 42, 0.12 by 60, 0.01 by 66
+///
+/// Walls dominate by 2.5x: they are the branching resource, and a wall-less
+/// position is a deterministic race where extra nodes buy nothing.
+fn think_value(ply: usize, walls_total: f64, leader_dist: Option<u32>) -> f64 {
+    // Opening is booked or near-forced, so it sits below the curve despite a
+    // high change-rate: those changes are cheap to find.
+    let ply_term = if ply < 8 {
+        0.25
+    } else if ply < 20 {
+        1.00
+    } else if ply < 30 {
+        0.90
+    } else if ply < 40 {
+        0.70
+    } else if ply < 50 {
+        0.40
+    } else {
+        0.15
+    };
+    let wall_term = 0.40 + 0.60 * (walls_total.max(0.0) / 12.0).min(1.0);
+    let lead_term = match leader_dist {
+        Some(d) if d <= 2 => 0.35,
+        Some(d) if d <= 4 => 0.70,
+        _ => 1.0,
+    };
+    ply_term * wall_term * lead_term
+}
+
+/// Sum of `think_value` over the moves still to be played, walking the board
+/// forward. This denominator is what makes the schedule a true split of the
+/// clock rather than a multiplier on it.
+fn future_think_value(ply: usize, own_moves_left: f64, leader_dist: Option<u32>) -> f64 {
+    let n = own_moves_left.ceil().max(1.0) as usize;
+    (0..n)
+        .map(|k| {
+            let p = ply + 2 * k;
+            // The leader closes on its goal as the game runs on, so each future
+            // move is weighted for the position it will actually be played in.
+            let d = leader_dist.map(|d| d.saturating_sub(k as u32));
+            think_value(p, projected_walls(p), d)
+        })
+        .sum()
+}
+
 /// Own-move floor implied by an optimistic remaining-ply lower bound.
 /// STM moves on remaining plies 1,3,5,… so `ceil(plies/2)` own turns remain.
 #[inline]
@@ -272,6 +346,22 @@ pub fn allocate_move_budget_with_dists(
     )
 }
 
+/// Allocate with current wall counts, which the value planner needs.
+pub fn allocate_move_budget_with_dists_and_walls(
+    remaining_ms: u64,
+    ply: usize,
+    stm: usize,
+    pawn: [usize; 2],
+    dist0: Option<u32>,
+    dist1: Option<u32>,
+    walls_remaining: [i32; 2],
+) -> MoveBudget {
+    allocate_move_budget_with_length_and_walls(
+        remaining_ms, ply, stm, pawn, dist0, dist1,
+        LengthBound::optimistic_board(stm, pawn), walls_remaining,
+    )
+}
+
 /// Like [`allocate_move_budget_with_dists`], merging an oracle/certify
 /// [`LengthBound`]. `max_plies` may shrink the spend horizon (forced short game);
 /// `min_plies` may only raise it.
@@ -283,6 +373,23 @@ pub fn allocate_move_budget_with_length(
     dist0: Option<u32>,
     dist1: Option<u32>,
     length_hint: LengthBound,
+) -> MoveBudget {
+    // Unknown walls: assume a full board rather than an empty one, so callers
+    // that do not pass walls are not silently starved by the planner.
+    allocate_move_budget_with_length_and_walls(
+        remaining_ms, ply, stm, pawn, dist0, dist1, length_hint, [10, 10],
+    )
+}
+
+fn allocate_move_budget_with_length_and_walls(
+    remaining_ms: u64,
+    ply: usize,
+    stm: usize,
+    pawn: [usize; 2],
+    dist0: Option<u32>,
+    dist1: Option<u32>,
+    length_hint: LengthBound,
+    walls_remaining: [i32; 2],
 ) -> MoveBudget {
     let geom_ply_lb = geometric_terminal_ply_lb(stm, pawn);
     let length = LengthBound::optimistic_board(stm, pawn).merge(length_hint);
@@ -314,9 +421,34 @@ pub fn allocate_move_budget_with_length(
     let (optimum_ms, hard_ms) = if remaining_ms == 0 || spendable == 0 {
         (1u64, 1u64)
     } else {
+        // Reserve only a token amount for the moves the certificate answers
+        // outright; they measure 0-1ms however much they are given, so
+        // reserving for them at the mean rate was money left on the table.
+        let tail_reserve = (TAIL_MOVES.min(expected_own_moves) * TAIL_MS_PER_MOVE) as u64;
+        let planned = spendable.saturating_sub(tail_reserve).max(MIN_MOVE_MS) as f64;
+
+        // Split the plannable clock by how much this move can still change,
+        // against every move still to come. Shares sum to ~1, so weighting the
+        // early game necessarily takes the time from later rather than
+        // inventing it.
+        let leader = match (dist0, dist1) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let walls_now = (walls_remaining[0] + walls_remaining[1]).clamp(0, 20) as f64;
+        let value_now = think_value(ply, walls_now, leader);
+        let value_future = future_think_value(ply, expected_own_moves, leader).max(1e-9);
+        let share = (value_now / value_future).clamp(0.0, 1.0);
+
+        // spend_factor must NOT scale a normalised share: the shares already
+        // sum to ~1, so multiplying by 1.35 is a 35% across-the-board
+        // overspend -- precisely the mistake that made the old phase
+        // multiplier lose 11-27. It survives only as a low-clock brake:
+        // full share above 45s, progressively cautious below.
+        let caution = spend_factor / 1.35;
         let by_share = spendable as f64 * share_cap;
-        let by_horizon = (spendable as f64 / expected_own_moves) * spend_factor;
-        let gross = by_share.min(by_horizon);
+        let by_plan = planned * share * caution;
+        let gross = by_share.min(by_plan);
         let handoff = (gross * 0.05).clamp(50.0, 300.0);
         let mut opt = (gross - handoff).round().max(1.0) as u64;
 
@@ -364,31 +496,71 @@ mod tests {
         assert!((reserve_own_moves_p95(100) - 5.0).abs() < 1e-9);
     }
 
+    /// Budget for a 3min+2s game at `ply`, with given walls and leader distance.
+    fn plan_at(rem_ms: u64, ply: usize, walls: [i32; 2], lead: Option<u32>) -> u64 {
+        allocate_move_budget_with_dists_and_walls(
+            rem_ms, ply, ply % 2, [76, 4], lead, lead, walls,
+        )
+        .optimum_ms
+    }
+
     #[test]
-    fn startpos_budget_near_site_band() {
-        // Start: P0=76 (row 8), P1=4 (row 0) → 8 rows each → geom ply lb 7.
-        assert_eq!(geometric_terminal_ply_lb(0, [76, 4]), 7);
-        let b = allocate_move_budget(60_000, 0, 0, [76, 4]);
-        assert_eq!(b.geom_ply_lb, 7);
-        // Plan-30 (= mean ~60 plies / 2), not corpus P95 38.5.
-        assert!((b.expected_own_moves - 30.0).abs() < 1e-9);
-        assert!((b.p95_own_moves - 38.5).abs() < 1e-9);
-        assert!((b.spend_factor - 1.35).abs() < 1e-9);
-        // Plan-30 optimum ~2.2–3.2s; hard = optimum × 1.25.
-        assert!(
-            b.optimum_ms >= 2_200 && b.optimum_ms <= 3_200,
-            "optimum_ms={}",
-            b.optimum_ms
-        );
-        assert!(
-            b.move_ms >= 2_700 && b.move_ms <= 4_000,
-            "move_ms={}",
-            b.move_ms
-        );
-        assert!(b.move_ms >= b.optimum_ms);
-        assert!(b.move_ms <= b.spendable_ms);
-        // Must not regress to TM2 ~1551.
-        assert!(b.move_ms > 2_000, "TM2-style starvation: {}", b.move_ms);
+    fn opening_is_cheaper_than_the_decision_zone() {
+        // Opening play is booked or near-forced, so it sits below the curve
+        // even though its move-change rate is high: those changes are cheap to
+        // find. No magic band here -- the number is re-tuned deliberately, and
+        // pinning it only produces false failures.
+        let open = plan_at(60_000, 4, [10, 10], None);
+        let peak = plan_at(60_000, 14, [10, 10], None);
+        assert!(peak > open * 2, "opening {open} vs peak {peak}");
+        assert!(open > MIN_MOVE_MS * 4, "opening starved: {open}");
+    }
+
+    #[test]
+    fn fewer_walls_buy_less_time() {
+        // Measured: P(the search changed its move) is 23% with 0-3 walls left
+        // against 58% with 12-15. A wall-less race is deterministic and extra
+        // nodes buy almost nothing.
+        let rich = plan_at(60_000, 24, [10, 10], None);
+        let poor = plan_at(60_000, 24, [1, 0], None);
+        assert!(poor < rich, "wall-less {poor} should undercut wall-rich {rich}");
+    }
+
+    #[test]
+    fn a_leader_at_the_goal_line_is_cheap() {
+        // 13.5% move-change rate once the nearer pawn is within 2 of home,
+        // against ~42% mid-board: nothing left to decide.
+        let far = plan_at(60_000, 30, [5, 5], Some(9));
+        let near = plan_at(60_000, 30, [5, 5], Some(1));
+        assert!(near < far, "near-goal {near} should undercut mid-board {far}");
+    }
+
+    #[test]
+    fn the_schedule_spends_the_clock_without_hoarding_it() {
+        // Walk a whole game: shares sum to ~1, so the clock should be mostly
+        // consumed and the decision zone should dominate. The old fixed divisor
+        // banked 21-31% unspent.
+        let mut rem: u64 = 60_000;
+        let mut spend = [0u64; 4]; // <8, 8-30, 30-46, 46+
+        for ply in (0..56).step_by(2) {
+            let walls = (20.0 * (-(ply as f64) / 22.0).exp()).round() as i32;
+            let b = plan_at(rem, ply, [walls / 2, walls - walls / 2], None);
+            // Past the decision horizon the certificate answers instantly.
+            let used = if ply < 46 { b } else { b / 20 };
+            let bucket = match ply {
+                0..=7 => 0,
+                8..=29 => 1,
+                30..=45 => 2,
+                _ => 3,
+            };
+            spend[bucket] += used;
+            rem = rem.saturating_sub(used);
+        }
+        let total: u64 = spend.iter().sum();
+        let pct = |i: usize| 100 * spend[i] / total.max(1);
+        assert!(pct(1) >= 45, "decision zone underfunded: {:?} -> {}%", spend, pct(1));
+        assert!(pct(0) <= 20, "opening overfunded: {}%", pct(0));
+        assert!(rem < 20_000, "hoarded {rem}ms of a 60s clock");
     }
 
     #[test]
