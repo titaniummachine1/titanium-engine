@@ -352,6 +352,7 @@ mod lazy_smp_tests {
             456,
             7,
             false,
+            20,
             SharedTtEntry {
                 key_hi: 456,
                 key_lo: 123,
@@ -361,6 +362,7 @@ mod lazy_smp_tests {
                 anc_lo: 0,
                 anc_hi: 0,
                 entry_gen: 7,
+                walls: 20,
             },
         );
         let entry = shared.probe(123, 456).expect("stored helper entry");
@@ -825,6 +827,18 @@ struct SharedTtEntry {
     anc_lo: u32,
     anc_hi: u32,
     entry_gen: u8,
+    /// `wl[0] + wl[1]` at the stored position, 0..=20.
+    ///
+    /// Walls are only ever placed, never returned, so this never rises along a
+    /// line of play. An entry holding MORE walls than the search root is from an
+    /// earlier phase of the game and can never be reached from here again — it
+    /// is dead weight, evicted before anything live and not counted as occupancy
+    /// when deciding whether the table needs to grow.
+    ///
+    /// Zero on entries inherited from the single-threaded table, which do not
+    /// carry the count: zero reads as "latest phase", so they are never mistaken
+    /// for dead.
+    walls: u8,
 }
 
 /// Eval cache shared by the main search and every LazySMP helper.
@@ -890,6 +904,8 @@ impl SharedTitaniumTt {
                     anc_lo: search.tt_anc_lo[i],
                     anc_hi: search.tt_anc_hi[i],
                     entry_gen: search.tt_entry_gen[i],
+                    // Inherited from the local table, which does not track it.
+                    walls: 0,
                 })
             })
             .collect();
@@ -947,20 +963,63 @@ impl SharedTitaniumTt {
         }
     }
 
-    fn store(&self, hash_lo: u32, hash_hi: u32, tt_gen: u8, pure_mode: bool, entry: SharedTtEntry) {
+    fn store(
+        &self,
+        hash_lo: u32,
+        hash_hi: u32,
+        tt_gen: u8,
+        pure_mode: bool,
+        root_walls: u8,
+        entry: SharedTtEntry,
+    ) {
         let idx = (hash_lo & self.mask) as usize;
         let mut slot = self.slots[idx]
             .write()
             .expect("shared TT write lock poisoned");
         let was_empty = slot.meta == 0;
+        // More walls in hand than the root means an earlier game phase, which no
+        // line from here can reach. Overwrite it regardless of depth.
+        let unreachable = !was_empty && slot.walls > root_walls;
         let stale_gen = !pure_mode && !was_empty && slot.entry_gen != tt_gen;
-        let deeper =
-            !was_empty && !stale_gen && tt_unpack_depth(entry.meta) >= tt_unpack_depth(slot.meta);
-        if was_empty || stale_gen || deeper {
+        let deeper = !was_empty
+            && !stale_gen
+            && !unreachable
+            && tt_unpack_depth(entry.meta) >= tt_unpack_depth(slot.meta);
+        if was_empty || unreachable || stale_gen || deeper {
             *slot = entry;
             if was_empty {
                 self.filled.fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Share of slots holding an entry that is still reachable from a root with
+    /// `root_walls` walls in hand, estimated from a fixed stride sample.
+    ///
+    /// This is what "full" has to mean for a growth decision. The `filled`
+    /// counter only ever rises — nothing decrements it when an entry is
+    /// overwritten — so over a long game it crosses every threshold in turn and
+    /// walks the table to its ceiling whether or not the space is doing any
+    /// work. Dead game-phase entries are free to reclaim, so they must not count
+    /// as pressure.
+    fn live_fraction(&self, root_walls: u8) -> f64 {
+        const SAMPLES: usize = 8192;
+        let n = self.slots.len();
+        let stride = (n / SAMPLES).max(1);
+        let (mut seen, mut live) = (0usize, 0usize);
+        let mut i = 0;
+        while i < n {
+            let e = *self.slots[i].read().expect("shared TT read lock poisoned");
+            seen += 1;
+            if e.meta != 0 && e.walls <= root_walls {
+                live += 1;
+            }
+            i += stride;
+        }
+        if seen == 0 {
+            0.0
+        } else {
+            live as f64 / seen as f64
         }
     }
 }
@@ -2325,6 +2384,10 @@ pub struct TitaniumSearch {
     /// overwrite; entries from a prior generation are always replaced.
     tt_gen: u8,
     tt_entry_gen: Vec<u8>,
+    /// `wl[0] + wl[1]` at the root of the current search, 0..=20. Fixed for the
+    /// whole search: walls are never returned, so any stored position holding
+    /// more walls than this belongs to an earlier phase and is unreachable.
+    root_walls: u8,
     /// Index mask for the TT vecs (`size - 1`). Runtime so the TT can be resized
     /// (Titanium-style larger table) without recompiling — `1<<TT_BITS` default.
     tt_mask: u32,
@@ -2627,6 +2690,8 @@ impl TitaniumSearch {
             tt_anc_lo: vec![0; TT_SIZE],
             tt_anc_hi: vec![0; TT_SIZE],
             tt_gen: 0,
+            // Full complement until the first search sets the real phase.
+            root_walls: 20,
             tt_entry_gen: vec![0; TT_SIZE],
             tt_mask: TT_MASK,
             tt_bits: TT_BITS,
@@ -3130,6 +3195,9 @@ impl TitaniumSearch {
 
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
     fn apply_think_start_state(&mut self) {
+        // Walls in hand at the root fix the game phase for this whole search:
+        // any stored position holding more than this is unreachable from here.
+        self.root_walls = (self.g.wl[0] + self.g.wl[1]).clamp(0, 20) as u8;
         if !self.is_pondering {
             // Pondering already advanced the generation on our behalf;
             // advancing again would age the entries this search is about to
@@ -6699,6 +6767,7 @@ impl TitaniumSearch {
                 self.g.hash_hi,
                 self.tt_gen,
                 false, // pure_mode: retired faithful-JS baseline
+                self.root_walls,
                 SharedTtEntry {
                     key_hi: self.g.hash_hi,
                     key_lo: self.g.hash_lo,
@@ -6708,6 +6777,7 @@ impl TitaniumSearch {
                     anc_lo: if rb != 0 { self.sub_anc_lo[ply] } else { 0 },
                     anc_hi: if rb != 0 { self.sub_anc_hi[ply] } else { 0 },
                     entry_gen: self.tt_gen,
+                    walls: (self.g.wl[0] + self.g.wl[1]).clamp(0, 20) as u8,
                 },
             );
         } else {
@@ -7384,9 +7454,11 @@ impl TitaniumSearch {
         // move. Above that a rehash is expensive enough to want a whole move of
         // opponent time to itself, so it takes one rung at a time.
         if let Some(mut table) = self.shared_tt.clone() {
-            let overflowing = |t: &Arc<SharedTitaniumTt>| {
-                t.filled.load(Ordering::Relaxed).saturating_mul(2) >= (1usize << t.bits)
-            };
+            let root_walls = (self.g.wl[0] + self.g.wl[1]).clamp(0, 20) as u8;
+            // Reachable occupancy, not the lifetime `filled` counter: dead
+            // game-phase entries are reclaimable, so they are not pressure.
+            let overflowing =
+                |t: &Arc<SharedTitaniumTt>| t.live_fraction(root_walls) >= 0.5;
             let mut grew = false;
             while table.bits < self.tt_max && overflowing(&table) {
                 let nb = self.next_tt_rung(table.bits);
@@ -8202,5 +8274,94 @@ mod witness_inheritance_tests {
         let g = GameState::new();
         let mut b = TiBridge::from_game(&g);
         assert_eq!(perft_bridge(&mut b, 4, 0), PERFT4_STARTPOS);
+    }
+}
+
+/// Shared-table phase eviction and the growth trigger that depends on it.
+///
+/// These cover the two things that are otherwise invisible: that an entry from
+/// an earlier game phase really is thrown out ahead of a live one, and that a
+/// table only grows when the space is actually doing work.
+#[cfg(test)]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+mod shared_tt_phase_tests {
+    use super::*;
+
+    fn table(bits: usize) -> SharedTitaniumTt {
+        let size = 1usize << bits;
+        SharedTitaniumTt {
+            slots: (0..size).map(|_| RwLock::new(SharedTtEntry::default())).collect(),
+            mask: (size - 1) as u32,
+            bits,
+            filled: AtomicUsize::new(0),
+        }
+    }
+
+    fn entry(key_lo: u32, depth: i32, walls: u8) -> SharedTtEntry {
+        SharedTtEntry {
+            key_hi: 0xABCD,
+            key_lo,
+            meta: 1 | tt_pack_depth(depth),
+            score: 42,
+            rep: 0,
+            anc_lo: 0,
+            anc_hi: 0,
+            entry_gen: 7,
+            walls,
+        }
+    }
+
+    #[test]
+    fn earlier_phase_entry_is_evicted_even_when_deeper() {
+        let tt = table(4);
+        // Deep entry from a position with 18 walls still in hand.
+        tt.store(0, 0xABCD, 7, false, 18, entry(0, 30, 18));
+        // Root is now down to 6 walls, so that entry can never be reached again.
+        // A far shallower store must still take the slot.
+        tt.store(0, 0xABCD, 7, false, 6, entry(0, 2, 6));
+        let got = tt.probe(0, 0xABCD).expect("slot occupied");
+        assert_eq!(tt_unpack_depth(got.meta), 2, "dead entry must lose to a shallow live one");
+        assert_eq!(got.walls, 6);
+    }
+
+    #[test]
+    fn live_entry_is_kept_against_a_shallower_store() {
+        let tt = table(4);
+        tt.store(0, 0xABCD, 7, false, 6, entry(0, 30, 6));
+        tt.store(0, 0xABCD, 7, false, 6, entry(0, 2, 6));
+        let got = tt.probe(0, 0xABCD).expect("slot occupied");
+        assert_eq!(tt_unpack_depth(got.meta), 30, "same phase must stay depth-preferred");
+    }
+
+    #[test]
+    fn dead_entries_do_not_count_as_occupancy() {
+        let bits = 8;
+        let tt = table(bits);
+        // Fill every slot with entries from an early phase (18 walls in hand).
+        for i in 0..(1u32 << bits) {
+            tt.store(i, 0xABCD, 7, false, 20, entry(i, 5, 18));
+        }
+        assert!(tt.live_fraction(20) > 0.9, "all live while the root still holds 20");
+        assert_eq!(
+            tt.live_fraction(6),
+            0.0,
+            "none reachable once the root is down to 6 walls, so the table is not full"
+        );
+    }
+
+    #[test]
+    fn growth_rehashes_entries_into_the_larger_table() {
+        let small = table(4);
+        for i in 0..8u32 {
+            small.store(i, 0xABCD, 7, false, 6, entry(i, 5, 6));
+        }
+        let big = small.grown_to(6);
+        assert_eq!(big.bits, 6);
+        assert_eq!(big.mask, 63);
+        for i in 0..8u32 {
+            let got = big.probe(i, 0xABCD).unwrap_or_else(|| panic!("entry {i} lost in rehash"));
+            assert_eq!(got.walls, 6);
+            assert_eq!(tt_unpack_depth(got.meta), 5);
+        }
     }
 }
