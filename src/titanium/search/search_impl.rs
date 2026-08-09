@@ -892,10 +892,10 @@ impl SharedTitaniumTt {
 
     /// Rebuild at `new_bits`, rehashing live entries into the larger table.
     ///
-    /// Only legal between searches, with every helper joined: the slot vector is
-    /// one allocation, so it cannot be grown in place or freed piecewise while
-    /// anything probes it. Called from the move boundary, where the opponent is
-    /// on the clock and nothing is reading the table.
+    /// Only legal at a move boundary with every helper joined: the slot vector is
+    /// one allocation, so it can neither grow in place nor be freed piecewise
+    /// while anything probes it. Mid-search growth would mean swapping the table
+    /// under live workers; the boundary costs nothing and needs no synchronisation.
     fn grown_to(&self, new_bits: usize) -> Self {
         let new_size = 1usize << new_bits;
         let new_mask = (new_size - 1) as u32;
@@ -2925,19 +2925,25 @@ impl TitaniumSearch {
     /// Grow the TT to the next calibrated cache tier and rehash live entries.
     /// Always-replace on collision (matches the live store policy). Called from the
     /// store path when occupancy crosses 50%.
-    fn tt_grow(&mut self) {
-        let nb = if self.tt_bits < self.tt_l2 {
+    /// Next rung of the cache-tier ladder above `bits`, capped at `tt_max`.
+    /// L1 -> L2 -> L3 -> 18 -> 22, then one bit at a time.
+    fn next_tt_rung(&self, bits: usize) -> usize {
+        if bits < self.tt_l2 {
             self.tt_l2
-        } else if self.tt_bits < self.tt_l3 {
+        } else if bits < self.tt_l3 {
             self.tt_l3
-        } else if self.tt_bits < self.tt_d4 {
+        } else if bits < self.tt_d4 {
             self.tt_d4
-        } else if self.tt_bits < self.tt_d5 {
+        } else if bits < self.tt_d5 {
             self.tt_d5
         } else {
-            self.tt_bits + 1
+            bits + 1
         }
-        .min(self.tt_max);
+        .min(self.tt_max)
+    }
+
+    fn tt_grow(&mut self) {
+        let nb = self.next_tt_rung(self.tt_bits);
         if nb <= self.tt_bits {
             return;
         }
@@ -7357,6 +7363,25 @@ impl TitaniumSearch {
             .collect();
 
         let root_position = self.g.clone();
+        // Boundary growth. Helpers from the previous search are joined, so the
+        // table can be replaced with no synchronisation at all. Only grows when
+        // the previous thinks actually overflowed it — a session of short moves
+        // that never fills the table keeps the one it has, and a long think that
+        // ran out of room gets a bigger table for the next move.
+        if let Some(existing) = self.shared_tt.clone() {
+            let filled = existing.filled.load(Ordering::Relaxed);
+            if existing.bits < self.tt_max
+                && filled.saturating_mul(2) >= (1usize << existing.bits)
+            {
+                let nb = self.next_tt_rung(existing.bits);
+                if nb > existing.bits {
+                    let grown = Arc::new(existing.grown_to(nb));
+                    self.tt_mask = grown.mask;
+                    self.tt_bits = grown.bits;
+                    self.shared_tt = Some(grown);
+                }
+            }
+        }
         let shared_tt = self
             .shared_tt
             .clone()
