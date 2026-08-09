@@ -265,7 +265,7 @@ impl WasmEngine {
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,
-            engine_label: "titanium-v19".to_string(),
+            engine_label: ENGINE_VERSION.to_string(),
             last_depth: 0,
             last_nodes: 0,
             last_stop_reason: "none",
@@ -343,7 +343,7 @@ impl WasmEngine {
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,
-            engine_label: "titanium-v19".to_string(),
+            engine_label: ENGINE_VERSION.to_string(),
             last_depth: 0,
             last_nodes: 0,
             last_stop_reason: "none",
