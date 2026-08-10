@@ -1,0 +1,4 @@
+# Pin the native-CPU flags the build script already requires on x86_64.
+# Scoped to the host triple: `-C target-cpu=native` is invalid for wasm32.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=native"]
