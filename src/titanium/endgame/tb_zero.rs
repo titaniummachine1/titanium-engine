@@ -32,7 +32,8 @@
 //! the engine's own movegen.
 
 use crate::titanium::position::game::GameState;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Result from the side-to-move's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,17 +70,19 @@ pub fn tb_index(p0: usize, p1: usize, stm: usize) -> usize {
     (p0 * NCELLS + p1) * 2 + stm
 }
 
-/// A position is in this subgame when no walls are placed AND neither side has
-/// any left to place.
+/// The subgame is decided by the HANDS, asymmetrically: neither side has a wall
+/// left to place. Whatever is on the board stays there and is pure scenery,
+/// affecting adjacency only.
 ///
-/// Those two conditions cannot both hold in a real game -- twenty walls have to
-/// be somewhere -- so this returns false for every position that actually
-/// occurs. See the module header: the scope is wrong, and relaxing this test
-/// without giving the table a wall dimension would make it return wrong answers
-/// rather than none.
+/// This deliberately does NOT test `hw_bits == 0 && vw_bits == 0`. Walls are
+/// conserved -- board + wl[0] + wl[1] == 20 -- so requiring both hands empty
+/// AND a bare board describes a position summing to 0 instead of 20, which
+/// cannot occur. That is what this used to require, which is why the table
+/// never fired and every broke endgame fell through to the per-query race
+/// computation instead.
 #[inline]
 pub fn applies(g: &GameState) -> bool {
-    g.hw_bits == 0 && g.vw_bits == 0 && g.wl[0] == 0 && g.wl[1] == 0
+    g.wl[0] == 0 && g.wl[1] == 0
 }
 
 pub struct ZeroWallTb {
@@ -95,12 +98,26 @@ impl ZeroWallTb {
     /// unresolved at the fixpoint are draws by repetition — that is the correct
     /// verdict here, since neither side can be compelled to make progress.
     pub fn build() -> ZeroWallTb {
+        Self::build_for(&GameState::new())
+    }
+
+    /// Solve the subgame for the wall configuration `template` is carrying.
+    ///
+    /// The template is cloned and only `pawn[0]`, `pawn[1]` and `turn` are
+    /// varied, so the walls -- and every derived structure the engine keeps
+    /// beside them -- are exactly those of the real position. Reconstructing
+    /// the wall state by hand here would be a second implementation of the
+    /// board and a second chance to disagree with movegen.
+    ///
+    /// Both hands are empty in this subgame, so no wall can ever be placed and
+    /// the configuration is fixed for the whole solve.
+    pub fn build_for(template: &GameState) -> ZeroWallTb {
         let mut tbl = vec![TbEntry::default(); NSTATES];
         let mut live = 0usize;
 
-        // Scratch game used only to enumerate pawn moves. No walls are ever
-        // placed on it, so `blocked` stays border-only for the whole build.
-        let mut g = GameState::new();
+        // Scratch game used only to enumerate pawn moves. Walls come from the
+        // template and never change: neither side has one left to place.
+        let mut g = template.clone();
 
         // Precompute the move list for every live (p0, p1, stm).
         let mut moves: Vec<Vec<i16>> = vec![Vec::new(); NSTATES];
@@ -366,10 +383,42 @@ impl ZeroWallTb {
 
 static ZERO_WALL_TB: OnceLock<ZeroWallTb> = OnceLock::new();
 
+/// Solved tables by wall configuration `(hw_bits, vw_bits)`.
+///
+/// Once both hands are empty no wall can be placed, so a whole search sees a
+/// single configuration and this holds one entry in practice. The cap only
+/// guards pathological drivers that hop between unrelated positions.
+static TB_BY_WALLS: OnceLock<Mutex<HashMap<(u64, u64), Arc<ZeroWallTb>>>> = OnceLock::new();
+const TB_CACHE_CAP: usize = 8;
+
+/// Table for this position's wall configuration, building it on first use.
+pub fn table_for(g: &GameState) -> Arc<ZeroWallTb> {
+    let key = (g.hw_bits, g.vw_bits);
+    let cache = TB_BY_WALLS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(tb) = cache.lock().expect("tb cache poisoned").get(&key) {
+        return Arc::clone(tb);
+    }
+    // Built outside the lock: ~ms of work, and holding it would serialise every
+    // Lazy SMP worker behind the first one to ask.
+    let built = Arc::new(ZeroWallTb::build_for(g));
+    let mut guard = cache.lock().expect("tb cache poisoned");
+    if guard.len() >= TB_CACHE_CAP {
+        guard.clear();
+    }
+    Arc::clone(guard.entry(key).or_insert(built))
+}
+
 /// Probe the process-wide exact zero-wall tablebase, building it once on first use.
 #[inline]
 pub fn probe_global(g: &GameState) -> Option<TbEntry> {
-    ZERO_WALL_TB.get_or_init(ZeroWallTb::build).probe(g)
+    if !applies(g) {
+        return None;
+    }
+    if g.hw_bits == 0 && g.vw_bits == 0 {
+        // Bare board: the shared table is already correct, skip the cache.
+        return ZERO_WALL_TB.get_or_init(ZeroWallTb::build).probe(g);
+    }
+    Some(table_for(g).probe_raw(g.pawn[0], g.pawn[1], g.turn))
 }
 
 #[cfg(test)]
@@ -397,6 +446,76 @@ mod tests {
     /// position. This is the soundness gate: `hands_empty_race_stm_wins` is
     /// already trusted by `certify`, so any disagreement is a real bug in one
     /// of the two and must block the change.
+    /// The table now answers positions that have walls on them, so it must
+    /// agree with the per-query oracle THERE, not just on a bare board. Before
+    /// this, `applies()` demanded an empty board as well as empty hands -- a
+    /// state that violates wall conservation and never occurs -- so nothing was
+    /// ever answered and nothing was ever wrong. Now it can be wrong, so it is
+    /// checked.
+    #[test]
+    fn walled_board_table_agrees_with_oracle() {
+        // A handful of real wall layouts, applied through the engine rather
+        // than by writing bits, so the board is one movegen actually produces.
+        let layouts: [&[&str]; 3] = [
+            &["e3h", "c5v", "f6h"],
+            &["b2h", "d4v", "g7h", "e5v"],
+            &["a1h", "c3h", "e5h", "g7h", "d2v", "f6v"],
+        ];
+        let mut total = 0usize;
+        for walls in layouts {
+            let mut base = GameState::new();
+            for w in walls {
+                base.make_move(crate::titanium::algebraic_to_move_id(w));
+            }
+            base.wl = [0, 0]; // broke: the subgame this table is for
+            let t = ZeroWallTb::build_for(&base);
+            let mut checked = 0usize;
+            for p0 in (9..81).step_by(7) {
+                for p1 in (0..72).step_by(7) {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for stm in 0..2 {
+                        let mut g = base.clone();
+                        g.pawn[0] = p0;
+                        g.pawn[1] = p1;
+                        g.turn = stm;
+                        let Some(oracle) = hands_empty_race_stm_wins_oracle(&mut g) else {
+                            continue;
+                        };
+                        let e = t.probe_raw(p0, p1, stm);
+                        assert_eq!(
+                            e.result == TbResult::Win,
+                            oracle,
+                            "walled tb disagrees with oracle: walls={walls:?}                              p0={p0} p1={p1} stm={stm} tb={:?}",
+                            e.result
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(checked > 0, "no comparable states for {walls:?}");
+            total += checked;
+        }
+        assert!(total > 100, "too few states compared: {total}");
+    }
+
+    #[test]
+    fn applies_accepts_broke_hands_with_walls_on_board() {
+        let mut g = GameState::new();
+        for w in ["e3h", "c5v"] {
+            g.make_move(crate::titanium::algebraic_to_move_id(w));
+        }
+        g.wl = [0, 0];
+        assert!(g.hw_bits != 0 || g.vw_bits != 0, "test needs walls on board");
+        assert!(
+            applies(&g),
+            "broke hands with walls on board is the subgame this table exists for"
+        );
+        g.wl = [1, 0];
+        assert!(!applies(&g), "a wall still in hand leaves the subgame");
+    }
+
     #[test]
     fn tb_agrees_with_hands_empty_race_oracle_on_all_states() {
         let t = tb();
