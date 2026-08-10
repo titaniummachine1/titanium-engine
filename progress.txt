@@ -790,3 +790,27 @@ main @ 19.4.6, pushed. Working tree has the unverified tbdump edit in
 src/main.rs (it builds and runs; the bug above is a logic bug, not a build
 failure). tb_zero.rs is clean -- build_for_one_wall was NOT written.
 Scraper still collecting; last seen 3,643 games, id 4400, 700 excluded.
+
+## Gate results, this session — all three neutral
+
+  19.4.5 ordering tiers   vs 19.4.4   53-47   +21 Elo  CI [-47, +91]
+  conthist 1/2/4/6-ply    vs 19.4.5   49-51    -7 Elo  CI [-76, +62]
+  19.4.6 tablebase live   vs 19.4.5   46-54   -28 Elo  CI [-98, +40]
+
+100 games each, 60s/side, 3 workers x 2 threads, arena openings, High
+priority. Zero crashes, zero stalls, zero errors across all 300 games.
+
+Every interval crosses zero. None is a measured strength gain OR a measured
+regression. Do not re-gate these expecting a different answer at n=100 -- this
+harness resolves roughly +/-90 Elo there, and the identical-binary controls
+scored 0.441 and 0.489.
+
+19.4.6 was never expected to add strength: the tablebase only fires once BOTH
+players are broke, where the race solver already answered correctly, just
+per-query instead of O(1). It buys milliseconds in a phase costing ~435ms/move.
+Its value is as a LABEL SOURCE, and the gate confirmed what mattered for that:
+100 games with it live, answering positions it previously refused, and no
+disagreement with the race solver surfaced.
+
+The real win today was the 19.4.4 crash fix, which was never gated because it
+was not a strength question.
