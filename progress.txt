@@ -66,3 +66,165 @@ statistically identical to main (same think time, depth, stop-reason mix), so
 the feature was almost certainly inert, and the runs used 541 human openings
 rather than the 39 arena lines. The branch is also pre-purge and reintroduces
 legacy_search; it does not build.
+
+
+================================================================
+SESSION HANDOFF — 2026-08-09/10
+================================================================
+
+main is at 19.4.3, pushed, clean. Everything below is context.
+
+## Merged today (on main, pushed)
+
+- 19.4.1  legacy engine purged: legacy/ deleted (20 files), the unknown-flag
+          fallthrough to a 6x weaker search is gone. Also fixed the wasm build,
+          broken on main before today (AtomicBool/Ordering were imported only
+          for threaded builds while external_stop is not thread-gated).
+- 19.4.2  Lazy SMP transposition table no longer frozen at the 1M floor. Grows
+          at move boundaries on real overflow; unreachable game-phase entries
+          (more walls in hand than the root) are reclaimed before growing.
+- 19.4.3  value planner recovered from tm/value-planner: unspent clock 24% -> 10%.
+- tooling: .cargo/config.toml committed so builds are native without RUSTFLAGS;
+          search_bench now builds TitaniumSearch::production (it had used LMR
+          ceiling 1000 against production 800 plus a pinned TT, and reported
+          "titanium-v18"); the site reports ENGINE_VERSION instead of a
+          hardcoded string; Cargo.lock synced (stale lockfile stamped every
+          build -dirty); the build stamps GIT_COMMIT_HASH into the binary and
+          the session emits it as engineCommit per move; the harness records
+          rootMoves (full root ordering + scores) per ply; the harness supports
+          --env-a/--env-b so one binary can be A/B tested against itself; the
+          opening-book DEFAULT is now the 39 arena 6-ply lines with no DAG
+          expansion (it was 541 human openings, which is why the old DFPN runs
+          are incomparable to everything else).
+
+## Measured and rejected — do not redo without new information
+
+- Time management, six variants, all null: TT-size bump, reach-the-proof bell,
+  trough-funded bell, flat+dip, dip-only, boost+dip. The allocator re-divides
+  the REMAINING clock every move, so curve changes are washed out by the clock
+  trajectory they themselves create. Best gate 0.586 at 21 games; all regressed
+  toward 0.5.
+- LMR log curve (continuous log(depth)*log(index) replacing the 3-step): looked
+  like +98 Elo at p=0.0088 on one gate and did NOT replicate. Combined
+  107W-88L over 195 games, score 0.549, p=0.17. Branch feat/lmr-log-curve.
+  NOT merged.
+- NNUE prep wall-bits micro-optimisation: 861k vs 861k nps over 7 runs each.
+  0.0%. wall_slot_bits is inlined over cache-hot bytes; the compiler had it.
+- Certificate slack (allow N non-improving steps on the winning line):
+  equal-distance-only slack is strictly better than any-non-improving (same
+  rescues, up to 65% fewer nodes), but it rescues 4 positions in 1800 (0.2%)
+  for 3-83% more certify nodes. Left at path_slack=0. Branch feat/certify-slack,
+  NOT merged — it would add an inert option and a hot-loop branch.
+- DFPN: retired. Its premise is that the certifier's toward-goal restriction
+  blocks real wins; measured, lifting that restriction rescues ~0.2% of
+  positions. The old gates cannot support it either: 52W-71L over 123 games is
+  p=0.087, the per-move telemetry is statistically identical to main (so the
+  feature was almost certainly inert), and the runs used the wrong opening book.
+  The branch is pre-purge, reintroduces legacy_search, and does not build.
+
+## Measurements worth not repeating
+
+- Engine speed is ~833k nps, single thread, production config. NOT 994k (that
+  was the bench running a non-production config) and NOT 491k (that was the
+  instrumented build). --features bench-instrument costs roughly half the speed
+  and distorts per-phase percentages unevenly, so use it for the ORDER of
+  phases only, never to answer "how fast is the engine".
+- Where time goes (instrumented, so magnitudes are inflated but the ranking is
+  usable): evaluate 36%, refresh_dist 21%, distance LRU ~8%, eval_nnue_prep 8%
+  (more than double eval_nnue_infer at 3.5%), wall_legality 2%, gen_moves 2.4%.
+  eval_cat_heat reads 0.00% and CAT builds fire on 2.1% of nodes, so the
+  "CAT costs 47% of search time" claim in TRAINING_HANDOFF.md is STALE.
+- The engine uses 57.7% of the time it is allocated. Only 20% of moves reach
+  time_up; 35% quit on easy_move_stable after ~46% of budget; 14% on
+  forced_mate_or_loss after 8.5%.
+- Perfect move ordering is worth about +0.8 ply, measured by degrading ordering
+  and reading the gradient (~1 ply per 12-13 points of accuracy). Alpha-beta
+  still has to refute every alternative; ordering only decides how cheaply.
+  Caveat: that experiment perturbed only the FIRST move, so it does not measure
+  damage from systematically misranking the tail. See open item 1.
+- Certificate proof rate by walls in hand (corpus): (0,0) 1.00, (0,1) 0.99,
+  (0,2) 0.84, (1,1) 0.73, (1,2) 0.31, (2,2) 0.11. The gap worth attacking is
+  (1,1) and (1,2), where NEITHER side is broke, so the broke-side theorems and
+  the race solver both sit out.
+- Zero-wall tablebase is intact and merged: tbgen solves 12,960 states
+  (7,119 W / 5,841 L / 0 draws, hash e9f5e9817371bcef) in 3ms, computed at
+  runtime with no file to load.
+
+## Open work, highest value first
+
+1. ORDERING IS NOT SATURATED — the "84.6% best-move-first" figure came from an
+   old memory note and was never re-verified this session. Reading
+   order_moves_prior:
+
+     tt_move           2_000_000_000
+     pawn move         ~1_000_000 - dist*1000      (995k-1M)
+     killer[0]           900_000
+     countermove         870_000
+     killer[1]           850_000
+     everything else     history, else CAT heat, often 0
+
+   EVERY pawn move outranks EVERY killer. A killer is evidence (it just caused a
+   cutoff in a sibling node); pawn progress is a guess, and the guess wins. And
+   a wall move with no history yet and low CAT heat scores 0, so it lands around
+   rank 100 of ~130 and takes the deepest LMR reduction. That is a plausible
+   blindness mechanism and it is NOT what the saturation claim measured.
+
+   WIP is stashed on branch diag/ordering-quality (see git stash list): a
+   cutoff-rank histogram (bench_instr::bump_cut_rank plus cut_rank_hist /
+   cut_rank_pawn / cut_rank_wall) answering "where does the refutation actually
+   sit in our ordering", split by move type. The instrumentation compiles and
+   runs. Only the report block in search_bench.rs needs relocating: it was
+   inserted inside an enclosing with_bench and panicked with "RefCell already
+   borrowed". Fix: copy the three arrays into locals inside ONE with_bench,
+   print outside it, and place the whole block BEFORE take_json_report().
+
+   If cutoffs commonly sit at rank 20+, the fix is cheap and real: put killers
+   above pawn moves, and give unproven wall moves a floor so they do not sort to
+   score 0 where LMR cuts hardest.
+
+2. easy_move_stable patience — unresolved, one clean gate away. Branch
+   feat/patience-only, one commit off main, diff-verified. Budget floor decays
+   75% -> 30% by ply 30, stability bar 5/4/3 iterations, no patience when the
+   score exceeds 500. Targets the 42% of allotted time the engine hands back.
+
+3. Eval retraining on the zero.ink teacher labels. 2.27M labels in
+   canonical/position_teacher_store.db with source friend_selfplay:iter_* —
+   that is quoridor-zero.ink, roughly 1922 arena Elo against Titanium's 1598.
+   Ingestion now writes zero-ink-selfplay:{iter}. Evaluation is 36% of search
+   time and decides move quality, so this is the classic biggest lever.
+   WARNING: 99.8% of those labels have engine_hash NULL. That is NOT grounds to
+   delete them — I did exactly that and had to restore from archive/backups.
+   The `source` field is the provenance.
+
+4. Policy planes 9/10 (own/opponent shortest-path mask) are HARDCODED ZERO at
+   policy/mod.rs:254 — the net has never seen path structure, only the distance
+   gradient. Plausible contributor to the flywheel plateau at 65% top-1.
+   Design if resumed: feed 1-3 witness paths per player (PathWitness and
+   path_witness_from_eval_layers in pathfinding/bff/wall.rs are already computed
+   for movegen, so the planes are nearly free), randomise the count during
+   training, and add an extra path or two in the opening. Quoridor is about
+   forcing a choice between routes, so a single-path encoding hides the point.
+
+5. Do NOT replace CAT with a policy head for ORDERING: there is no speed to
+   reclaim (2.1% of nodes, 0.00% eval timer) and ordering accuracy is capped at
+   ~0.8 ply. If policy is wired anywhere, wire it to modulate REDUCTION depth,
+   which is continuous and has real headroom. Apply it WITHIN a tier, never
+   across: ordering spans +/-2e9 in hard tiers, so a raw logit is invisible
+   until the weight is large enough to override the TT move, at which point it
+   is harmful.
+
+## Process rules learned the expensive way
+
+- One branch, one behavioural commit, branched fresh from main, diff-verified
+  before building. A 12-commit candidate produced an uninterpretable gate.
+- No opt-in strength switches. The branch must play at full strength with no
+  environment set. Delete the old path rather than disabling it.
+- This harness shows +/-30-40 Elo between IDENTICAL binaries at n=60-100
+  (gate_control_AvA 0.441, gate_control_AvA_clean 0.489). Nothing under roughly
+  50 Elo is decidable at 100 games. Ten gates ran today; one hit p=0.0088 and
+  did not replicate. That is what multiple comparisons looks like.
+- Gates need at least 2 threads per engine. At 1 thread Lazy SMP and the shared
+  TT are dead code, which is how the frozen-1M-slot TT survived unmeasured.
+- With pondering off only one side searches at a time, so 8 workers x 2 threads
+  is still only 8 active threads. Running 4 workers left half the machine idle;
+  verify 8 works before the next long gate.
