@@ -977,6 +977,22 @@ fn run_score_out(args: &[String]) {
         }
         g
     };
+    // Echo the canonical position. Without it score-out states a verdict about
+    // a board the caller cannot identify, which makes it useless for generating
+    // training labels -- the whole point of proving a position offline is to
+    // attach the proof to the position.
+    //
+    // WARNING: `packed` uses DATASET convention, the `side_to_move` field above
+    // uses ENGINE convention, and they are OPPOSITE. pack_state writes
+    // dataset player0 = engine pawn[1] and side_to_move = 1 - g.turn. So a
+    // position with engine turn 1 reports "side_to_move":1 here and byte 5 == 0
+    // inside `packed`. Both are correct; joining them naively mislabels the
+    // side to move on every row. Decode `packed` with titanium_game_from_packed,
+    // which is the exact inverse, rather than reading byte 5 against this field.
+    let packed_out: String = titanium::pack_state(&game)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let mut search = titanium::TitaniumSearch::production(game, None);
     let time_ms = (budget / SCORE_OUT_NODES_PER_MS).clamp(1, 86_400_000);
     let result = search.think(time_ms, 128, false, false, "score-out");
@@ -1002,7 +1018,7 @@ fn run_score_out(args: &[String]) {
     };
     let proven = score.abs() >= 19_500 && report.search_depth > 0;
     println!(
-        "{{\"schema\":\"score-out-v1\",\"ok\":true,\"input\":\"{}\",\"side_to_move\":{},\"score\":{},\"bound\":\"{}\",\"proven\":{},\"nodes\":{},\"node_budget\":{},\"depth\":{},\"selected_move\":\"{}\"}}",
+        "{{\"schema\":\"score-out-v1\",\"ok\":true,\"input\":\"{}\",\"side_to_move\":{},\"score\":{},\"bound\":\"{}\",\"proven\":{},\"nodes\":{},\"node_budget\":{},\"depth\":{},\"selected_move\":\"{}\",\"packed\":\"{packed_out}\"}}",
         input_kind.unwrap_or("unknown"),
         match board.side() {
             titanium::Player::One => 0,
