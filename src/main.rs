@@ -833,17 +833,29 @@ fn run_tblayers(args: &[String]) {
     let layers = tb_layers::expand(&boards, depth);
 
     let mut total = 0usize;
+    let mut total_states = 0usize;
     for (k, layer) in layers.iter().enumerate() {
         total += layer.len();
+        // Pawn configurations, not just wall ones: a configuration is only half
+        // the position. The gap against the unpruned 12,960 is the flood fill
+        // removing pawn squares that can never reach a goal.
+        let (live, max) = tb_layers::layer_state_census(layer);
+        total_states += live;
+        let pruned = if max == 0 {
+            0.0
+        } else {
+            (max - live) as f64 * 100.0 / max as f64
+        };
         println!(
-            "layer {k}: {:>8} configurations, {} walls on board, {} in hand",
+            "layer {k}: {:>8} configs, {} on board, {} in hand | {:>12} pawn states ({pruned:.2}% pruned)",
             layer.len(),
             20 - k,
-            k
+            k,
+            live
         );
     }
     println!(
-        "total {total} configurations from {} seeds in {:.2}s",
+        "total {total} configurations, {total_states} pawn states, from {} seeds in {:.2}s",
         boards.len(),
         t0.elapsed().as_secs_f64()
     );
