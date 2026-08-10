@@ -53,6 +53,18 @@ pub fn decode_packed_state(data: &[u8]) -> Result<PackedFields, String> {
     }
     let horizontal_walls = u64::from_le_bytes(data[8..16].try_into().unwrap());
     let vertical_walls = u64::from_le_bytes(data[16..24].try_into().unwrap());
+    // Walls are conserved: every wall is either on the board or in a hand.
+    // A state that breaks this cannot arise from play, so it is corrupt input
+    // or a hand-built position -- and letting one into a tablebase or a
+    // training set silently teaches the net about a game nobody is playing.
+    let on_board = (horizontal_walls.count_ones() + vertical_walls.count_ones()) as u16;
+    let in_hand = u16::from(player0_walls) + u16::from(player1_walls);
+    if on_board + in_hand != 20 {
+        return Err(format!(
+            "wall conservation violated: {on_board} on board + {in_hand} in hand = {}, expected 20",
+            on_board + in_hand
+        ));
+    }
     Ok(PackedFields {
         player0_cell,
         player1_cell,

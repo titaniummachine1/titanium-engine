@@ -1,6 +1,22 @@
-//! Zero-wall tablebase: exact retrograde solve of the subgame where neither
-//! player has walls left and none are on the board, so the only actions are
-//! pawn steps and jumps.
+//! Zero-wall tablebase: exact retrograde solve of the pawn-only subgame.
+//!
+//! WRONG SCOPE -- READ BEFORE USING. This table models a BARE board: no walls
+//! in hand AND none placed. That combination is physically impossible in a real
+//! game. Each player starts with 10 walls; if both hands are empty then twenty
+//! walls are on the board, so `hw_bits == 0` cannot hold. `applies()` is
+//! therefore unsatisfiable in real play and `probe()` returns None for every
+//! position that actually occurs.
+//!
+//! The real subgame worth solving is "neither player has walls LEFT", with
+//! whatever walls are on the board treated as fixed scenery. That is where the
+//! game becomes a pure race, and it is common.
+//!
+//! Do NOT "fix" this by relaxing `applies()` to drop the board-empty test. The
+//! table is indexed by `(p0, p1, stm)` with no wall dimension and was built on
+//! bare-board adjacency, so it would answer real positions with distances
+//! computed for a board that is not the one being played -- confidently wrong
+//! instead of silent. The fix is to index by wall configuration and solve one
+//! table per configuration; the retrograde below is reusable as-is.
 //!
 //! The live state space is `(p0, p1, stm)` with `p0 != p1` — at most
 //! `81 * 80 * 2 = 12_960` states — small enough to solve completely and embed.
@@ -53,8 +69,14 @@ pub fn tb_index(p0: usize, p1: usize, stm: usize) -> usize {
     (p0 * NCELLS + p1) * 2 + stm
 }
 
-/// A position is in the zero-wall subgame when no walls are placed and neither
-/// side has any left to place.
+/// A position is in this subgame when no walls are placed AND neither side has
+/// any left to place.
+///
+/// Those two conditions cannot both hold in a real game -- twenty walls have to
+/// be somewhere -- so this returns false for every position that actually
+/// occurs. See the module header: the scope is wrong, and relaxing this test
+/// without giving the table a wall dimension would make it return wrong answers
+/// rather than none.
 #[inline]
 pub fn applies(g: &GameState) -> bool {
     g.hw_bits == 0 && g.vw_bits == 0 && g.wl[0] == 0 && g.wl[1] == 0
