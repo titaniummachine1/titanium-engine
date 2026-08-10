@@ -294,3 +294,96 @@ whether the split is (10,0), (5,5) or (0,10) -- three completely different
 positions fitted with one blended estimate.
 
 Live net: h=32, f64 throughout, 343 KB, inherited from ACE v13.
+
+
+================================================================
+EVAL / TRAINING PIPELINE — design decided, build not started
+================================================================
+
+Branch eval/walls-in-hand (329dd44, pushed) carries the engine side. It is a
+VERIFIED NO-OP with current weights: identical nodes-to-depth on all six bench
+positions, because the embedding is zero until something trains it.
+
+## The bar changed: we cannot reproduce the shipped net, only beat it
+
+The live net came from ACE v13 by a process nobody can replay. So "reproduce
+the current net" is NOT a valid first milestone -- there is no such target.
+The only meaningful test is a head-to-head gate against net_weights.bin.
+Assume every existing training script is unsound until something it produces
+wins a gate.
+
+## Walls-in-hand embedding: 121, direct-indexed
+
+index = own_walls * 11 + opp_walls. No remap, no lookup, multiply-and-add.
+Configs that never appear are never trained and stay zero, which is exactly
+neutral. Not compacted: a remap would save 768 bytes and could hand the ~1% of
+(0,1) positions that DO reach the net another configuration's vector.
+
+Measured over all 1,405,888 stored positions:
+  - 109 of 121 configs appear at all; 106 after excluding cert-solved
+  - samples per config: min 1, p10 39, median 2,384, max 66,538
+  - 29 configs have <500 samples -- thinnest are (8,0)=1, (9,1)=1, (10,3)=2
+  - CERT-SOLVED CONFIGS HOLD 456,611 POSITIONS = 32% OF THE STORE
+    (0,0)=305,073  (0,1)=80,738  (1,0)=70,800
+    The certificate answers these before the net is consulted, so a third of
+    every epoch was being spent on positions the evaluator never sees.
+
+Train with a minimum-sample threshold: below it, no gradient. A vector learned
+from one sample is worse than no vector. Thresholds resolve themselves as
+self-play fills configs in -- no format change, no retrain of anything else.
+
+## Targets: blend, do not choose
+
+Three signals, opposite trade-offs:
+  - game outcome   1 bit/game, sparse and noisy, but GROUND TRUTH
+  - teacher eval   dense and low-variance, but another engine's OPINION,
+                   calibrated to ITS search and architecture
+  - proven/cert    exact, but only near the end
+
+The 2.28M zero.ink labels are `teacher_value` -- i.e. all of the second kind.
+Distilling them alone teaches that engine's blind spots and a value scale
+tuned to its search. Target = lambda*teacher + (1-lambda)*outcome, lambda
+SWEPT not assumed. The outcome term anchors the net to what actually wins.
+
+Their games also supply POSITIONS our engine never generates. That value is
+independent of whether their eval transfers.
+
+## Curriculum: outward from the solved frontier
+
+1. Generate endgame positions that are NOT instantly certificate-solvable,
+   search them, and take the certificate's verdict as an EXACT label. This is
+   tablebase-quality ground truth, not an estimate.
+2. Walk outward from the frontier until proving a position stops being
+   practical. That boundary ends the endgame phase.
+3. Then blended teacher+outcome data for the middlegame and opening.
+
+Data sufficiency is NOT a constraint: self-play generates as much as needed.
+
+## Search dump, not TT dump
+
+Training on searched scores is right, but the TT CANNOT be dumped for this:
+SharedTtEntry stores key_hi/key_lo only -- hashes, not positions, and a 64-bit
+hash is not invertible. Instrument the STORE PATH instead to emit
+(packed_state, score, depth, bound) as entries are written during self-play.
+
+Only EXACT-bound entries are valid targets. Cutoff entries mean ">= this" and
+fail-lows mean "<= this"; they are the MAJORITY of the table, and training on
+them as values teaches numbers that were never established.
+
+## Formats and facts
+
+- packed_state: 24 bytes, version|p0cell|p1cell|p0walls|p1walls|stm|00|hwalls
+  u64|vwalls u64. Walls in hand are ALREADY STORED for every position.
+- FEATURE_SCHEMA = "halfpw-sparse-route5-ws20-catv5-normalized5-v1". Adding
+  walls-in-hand must bump it so cached features invalidate instead of silently
+  mixing versions. Cache featurization keyed by canonical_hash + schema --
+  never featurize a position twice.
+- Live net: h=32, f64 throughout, 343 KB. Rebuild in f32.
+- Teacher store is INTACT: 2,281,163 labels, 1,405,888 positions, 20
+  friend_selfplay iterations, per-import content hashes. The earlier deletion
+  was fully restored. `source_cohort` is the provenance field, NOT engine_hash.
+- Arena DB: filter excludes ANY game containing Gorisanson 0.3, Minimax Depth
+  4, Minimax Depth 2, Greedy Racer. Skipped ids recorded in skipped_games so
+  reruns do not refetch them. Also worth filtering at import: games that end in
+  a repetition cycle contribute hundreds of near-identical positions from one
+  game (arena game 9282 loops b7-d8-a7-e8 for ~180 plies).
