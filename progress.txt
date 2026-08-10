@@ -499,3 +499,33 @@ configuration, milliseconds each, exactly labelled. Each additional wall in
 hand multiplies by ~128 placements, so (1,0) is ~128x a race solve and (1,1)
 ~128^2. That is where it stops, and it matches going 1 wall, then 2, then 3,
 and halting when it no longer fits.
+
+## Correction to the layer-by-layer plan: TB(0,0) is not one object
+
+Zero walls IN HAND means twenty walls ON BOARD, so TB(0,0) is a FAMILY indexed
+by which twenty walls are placed -- C(128,20)-ish members. "Solve 0/0
+completely, then work outward to 1/0 and 0/1" is not executable: the base case
+is not a single tablebase.
+
+It fails from the other end too. Solving a position with k walls placed needs
+its successors, which have k+1 placed, so exhaustive construction is infeasible
+in both directions. Wall irreversibility is real and useful but does not by
+itself make the space enumerable.
+
+WHAT IS EXECUTABLE: lazy, memoised solving over REACHABLE positions. Do not
+construct layers. Take a position, recurse into successors, memoise on
+(wall_bits, pawn0, pawn1, stm), and rely on irreversibility to bound the
+wall-placement recursion. Only configurations that actually arise cost
+anything, and each solved one becomes a reusable oracle for its predecessors.
+
+So the starting point is NOT a new tablebase builder: the certificate and race
+solver already do on-demand proof with memoisation. Instrument them to emit
+(packed_state, result, distance) as they run and drive them over sampled
+endgame positions. Far less code, and it reuses proof logic already known
+correct.
+
+THREE-VALUED, NOT TWO. The existing 12,960-state tablebase reports 0 draws
+because a pure race cannot repeat -- someone always advances. With walls in
+hand, pawns can shuffle and repetition draws are real. A win/loss-only solver
+would silently mislabel drawn cycles as losses, poisoning exactly the ground
+truth this phase exists to produce.
