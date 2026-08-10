@@ -387,3 +387,29 @@ them as values teaches numbers that were never established.
   reruns do not refetch them. Also worth filtering at import: games that end in
   a repetition cycle contribute hundreds of near-identical positions from one
   game (arena game 9282 loops b7-d8-a7-e8 for ~180 plies).
+
+## Endgame phase, restated -- this is the important one
+
+The point is NOT to train on positions the certificate answers instantly;
+those never reach the net and are excluded ((0,0),(0,1),(1,0), 32% of the
+store). The point is the FRONTIER: positions the certificate CAN prove given
+time, but the engine CANNOT prove in ~1s at the board. Those do reach the net,
+and today it guesses at them.
+
+The asymmetry is the whole method: spend unlimited OFFLINE compute to produce
+labels the engine can never afford at play time. A 60s proof search offline
+becomes free knowledge inside a 1s game search. The net stops re-deriving what
+is already known and starts from the truth.
+
+It compounds. Each proven shell extends the frontier: positions 20 moves out
+become evaluable without proof, so the search reaches further within the same
+clock, which makes the next shell provable. Everything later in the curriculum
+inherits this, which is why it must come first.
+
+Phase ends where a long offline search can no longer prove the position.
+
+VALIDATION WITHOUT A GATE: hold out proven positions, ask the net for a STATIC
+eval (no search), and measure sign agreement against the proven verdict. Costs
+seconds, isolates exactly what this phase is supposed to buy, and tells us
+whether it worked before spending 4 hours of games on it. A game gate cannot
+isolate this; that metric can.
