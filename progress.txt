@@ -716,7 +716,26 @@ Backward enumeration is CHEAP. From one 20-wall seed board, removing walls
 gives 20 / 190 / 1140 / 4845 configurations at 1 / 2 / 3 / 4 missing --
 ~6,200 per seed, ~80 MB at ~13 KB each. Hundreds of seeds fit 100 GB.
 
-BUT THE SET DOES NOT CLOSE UNDER SOLVING. A player holding a wall may place it
+CORRECTION (later in the same session): the set DOES close. Walls only ever
+decrease, so play never leaves a tier once inside it -- the same property that
+makes chess material tablebases work. The problem is not closure, it is SIZE,
+and it is inverted from chess:
+
+  In chess the endgame is the SMALL part of the state space.
+  In Quoridor it is the LARGEST.
+
+Fewer walls in hand means MORE walls on the board. "All positions with <=1 wall
+in hand" is every 19- and 20-wall board: C(128,19) + C(128,20), around 10^22.
+Closed, and unstorable. The tier that is EASIEST to solve (no wall moves, pure
+race) has the MOST distinct boards.
+
+So a COMPLETE tablebase is impossible at every wall level, (0,0) included.
+Sampled coverage is not a compromise, it is the only option -- and it is
+sufficient, because the net needs enough exact examples to generalise, not an
+exhaustive table. Solve one board's 12,960 states on demand, cache by
+configuration, cover the boards that actually arise.
+
+The original note, which stands as the reason memoisation is mandatory: A player holding a wall may place it
 in ANY legal slot, not back where it was removed from. So a 19-wall position's
 children are ~128 different 20-wall boards, mostly outside the enumerated set.
 Backward removal gives you the positions to solve; it does NOT give you the
