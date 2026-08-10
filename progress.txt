@@ -454,3 +454,48 @@ tree is clean.
 Per user: include even instantly-solvable positions in phase 1. Ground truth on
 the final buckets is worth more than the wasted capacity, because everything
 later in the curriculum inherits it.
+
+## Build the tablebase as a GRAPH, not a dense array — decided before compute
+
+Walls are never returned, so the state space is a LAYERED DAG. Cycles exist
+only WITHIN a layer (pawns shuffling on a fixed wall configuration); every wall
+placement is a strictly one-way edge into a lower layer. Consequences:
+
+- Solve BOTTOM-UP by walls in hand. When a layer is solved, every
+  wall-placement edge out of the layer above points at an already-solved
+  entry, so those successors are lookups, not recursion.
+- Within a layer only pawn moves remain. That is the cyclic part and needs
+  proper retrograde with repetition handling — exactly what the existing
+  12,960-state race solver already does. Reuse it per wall configuration.
+
+WHY A GRAPH, precisely. Two things get conflated here and only one is a real
+win:
+
+- Transposition merging is NOT the reason. Key on the wall BITBOARD rather
+  than the move order and different move sequences reaching the same walls
+  land on the same entry automatically. A dense array indexed by wall-set
+  gets that for free.
+- SPARSITY is the reason. C(128,k) is astronomically large while the
+  configurations that ever arise are a vanishing fraction of it. Dense
+  allocation is impossible past a couple of walls. Store
+  `(wall_bits, pawn0, pawn1, stm) -> (result, distance)` in a hash and only
+  reached states cost anything.
+
+STREAM IT. This tablebase is scaffolding, not a shipped artifact: solve one
+layer, emit its labelled positions as training samples, DISCARD the solver
+state, move to the next. Nothing needs to stay resident, so memory stops being
+the limit and only generation compute remains one. This is what makes it
+survivable on a laptop with limited RAM.
+
+WHAT SHIPS: only the net, plus the zero-wall tablebase the engine already
+computes at runtime in 3ms with no file to load. The large tablebase exists to
+be distilled into the NNUE's low-wall buckets and then deleted. The net is a
+lossy compression of it.
+
+Cost ladder is set by walls IN HAND, not walls on board (an earlier note in
+this file sized the wrong axis). With (0,0) in hand there are no wall moves at
+all, so the position is a pure race on fixed scenery: ~12,960 states per wall
+configuration, milliseconds each, exactly labelled. Each additional wall in
+hand multiplies by ~128 placements, so (1,0) is ~128x a race solve and (1,1)
+~128^2. That is where it stops, and it matches going 1 wall, then 2, then 3,
+and halting when it no longer fits.
