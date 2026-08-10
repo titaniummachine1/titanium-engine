@@ -413,3 +413,44 @@ eval (no search), and measure sign agreement against the proven verdict. Costs
 seconds, isolates exactly what this phase is supposed to buy, and tells us
 whether it worked before spending 4 hours of games on it. A game gate cannot
 isolate this; that metric can.
+
+## Phase 1 generation: retrograde first, forward proving second
+
+Better than generating positions forward and hoping they prove: work BACKWARD
+from solved states. Every position produced is then solvable by construction,
+no search is wasted on positions that never prove, and distance-to-win falls
+out of the expansion depth instead of needing a search at all.
+
+Base already exists: `tbgen` solves 12,960 states (7,119 W / 5,841 L, 0 draws,
+hash e9f5e9817371bcef) in 3ms -- 81*80*2, the complete no-walls-on-board race.
+
+COMPLETE retrograde dies fast. Wall placements multiply the state space:
+~1.7M with one wall on board, ~105M with two, ~4.4B with three.
+
+So SAMPLE the retrograde frontier instead of enumerating it. Pick a solved
+position, generate predecessors, keep a sample, repeat. Every sample still
+carries an exact label; sampling rate controls cost instead of combinatorics
+controlling it.
+
+Exploit the asymmetry: backward WIN propagation is cheap -- one move into a
+position lost for the opponent proves the predecessor, so a single witness
+suffices. Backward LOSS propagation needs every successor checked. Harvest
+exactly-labelled wins cheaply first; take losses from the complete shells near
+the base where enumeration is still affordable.
+
+Retrograde and forward proving COMPOSE rather than compete: retrograde covers
+the base exactly, and forward search covers the band beyond where retrograde
+stops. `score-out` is the bridge -- it already reports `proven`, `bound`,
+`score`, `depth` per position, e.g.
+  titanium score-out --moves e2 e8 e3 --nodes 200000
+  {"schema":"score-out-v1","score":48,"bound":"exact","proven":false,...}
+
+MISSING ONE FIELD: score-out does not echo the position, so a verdict cannot be
+keyed to a board. Add `packed` (hex of pack_state(&game)) to its JSON before
+using it as a label generator -- pack_state must be called BEFORE `game` is
+moved into TitaniumSearch::production. This edit was started and rejected; the
+tree is clean.
+
+Per user: include even instantly-solvable positions in phase 1. Ground truth on
+the final buckets is worth more than the wasted capacity, because everything
+later in the curriculum inherits it.
