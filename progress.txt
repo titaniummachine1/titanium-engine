@@ -683,3 +683,91 @@ STILL THREE-VALUED. TbResult is Loss/Draw/Win and the fixpoint treats
 unresolved-at-convergence as a repetition draw. Keep that -- with walls in hand
 pawns can shuffle, so draws are real and a win/loss-only solver would mislabel
 them.
+
+
+================================================================
+START HERE: "build the tablebase up to 4 walls in hand"
+================================================================
+
+Say that sentence and this is the work. Everything below is settled; nothing
+here needs re-deriving or re-discussing.
+
+## Established facts
+
+WALL CONSERVATION. board + wl[0] + wl[1] == 20, always. "No walls in hand AND
+none on board" is illegal (sums to 0). decode_packed_state rejects violations
+as of 19.4.6. The existing 1,405,888-position store was audited: 0 violations.
+
+CONFIGURATIONS ARE SYMMETRIC, THE SOLVER IS NOT. "One wall missing" is a
+19-wall board -- which player holds the 20th does not change the board. But
+solving it does depend on who holds it, because that decides who may place.
+So: enumerate boards by walls-missing, solve each per (wl[0], wl[1]) assignment.
+Key tables by the PAIR, never the total. (2,0) and (1,1) are different games.
+
+(0,0) IS DONE AND VERIFIED (19.4.6). tb_zero::applies() gates on hands only;
+ZeroWallTb::build_for(template) solves the 12,960 pawn states for the
+template's wall configuration; table_for(g) caches by (hw_bits, vw_bits);
+results are three-valued with unresolved-at-fixpoint = repetition draw. Tested
+against hands_empty_race_stm_wins_oracle on three real wall layouts.
+
+## The expansion, and the one thing that makes it hard
+
+Backward enumeration is CHEAP. From one 20-wall seed board, removing walls
+gives 20 / 190 / 1140 / 4845 configurations at 1 / 2 / 3 / 4 missing --
+~6,200 per seed, ~80 MB at ~13 KB each. Hundreds of seeds fit 100 GB.
+
+BUT THE SET DOES NOT CLOSE UNDER SOLVING. A player holding a wall may place it
+in ANY legal slot, not back where it was removed from. So a 19-wall position's
+children are ~128 different 20-wall boards, mostly outside the enumerated set.
+Backward removal gives you the positions to solve; it does NOT give you the
+positions needed to solve them.
+
+RESOLUTION: solve on demand with memoisation. Cache every configuration by
+(hw_bits, vw_bits); many of the 128 placements from different parents land on
+the same board, so the graph shares heavily. Cost grows ~128x per wall in hand
+before sharing collapses it.
+
+FIRST MEASUREMENT TO TAKE: the cache hit rate at 2 walls in hand. That number,
+not disk, decides whether 3 and 4 are reachable. Take it before committing to
+a full run.
+
+## Implementation shape for the 1-wall solver
+
+build_for_one_wall(template, holder) -- holder has 1 wall, opponent 0.
+The fixpoint stays over the SAME 12,960 pawn states, because placing the last
+wall lands in a (0,0) position that is already solvable. Wall placements are
+just extra children with values known up front:
+  - a placement's resulting CONFIGURATION depends only on walls, never pawns,
+    so there are <=128 distinct child tables per configuration -- build once
+    into a local cache, reuse across all 12,960 states
+  - placement LEGALITY does depend on pawns (wall_legal re-runs the path
+    check), so that is re-checked per state
+  - child value is from the OPPONENT's view: their Loss is our Win
+  - keep three-valued results and the repetition-draw fixpoint
+Wall move ids: MOVE_HW_BASE=81 + slot, MOVE_VW_BASE=145 + slot, slots 0..63.
+
+PRIOR ART TO RECONCILE FIRST: search_impl.rs one_wall_race_bound() and
+two_wall_race_bound() already handle 1 and 2 walls, but key on the TOTAL
+(wl[0]+wl[1]) -- the symmetric collapse to avoid -- and return RaceBound, which
+may be a bound rather than an exact verdict. Decide whether the new tables
+replace them or sit above them, and CHECK whether RaceBound is exact before
+using it as a training label.
+
+## BUG IN tbdump -- fix before generating any data
+
+`titanium tbdump --moves ... [--out FILE]` exists and runs. It solves the
+line's wall configuration and emits every state as JSONL
+{packed, result, distance, best_move}, all exact.
+
+IT FORCES wl = [0,0] REGARDLESS OF HOW MANY WALLS THE LINE PLACED. Give it a
+3-move line and it emits positions with 1 wall on board and 0 in hand: 1 != 20,
+conservation violated, and our own decode_packed_state would reject every row.
+Either require the line to have placed all 20 walls, or set the hands from what
+is actually on the board. Until then its output is NOT safe training data.
+
+## Current state
+
+main @ 19.4.6, pushed. Working tree has the unverified tbdump edit in
+src/main.rs (it builds and runs; the bug above is a logic bug, not a build
+failure). tb_zero.rs is clean -- build_for_one_wall was NOT written.
+Scraper still collecting; last seen 3,643 games, id 4400, 700 excluded.

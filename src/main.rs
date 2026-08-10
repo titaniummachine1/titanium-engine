@@ -69,6 +69,7 @@ fn main() {
         "cat-packed-batch" => run_cat_packed_batch(),
         "score-out" => run_score_out(&args),
         "tbgen" => run_tbgen(&args),
+        "tbdump" => run_tbdump(&args),
         "fields" => run_fields(&args),
         // One engine, reached without ceremony. There used to be a flag, and an
         // unrecognised value -- including none at all, or a version newer than
@@ -776,6 +777,101 @@ fn run_cat_packed_batch() {
 ///   titanium tbgen --out tb_zero.bin     write the table
 ///   titanium tbgen --verify tb_zero.bin  check a file against a fresh solve
 ///   titanium tbgen                       report the census and hash only
+/// Phase-1 label generator: solve the broke-hands subgame for ONE wall
+/// configuration and emit every state as exact ground truth.
+///
+/// `titanium tbdump --moves e2 e8 e3h ... [--out FILE]`
+///
+/// The move list supplies the walls; hands are then forced empty, which is the
+/// subgame the table solves. Output is one JSONL row per live state:
+/// `{packed, result, distance, best_move}` with `result` in W/L/D, `distance`
+/// in plies (-1 for draws) and `best_move` a pawn destination (-1 when none).
+///
+/// Every row is EXACT -- retrograde to a fixpoint, not a search result -- so
+/// these are tablebase-quality targets, not estimates. One configuration
+/// yields up to 81*80*2 = 12,960 of them.
+fn run_tbdump(args: &[String]) {
+    use titanium::titanium::endgame::tb_zero::{TbResult, ZeroWallTb};
+    let mut moves = Vec::<String>::new();
+    let mut out_path = None::<String>;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--moves" => {
+                i += 1;
+                while i < args.len() && !args[i].starts_with("--") {
+                    moves.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            other => {
+                eprintln!("unknown tbdump option: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let mut g = titanium::GameState::new();
+    for mv in &moves {
+        g.make_move(titanium::algebraic_to_move_id(mv));
+    }
+    // Force the subgame: whatever walls the line placed stay as scenery, and
+    // neither side has one left. This is legal by construction only if the
+    // caller supplied a real line; the walls themselves are what matter here.
+    g.wl = [0, 0];
+
+    let t0 = Instant::now();
+    let tb = ZeroWallTb::build_for(&g);
+    let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let mut rows = String::new();
+    let mut emitted = 0usize;
+    for p0 in 0..81usize {
+        for p1 in 0..81usize {
+            if p0 == p1 {
+                continue;
+            }
+            for stm in 0..2usize {
+                let e = tb.probe_raw(p0, p1, stm);
+                let mut pos = g.clone();
+                pos.pawn[0] = p0;
+                pos.pawn[1] = p1;
+                pos.turn = stm;
+                let packed: String = titanium::pack_state(&pos)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                let r = match e.result {
+                    TbResult::Win => "W",
+                    TbResult::Loss => "L",
+                    TbResult::Draw => "D",
+                };
+                rows.push_str(&format!(
+                    "{{\"packed\":\"{packed}\",\"result\":\"{r}\",\"distance\":{},\"best_move\":{}}}
+",
+                    e.distance, e.best_move
+                ));
+                emitted += 1;
+            }
+        }
+    }
+
+    match out_path {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, &rows) {
+                eprintln!("tbdump: cannot write {path}: {e}");
+                std::process::exit(1);
+            }
+            eprintln!("tbdump: {emitted} states -> {path} (build {build_ms:.1}ms)");
+        }
+        None => print!("{rows}"),
+    }
+}
+
 fn run_tbgen(args: &[String]) {
     use titanium::titanium::endgame::tb_zero::ZeroWallTb;
     let mut out: Option<String> = None;
