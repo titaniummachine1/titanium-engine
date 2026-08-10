@@ -3236,9 +3236,22 @@ impl TitaniumSearch {
             .shared_tt
             .as_ref()
             .and_then(|tt| tt.probe(self.g.hash_lo, self.g.hash_hi));
-        let tt_move = root_entry
-            .map(|entry| (entry.meta & 1023) as i16)
-            .unwrap_or_else(|| {
+        // Lazy SMP shared TT is authoritative; no local fallback (see ab()).
+        //
+        // `tt_mask` describes the SHARED table for a worker -- attach_lazy_worker
+        // and the move-boundary growth block both assign it from
+        // `shared_tt.mask` -- while `tt_meta` / `tt_key_*` stay at whatever size
+        // the local single-thread arrays were. Masking a hash with the shared
+        // mask and indexing the local arrays with it therefore reads out of
+        // bounds the moment the shared table outgrows them, which panics the
+        // worker thread and kills the process mid-search. Observed live: "len is
+        // 1048576 but the index is 2480225" -- a 2^20 local array indexed with a
+        // grown shared mask. The other two probe sites already guard this; this
+        // one was missed.
+        let tt_move = match root_entry {
+            Some(entry) => (entry.meta & 1023) as i16,
+            None if self.shared_tt.is_some() => 0,
+            None => {
                 let idx = (self.g.hash_lo & self.tt_mask) as usize;
                 let meta = self.tt_meta[idx];
                 if meta != 0
@@ -3249,7 +3262,8 @@ impl TitaniumSearch {
                 } else {
                     0
                 }
-            });
+            }
+        };
         let n = self.gen_moves(0, depth.max(1), tt_move, &mut moves);
         self.order_moves(0, &mut moves[..n], tt_move, 0);
         let n = crate::titanium::opening_book::filter_denied_opening_legal_moves(
