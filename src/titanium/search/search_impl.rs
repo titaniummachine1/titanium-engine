@@ -306,6 +306,44 @@ mod lazy_smp_tests {
         );
     }
 
+    /// A Lazy SMP worker carries `tt_mask` describing the SHARED table while
+    /// its local `tt_meta` / `tt_key_*` arrays keep their own, smaller size.
+    /// Any probe that masks a hash with `tt_mask` and then indexes a local
+    /// array therefore reads out of bounds as soon as the shared table is
+    /// bigger -- which killed the engine mid-search in roughly one game in four
+    /// ("len is 1048576 but the index is 2480225").
+    ///
+    /// This reproduces that geometry directly rather than through a real
+    /// search, so it stays fast and cannot go quiet if Lazy SMP is reshaped.
+    /// Before the fix it panics; after it, the shared table is authoritative
+    /// and a miss is simply a miss.
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    #[test]
+    fn root_snapshot_survives_shared_tt_larger_than_local_arrays() {
+        let mut search = *TitaniumSearch::production(GameState::new(), Some(18));
+        let local_len = search.tt_meta.len();
+
+        // Exactly what attach_lazy_worker and the move-boundary growth block do:
+        // adopt the shared table's geometry without resizing the local arrays.
+        let shared = std::sync::Arc::new(SharedTitaniumTt::from_search(&search).grown_to(22));
+        assert!(
+            shared.slots.len() > local_len,
+            "test is vacuous unless the shared table is genuinely larger \
+             (shared={}, local={local_len})",
+            shared.slots.len()
+        );
+        search.tt_mask = shared.mask;
+        search.tt_bits = shared.bits;
+        search.shared_tt = Some(shared);
+
+        // Must not panic. The returned ordering is not under test here.
+        let moves = search.ordered_root_moves_snapshot(1);
+        assert!(
+            !moves.is_empty(),
+            "root snapshot returned no moves from the start position"
+        );
+    }
+
     #[test]
     fn cat_v16_worker_profiles_raise_fringe_threshold() {
         let mut search = *TitaniumSearch::production(GameState::new(), Some(18));
