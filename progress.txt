@@ -529,3 +529,46 @@ because a pure race cannot repeat -- someone always advances. With walls in
 hand, pawns can shuffle and repetition draws are real. A win/loss-only solver
 would silently mislabel drawn cycles as losses, poisoning exactly the ground
 truth this phase exists to produce.
+
+## Correction: TB(0,0) is a family, not an object -- solve lazily
+
+Zero walls IN HAND means twenty walls ON BOARD, so TB(0,0) is a FAMILY indexed
+by which twenty walls are placed, not one solvable tablebase. "Solve 0/0
+completely then work outward" is not executable. It fails from the other end
+too: solving a position with k walls placed needs successors with k+1 placed,
+so exhaustive construction is infeasible in both directions. Wall
+irreversibility is real and useful but does not make the space enumerable.
+
+EXECUTABLE INSTEAD: lazy, memoised solving over REACHABLE positions. Recurse
+into successors, memoise on (wall_bits, pawn0, pawn1, stm), rely on
+irreversibility to bound wall-placement recursion. Only configurations that
+actually arise cost anything, and each solved one is a reusable oracle for its
+predecessors. Start from the certificate/race solver, which already does
+on-demand proof with memoisation, rather than writing a tablebase builder.
+
+THREE-VALUED, NOT TWO. The 12,960-state tablebase reports 0 draws because a
+pure race cannot repeat. With walls in hand pawns shuffle and repetition draws
+are real; a win/loss-only solver would mislabel drawn cycles as losses and
+poison the ground truth this phase exists to produce.
+
+SIZING (12,960 pawn states per wall configuration, ~1 byte/entry = ~13 KB per
+configuration; legality prunes C(128,k) by maybe 10-50%):
+  2 walls on board   ~7 K configs      95 MB      24 MB with 4x symmetry
+  3 walls            ~273 K            3.5 GB     0.9 GB
+  4 walls            ~7.5 M            97 GB      24 GB      <- the ceiling
+  5 walls            ~185 M            2.4 TB     600 GB     <- out of reach
+Measure the legality factor before committing disk: it moves the 4-wall line
+between 24 GB and 97 GB.
+
+STORAGE IS NOT THE BINDING LIMIT -- COMPUTE IS, on a different axis. Walls on
+board drives storage; walls IN HAND drives cost, because each one adds ~128
+placement branches per node. (0,0) in hand is a pure race, milliseconds. (1,0)
+is ~128x. (1,1) ~128^2. That explodes at 2-3 walls in hand however much disk
+exists. Realistic target: complete to 3-4 walls on board with 0-2 in hand, then
+SAMPLED beyond -- training needs enough exact examples, not exhaustive cover.
+
+TOOLING NOTE: `titanium score-out --packed HEX|--moves ... --nodes N` now emits
+{score, bound, proven, depth, selected_move, packed} and is the label
+generator. `packed` is DATASET convention while its `side_to_move` field is
+ENGINE convention and they are OPPOSITE -- decode with
+titanium_game_from_packed, never read byte 5 against that field.
