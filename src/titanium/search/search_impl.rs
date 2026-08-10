@@ -3836,12 +3836,23 @@ impl TitaniumSearch {
         let mut hidden_pre = [0.0f64; MAX_NET_H];
         let mut hidden_clip = [0.0f64; MAX_NET_H];
         let mut neural_out = 0.0f64;
+        // Mirrors the production accumulator exactly. A dump path that omits
+        // an input reports an eval the engine never computed, which is worse
+        // than having no dump at all.
+        let wbase = if nw.walls_active {
+            crate::titanium::net::walls_in_hand_index(self.g.wl[me], self.g.wl[1 - me]) * nw.h
+        } else {
+            usize::MAX
+        };
         if me == 0 {
             wall_acc = self.np_acc0;
             let po = self.g.pawn[0] * nw.h;
             let px = self.g.pawn[1] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                let mut h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                if wbase != usize::MAX {
+                    h += nw.walls_emb[wbase + j];
+                }
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -3851,7 +3862,10 @@ impl TitaniumSearch {
             let po = NET_MIRC[self.g.pawn[1]] * nw.h;
             let px = NET_MIRC[self.g.pawn[0]] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                let mut h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                if wbase != usize::MAX {
+                    h += nw.walls_emb[wbase + j];
+                }
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -5550,18 +5564,35 @@ impl TitaniumSearch {
         crate::bench_instr::record(
             |b| &mut b.eval_nnue_infer,
             || {
+                // Walls in hand, side-to-move canonical. Zero for any net
+                // trained before this input existed, so the branch is the only
+                // cost on legacy blobs.
+                let wbase = if nw.walls_active {
+                    crate::titanium::net::walls_in_hand_index(
+                        self.g.wl[me],
+                        self.g.wl[1 - me],
+                    ) * nw.h
+                } else {
+                    usize::MAX
+                };
                 if me == 0 {
                     let po = self.g.pawn[0] * nw.h;
                     let px = self.g.pawn[1] * nw.h;
                     for j in 0..nw.h {
-                        let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                        let mut h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                        if wbase != usize::MAX {
+                            h += nw.walls_emb[wbase + j];
+                        }
                         out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                     }
                 } else {
                     let po = NET_MIRC[self.g.pawn[1]] * nw.h;
                     let px = NET_MIRC[self.g.pawn[0]] * nw.h;
                     for j in 0..nw.h {
-                        let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                        let mut h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                        if wbase != usize::MAX {
+                            h += nw.walls_emb[wbase + j];
+                        }
                         out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                     }
                 }

@@ -29,6 +29,41 @@ use std::sync::OnceLock;
 /// rebuild) only if an experiment needs a wider net than this allows --
 /// everything else adapts automatically from the blob's own header.
 pub const MAX_NET_H: usize = 256;
+
+/// Wall counts run 0..=10 per side, so 11 distinct values each.
+pub const WALLS_IN_HAND_SIDES: usize = 11;
+/// The full asymmetric cross product. (10,0) and (0,10) are opposite positions
+/// and must not share a vector, which is why this is a product and not a sum.
+pub const WALLS_IN_HAND_CONFIGS: usize = WALLS_IN_HAND_SIDES * WALLS_IN_HAND_SIDES;
+
+/// True when the certificate answers this wall configuration outright, so the
+/// net is essentially never consulted there and training on it is wasted.
+///
+/// Measured proof rates on the gate corpus: (0,0) 1.00, (0,1) 0.99, (0,2) 0.84,
+/// (1,1) 0.73, (1,2) 0.31, (2,2) 0.11. Only the >=0.99 configurations are
+/// excluded -- (0,2) and (1,1) still reach the net 16% and 27% of the time and
+/// must keep a trainable vector.
+///
+/// These indices are deliberately still PRESENT in the embedding, holding
+/// zeros. Compacting them out would save 3 vectors (768 bytes at h=32) and cost
+/// a remap table plus a real failure mode: the ~1% of (0,1) positions that do
+/// reach the net would be handed some other configuration's vector. A zero
+/// vector contributes nothing, which is the right answer for a position the net
+/// should not be opining on.
+#[inline]
+pub fn walls_config_is_cert_solved(own: i32, opp: i32) -> bool {
+    let (a, b) = (own.min(opp), own.max(opp));
+    a == 0 && b <= 1
+}
+
+/// Index of the (own, opp) walls-in-hand vector, clamped so a malformed count
+/// cannot read out of bounds.
+#[inline]
+pub fn walls_in_hand_index(own: i32, opp: i32) -> usize {
+    let o = own.clamp(0, WALLS_IN_HAND_SIDES as i32 - 1) as usize;
+    let p = opp.clamp(0, WALLS_IN_HAND_SIDES as i32 - 1) as usize;
+    o * WALLS_IN_HAND_SIDES + p
+}
 pub const WSKIP_LEN: usize = 20;
 const FIELD_PLANE_LEN: usize = 81;
 const FIELD_PLANE_SETS: usize = 5;
@@ -88,6 +123,23 @@ pub struct Net {
     pub dist_me_canon: Box<[[f64; 81]; 2]>,
     pub dist_opp_canon: Box<[[f64; 81]; 2]>,
     pub dist_diff_canon: Box<[[f64; 81]; 2]>,
+    /// Walls-in-hand embedding: one learned vector per (own, opp) wall count,
+    /// indexed `(own * WALLS_IN_HAND_SIDES + opp) * h`, side-to-move canonical.
+    ///
+    /// Until this existed the net could not see wall counts AT ALL -- they
+    /// reached only the hand-crafted scalars after inference. A placed Quoridor
+    /// wall is owner-agnostic, so for an identical board the net's input was
+    /// byte-identical whether the split was (10,0), (5,5) or (0,10): three
+    /// completely different positions fitted with one blended estimate.
+    ///
+    /// An embedding rather than a bucket set on purpose. 121 vectors cost
+    /// 121*h weights and every wall/pawn weight stays shared; multiplying the
+    /// existing 9 pawn buckets by 121 would cost ~500x more and split scarce
+    /// training data 121 ways, so (7,3) would learn nothing from (7,4).
+    pub walls_emb: Vec<f64>,
+    /// False for any blob trained before this input existed, in which case the
+    /// vectors are zero and contribute nothing.
+    pub walls_active: bool,
 }
 
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
@@ -269,6 +321,17 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
             route_bybit[turn][4][bit] = route_contested[canon];
         }
     }
+    // Optional trailing block, detected by what is LEFT rather than by adding
+    // another total-size variant: the loader already discriminates eight blob
+    // shapes by exact length, and each new optional block would double that.
+    let walls_len = WALLS_IN_HAND_CONFIGS * h;
+    let walls_emb = if bytes.len() - offset == walls_len * 8 {
+        read_f64s(bytes, &mut offset, walls_len)
+    } else {
+        vec![0.0; walls_len]
+    };
+    let walls_active = walls_emb.iter().any(|&w| w != 0.0);
+
     let mut b1 = [0.0f64; MAX_NET_H];
     let mut w2 = [0.0f64; MAX_NET_H];
     b1[..h].copy_from_slice(&b1_v);
@@ -301,6 +364,8 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         dist_me_canon,
         dist_opp_canon,
         dist_diff_canon,
+        walls_emb,
+        walls_active,
     }
 }
 
