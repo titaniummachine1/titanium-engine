@@ -32,7 +32,7 @@
 //! the engine's own movegen.
 
 use crate::titanium::position::game::GameState;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Result from the side-to-move's perspective.
@@ -91,11 +91,11 @@ pub struct ZeroWallTb {
 }
 
 impl ZeroWallTb {
-    /// Solve the whole subgame by fixpoint iteration.
+    /// Solve the whole subgame by retrograde analysis.
     ///
     /// Backward induction with cycles: a state is a WIN as soon as one child is
     /// a LOSS, and a LOSS only once *every* child is a WIN. States still
-    /// unresolved at the fixpoint are draws by repetition — that is the correct
+    /// unresolved at the end are draws by repetition — that is the correct
     /// verdict here, since neither side can be compelled to make progress.
     pub fn build() -> ZeroWallTb {
         Self::build_for(&GameState::new())
@@ -119,13 +119,32 @@ impl ZeroWallTb {
         // template and never change: neither side has one left to place.
         let mut g = template.clone();
 
-        // Precompute the move list for every live (p0, p1, stm).
+        // Which squares each pawn may legally stand on. Walls may legally seal
+        // an empty pocket -- `wall_legal` only protects a path from where the
+        // pawns STAND -- so a pawn dropped in one could never arrive. Left in,
+        // such a state has no winning line, shuffles forever, and is filed as a
+        // repetition draw: a confident exact label for a position no game can
+        // reach. Roughly 7% of a walled board's states are this.
+        let reach = [
+            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
+            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+        ];
+
         let mut moves: Vec<Vec<i16>> = vec![Vec::new(); NSTATES];
-        let mut terminal = vec![false; NSTATES];
+        let mut preds: Vec<Vec<u32>> = vec![Vec::new(); NSTATES];
+        let mut remaining = vec![0u32; NSTATES];
+        let mut finalized = vec![false; NSTATES];
+        // Terminals all sit at distance 0 and every state entered afterwards is
+        // one ply further out, so a FIFO queue visits states in nondecreasing
+        // distance order and no bucket or heap is needed.
+        let mut queue: VecDeque<usize> = VecDeque::new();
 
         for p0 in 0..NCELLS {
+            if !reach[0][p0] {
+                continue;
+            }
             for p1 in 0..NCELLS {
-                if p0 == p1 {
+                if p0 == p1 || !reach[1][p1] {
                     continue;
                 }
                 for stm in 0..2 {
@@ -133,21 +152,23 @@ impl ZeroWallTb {
                     live += 1;
                     // Terminal: a pawn already stands on its goal row.
                     if p0 < 9 {
-                        terminal[idx] = true;
                         tbl[idx] = TbEntry {
                             result: if stm == 0 { TbResult::Win } else { TbResult::Loss },
                             distance: 0,
                             best_move: -1,
                         };
+                        finalized[idx] = true;
+                        queue.push_back(idx);
                         continue;
                     }
                     if p1 >= 72 {
-                        terminal[idx] = true;
                         tbl[idx] = TbEntry {
                             result: if stm == 1 { TbResult::Win } else { TbResult::Loss },
                             distance: 0,
                             best_move: -1,
                         };
+                        finalized[idx] = true;
+                        queue.push_back(idx);
                         continue;
                     }
                     g.pawn[0] = p0;
@@ -160,84 +181,87 @@ impl ZeroWallTb {
             }
         }
 
-        // Fixpoint. Each pass can only resolve states whose verdict follows
-        // from already-resolved children, so it terminates.
-        let mut solved = vec![false; NSTATES];
-        for (i, t) in terminal.iter().enumerate() {
-            solved[i] = *t;
+        // Invert the move relation. A destination is always in the same
+        // component as the square moved from, so a move out of a legal square
+        // can only land on another legal square and no child needs filtering.
+        for idx in 0..NSTATES {
+            if moves[idx].is_empty() {
+                continue;
+            }
+            let stm = idx & 1;
+            let p0 = idx / 2 / NCELLS;
+            let p1 = (idx / 2) % NCELLS;
+            for &mv in &moves[idx] {
+                let dest = mv as usize;
+                let (c0, c1) = if stm == 0 { (dest, p1) } else { (p0, dest) };
+                preds[tb_index(c0, c1, 1 - stm)].push(idx as u32);
+                remaining[idx] += 1;
+            }
         }
 
-        loop {
-            let mut changed = false;
-            for p0 in 0..NCELLS {
-                for p1 in 0..NCELLS {
-                    if p0 == p1 {
-                        continue;
+        // Retrograde analysis in distance order.
+        //
+        // This must NOT be a relaxation fixpoint. The obvious version marks a
+        // state won the moment any one child is known lost and freezes that
+        // distance -- but a later pass can resolve a different child as lost and
+        // nearer, and nothing goes back to shorten it. That is silent: the
+        // verdict stays right while the distance-to-mate reads long, which is
+        // invisible to any test comparing only win/loss against an oracle, and
+        // wrong as a training label. Processing in nondecreasing distance makes
+        // the FIRST time a state is reached its true distance, so it is
+        // finalised once and never revised.
+        while let Some(idx) = queue.pop_front() {
+            let (result, d) = (tbl[idx].result, tbl[idx].distance);
+            // The move that led here, from the predecessor's point of view: the
+            // side that moved is the one NOT to move in this state.
+            let ct = idx & 1;
+            let c0 = idx / 2 / NCELLS;
+            let c1 = (idx / 2) % NCELLS;
+            let dest = if ct == 1 { c0 as i16 } else { c1 as i16 };
+
+            for pi in 0..preds[idx].len() {
+                let p = preds[idx][pi] as usize;
+                if finalized[p] {
+                    continue;
+                }
+                match result {
+                    // A child the opponent loses in makes this a win, and the
+                    // first one found is the shortest.
+                    TbResult::Loss => {
+                        tbl[p] = TbEntry {
+                            result: TbResult::Win,
+                            distance: d + 1,
+                            best_move: dest,
+                        };
+                        finalized[p] = true;
+                        queue.push_back(p);
                     }
-                    for stm in 0..2 {
-                        let idx = tb_index(p0, p1, stm);
-                        if solved[idx] || moves[idx].is_empty() {
-                            continue;
-                        }
-                        let mut best_win: Option<(i16, i16)> = None; // (dist, move)
-                        let mut worst_loss: Option<(i16, i16)> = None;
-                        let mut all_children_win = true;
-
-                        for &mv in &moves[idx] {
-                            let dest = mv as usize;
-                            let (c0, c1) = if stm == 0 { (dest, p1) } else { (p0, dest) };
-                            let cidx = tb_index(c0, c1, 1 - stm);
-                            if !solved[cidx] {
-                                all_children_win = false;
-                                continue;
-                            }
-                            match tbl[cidx].result {
-                                // Child loses for the mover there => we win here.
-                                TbResult::Loss => {
-                                    let d = tbl[cidx].distance + 1;
-                                    if best_win.map_or(true, |(bd, _)| d < bd) {
-                                        best_win = Some((d, mv));
-                                    }
-                                }
-                                TbResult::Win => {
-                                    let d = tbl[cidx].distance + 1;
-                                    if worst_loss.map_or(true, |(bd, _)| d > bd) {
-                                        worst_loss = Some((d, mv));
-                                    }
-                                }
-                                TbResult::Draw => {
-                                    all_children_win = false;
-                                }
-                            }
-                        }
-
-                        if let Some((d, mv)) = best_win {
-                            tbl[idx] = TbEntry {
-                                result: TbResult::Win,
-                                distance: d,
-                                best_move: mv,
+                    // One more child known won. Only when every child is won is
+                    // the state lost, and the child that got it there last is
+                    // the longest resistance -- so this is also the right move
+                    // to record.
+                    TbResult::Win => {
+                        remaining[p] -= 1;
+                        if remaining[p] == 0 {
+                            tbl[p] = TbEntry {
+                                result: TbResult::Loss,
+                                distance: d + 1,
+                                best_move: dest,
                             };
-                            solved[idx] = true;
-                            changed = true;
-                        } else if all_children_win {
-                            if let Some((d, mv)) = worst_loss {
-                                tbl[idx] = TbEntry {
-                                    result: TbResult::Loss,
-                                    distance: d,
-                                    best_move: mv,
-                                };
-                                solved[idx] = true;
-                                changed = true;
-                            }
+                            finalized[p] = true;
+                            queue.push_back(p);
                         }
                     }
+                    TbResult::Draw => {}
                 }
             }
-            if !changed {
-                break;
-            }
         }
 
+        // Anything still unfinalised is a draw by repetition, which is the
+        // `TbEntry` default. Illegal states keep that default too, so a caller
+        // dumping labels must re-run the flood fill and skip them -- the table
+        // deliberately does not carry a legality mask, since at millions of
+        // tables the memory matters more than the convenience.
         ZeroWallTb { tbl, live }
     }
 
@@ -498,6 +522,122 @@ mod tests {
             total += checked;
         }
         assert!(total > 100, "too few states compared: {total}");
+    }
+
+    /// Distance-to-mate must be locally consistent: a win is exactly one ply
+    /// past its NEAREST losing child, a loss exactly one ply past its FURTHEST
+    /// winning child.
+    ///
+    /// This is the check the suite lacked. Every other test here compares only
+    /// win/loss against the oracle, so the old relaxation fixpoint could — and
+    /// did — report a win at distance 5 whose children proved it at 3, and
+    /// nothing failed. Verdicts are what search needs; distances are what a
+    /// TRAINING LABEL needs, and a wrong one is taught as fact.
+    #[test]
+    fn distance_to_mate_is_exact() {
+        let layouts: [&[&str]; 3] = [
+            &["e3h", "c5v", "f6h"],
+            &["b2h", "d4v", "g7h", "e5v"],
+            &["a1h", "c3h", "e5h", "g7h", "d2v", "f6v"],
+        ];
+        for walls in layouts {
+            let mut base = GameState::new();
+            for w in walls {
+                base.make_move(crate::titanium::algebraic_to_move_id(w));
+            }
+            base.wl = [0, 0];
+            let t = ZeroWallTb::build_for(&base);
+            let reach = [
+                crate::titanium::endgame::tb_layers::goal_reachable(&base, 0),
+                crate::titanium::endgame::tb_layers::goal_reachable(&base, 1),
+            ];
+
+            let mut g = base.clone();
+            let mut checked = 0usize;
+            for p0 in 9..81 {
+                if !reach[0][p0] {
+                    continue;
+                }
+                for p1 in 0..72 {
+                    if p0 == p1 || !reach[1][p1] {
+                        continue;
+                    }
+                    for stm in 0..2 {
+                        let e = t.probe_raw(p0, p1, stm);
+                        if e.result == TbResult::Draw {
+                            continue;
+                        }
+                        g.pawn[0] = p0;
+                        g.pawn[1] = p1;
+                        g.turn = stm;
+                        let mut buf = [0i16; 160];
+                        let n = g.gen_pawn_moves(&mut buf, 0);
+
+                        let mut nearest_loss: Option<i16> = None;
+                        let mut furthest_win: Option<i16> = None;
+                        for &mv in &buf[..n] {
+                            let dest = mv as usize;
+                            let (c0, c1) = if stm == 0 { (dest, p1) } else { (p0, dest) };
+                            let c = t.probe_raw(c0, c1, 1 - stm);
+                            match c.result {
+                                TbResult::Loss => {
+                                    if nearest_loss.map_or(true, |b| c.distance < b) {
+                                        nearest_loss = Some(c.distance);
+                                    }
+                                }
+                                TbResult::Win => {
+                                    if furthest_win.map_or(true, |b| c.distance > b) {
+                                        furthest_win = Some(c.distance);
+                                    }
+                                }
+                                TbResult::Draw => {}
+                            }
+                        }
+
+                        let want = match e.result {
+                            TbResult::Win => nearest_loss.map(|d| d + 1),
+                            TbResult::Loss => furthest_win.map(|d| d + 1),
+                            TbResult::Draw => None,
+                        };
+                        if let Some(want) = want {
+                            assert_eq!(
+                                e.distance, want,
+                                "walls={walls:?} p0={p0} p1={p1} stm={stm} {:?}: \
+                                 distance {} but children imply {want}",
+                                e.result, e.distance
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+            assert!(checked > 500, "too few decisive states checked: {checked}");
+        }
+    }
+
+    /// Stranded pawn squares must be left out of the table entirely.
+    ///
+    /// Without this the count silently returns to 12,960 the moment the flood
+    /// fill stops being applied, and the fabricated repetition draws come back
+    /// with it.
+    #[test]
+    fn unreachable_pawn_squares_are_excluded() {
+        use crate::titanium::endgame::tb_layers;
+        let stranding = tb_layers::seed_boards(40, 4242)
+            .into_iter()
+            .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
+            .expect("no stranding board among the seeds");
+        let g = tb_layers::state_from_config(stranding, [0, 0]);
+        let t = ZeroWallTb::build_for(&g);
+        assert_eq!(
+            t.live_states(),
+            tb_layers::live_state_count(stranding),
+            "table must cover exactly the legal pawn states"
+        );
+        assert!(
+            t.live_states() < 81 * 80 * 2,
+            "this board strands squares, so the table must be smaller than the full grid"
+        );
     }
 
     #[test]
