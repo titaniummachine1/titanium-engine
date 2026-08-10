@@ -572,3 +572,40 @@ TOOLING NOTE: `titanium score-out --packed HEX|--moves ... --nodes N` now emits
 generator. `packed` is DATASET convention while its `side_to_move` field is
 ENGINE convention and they are OPPOSITE -- decode with
 titanium_game_from_packed, never read byte 5 against that field.
+
+## Canonicality rule: packed_state is the ONLY truth for side to move
+
+Whose turn it is decides who has tempo, so a convention leak would teach the
+net the position is winning for the wrong player -- silently, on every affected
+row. The engine has TWO conventions and they are OPPOSITE:
+
+  ENGINE   g.turn, and score-out's "side_to_move" field
+  DATASET  packed_state byte 5, which is (1 - g.turn), and where
+           dataset player0 = engine pawn[1], dataset player1 = engine pawn[0]
+
+RULES, no exceptions:
+1. packed_state is canonical. Side to move is byte 5 of packed_state and
+   nowhere else. Never read it from a sibling JSON field, a column, or a
+   filename.
+2. Produce packed bytes ONLY via pack_state(); consume them ONLY via
+   titanium_game_from_packed(). They are exact inverses. Never hand-assemble
+   or hand-parse the 24 bytes.
+3. Every new source -- arena move lists, self-play, score-out rows, retrograde
+   output -- must be REPLAYED THROUGH THE ENGINE to produce packed_state
+   rather than converted by a reimplementation of the rules in Python. A
+   second implementation of the board is a second chance to get the
+   convention wrong.
+
+VERIFIED 2026-08-10 on the existing store: 1,405,888 positions, side_to_move
+column == packed byte 5 on every row, 0 disagreements, 0 malformed, all schema
+version 1. The canonical store is clean; the exposure is at INGESTION of new
+sources.
+
+Run this as a gate after any import:
+
+  select count(*) from positions
+  where side_to_move != cast(substr(packed_state,6,1) as integer)   -- must be 0
+
+(byte 5 is substr index 6, SQLite being 1-based.) Any nonzero result means a
+source was ingested with the wrong convention and every row from it is
+mislabelled for tempo.
