@@ -645,3 +645,41 @@ configuration yields 12,960 exactly-labelled positions.
 
 So this is one change serving both goals: a real O(1) endgame oracle for the
 engine, and exact ground truth for the net.
+
+## NEXT TASK: expand the tablebase by hands, in order (0,0) -> (0,1)/(1,0) -> (1,1) -> (2,1) -> (2,2)
+
+19.4.6 made the (0,0) case work: gated on hands only, solved per wall
+configuration, verified against the per-query oracle. build_for(template) is
+both the engine oracle and the phase-1 label generator (12,960 exact positions
+per configuration).
+
+KEY BY THE PAIR, NOT THE TOTAL. (2,0) and (1,1) are different games; (10,0) and
+(0,10) are opposite. Index (wl[0], wl[1]).
+
+DO NOT START GREENFIELD -- there is prior art to reconcile with:
+  search_impl.rs one_wall_race_bound()  gated on wl[0]+wl[1] == 1
+  search_impl.rs two_wall_race_bound()  gated on the 2-wall total
+Both key on the TOTAL (the symmetric collapse to avoid) and return RaceBound,
+which is a bound, not necessarily an exact verdict. Decide deliberately whether
+the new tables replace these or sit above them, and check whether RaceBound is
+exact before trusting it as a label.
+
+WHAT CHANGES AT (0,1). The (0,0) solver assumes NO wall moves exist, so its
+move list is pawn-only and the configuration is fixed for the whole solve.
+With one wall in hand:
+  - the side holding it has ~128 extra moves
+  - each placement leads to a DIFFERENT configuration, one that (0,0) solves
+  - so the recursion is: pawn moves stay in this table, wall placements drop
+    into an already-solvable (0,0) table for the new configuration
+That is the memoisation boundary. Cache (0,0) tables by (hw_bits, vw_bits) --
+table_for() already does this -- and (0,1) becomes cheap per position but
+~128 configurations wide.
+
+COST LADDER: each wall in hand multiplies by ~128 placements. (1,1) is ~128^2
+before memoisation collapses it. Measure the HIT RATE at (1,1) first: it sets
+the real ceiling far more than disk does.
+
+STILL THREE-VALUED. TbResult is Loss/Draw/Win and the fixpoint treats
+unresolved-at-convergence as a repetition draw. Keep that -- with walls in hand
+pawns can shuffle, so draws are real and a win/loss-only solver would mislabel
+them.
