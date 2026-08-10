@@ -609,3 +609,39 @@ Run this as a gate after any import:
 (byte 5 is substr index 6, SQLite being 1-based.) Any nonzero result means a
 source was ingested with the wrong convention and every row from it is
 mislabelled for tempo.
+
+## BUG: the zero-wall tablebase can never fire in a real game
+
+tb_zero::applies() gates every probe on:
+
+    g.hw_bits == 0 && g.vw_bits == 0 && g.wl[0] == 0 && g.wl[1] == 0
+
+No walls on the board AND both players holding zero. In a real game those are
+mutually exclusive: if both players have spent their walls then TWENTY walls
+are on the board, so hw_bits == 0 is false. The condition is unsatisfiable in
+actual play, so ZeroWallTb::probe returns None for every real position and the
+table is reachable only from hand-constructed states.
+
+The handoff entry "zero-wall tablebase is intact and merged" is therefore
+misleading: it builds, it is correct for what it models, and it never runs.
+Its only live consumer is cert_bridge.rs:386, which falls through to
+hands_empty_race_stm_wins -- the per-query race computation the table was
+supposed to replace with an O(1) lookup.
+
+NOT sabotage, a scoping error. "Zero-wall" reads two ways -- no walls IN HAND
+(the useful subgame, walls are scenery) versus no walls ANYWHERE (what was
+built). The solver itself is good work and should be kept: fixpoint retrograde
+with correct cycle handling (win when one child loses, loss only when every
+child wins, unresolved at fixpoint = draw by repetition), three-valued
+TbResult, distance-to-mate and best move, and it reuses gen_pawn_moves so it
+can never disagree with engine movegen.
+
+FIX: drop the hw_bits/vw_bits == 0 requirement, keep wl[0] == 0 && wl[1] == 0,
+and index the table by wall configuration. Same 12,960 pawn states per
+configuration, same retrograde, walls become fixed scenery affecting only
+adjacency. That makes it fire on every genuinely broke endgame -- and it is
+simultaneously the phase-1 training-data generator, since each solved
+configuration yields 12,960 exactly-labelled positions.
+
+So this is one change serving both goals: a real O(1) endgame oracle for the
+engine, and exact ground truth for the net.
