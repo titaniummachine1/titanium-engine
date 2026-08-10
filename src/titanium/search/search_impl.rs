@@ -94,8 +94,9 @@ pub use super::v16_lmr::ace_graduated_lmr_reduction;
 const Q_SEARCH_MAX_DEFAULT: i32 = 4;
 /// Static-eval swing threshold in cp (Ka `qSwing=0.15` on a ~400cp net scale).
 const Q_SWING_CP_DEFAULT: i32 = 60;
-/// Saturates wall history near 1.05M, above pawn-progress scores, so history
-/// affects wall ordering without changing the pawn progress bands.
+/// Wall history saturation. This is the raw table bound; `ORD_QUIET_CEIL` is
+/// what ordering is allowed to see, so a saturated entry can no longer climb
+/// out of the quiet tier.
 const SF_HIST_MAX: i32 = 1 << 20;
 
 /// Pawn progress changes ordering by 1000 points for each shortest-path step.
@@ -103,6 +104,48 @@ const SF_HIST_MAX: i32 = 1 << 20;
 /// most-disfavoured one-step-faster pawn move still outranks the most-favoured
 /// one-step-slower move (a minimum two-point margin).
 const SF_PAWN_HISTORY_TIEBREAK_MAX: i32 = 499;
+
+// Move-ordering tiers, best first. These are bands, not points: every score a
+// tier can emit lies strictly inside its own range, so the tier order is a
+// property of the scheme rather than something that happens to hold for the
+// values we see. Two things used to violate that.
+//
+// A pawn move scored `1_000_000 - dist*1000`, so with any reachable
+// destination (dist <= 20) it landed at 980k or above — ABOVE killer[0] at
+// 900k. Walking sideways or backwards outranked a wall that had just caused a
+// cutoff at this exact ply. A static guess beat measured evidence, always,
+// with no way to express the opposite.
+//
+// And wall history saturated at 1.05M, ABOVE the pawn band, while killers sat
+// below it. The same claim ("this wall is good") was made on two scales that
+// straddled the pawn tier from opposite sides, so which of a killer and a
+// well-scoring history wall came first depended on which mechanism happened to
+// fire, not on which was better evidence.
+//
+// Now: exact evidence for this node, then progress toward the goal, then
+// measured evidence from siblings, then the pawn moves that make no progress,
+// then unproven quiets.
+const ORD_TT: i32 = 2_000_000_000;
+/// Progressing pawn move: `ORD_PAWN_PROGRESS - dist*1000 +/- 499`.
+/// Measured: the refutation is a pawn move at rank 0 in 54-87% of cutoffs, so
+/// this prior keeps its place at the top. Only the non-progressing moves that
+/// rode along with it are demoted.
+const ORD_PAWN_PROGRESS: i32 = 1_000_000;
+const ORD_KILLER_0: i32 = 900_000;
+const ORD_COUNTERMOVE: i32 = 870_000;
+const ORD_KILLER_1: i32 = 850_000;
+/// Sideways / backward pawn move: `ORD_PAWN_IDLE - dist*1000`, floored by the
+/// `ORD_MAX_DIST` clamp at 800_000. Still above unproven quiets — it is a legal
+/// reply worth looking at — but no longer above a proven refutation.
+const ORD_PAWN_IDLE: i32 = 820_000;
+/// Ceiling on what history may contribute, keeping the quiet tail strictly
+/// below every tier above. Ordering among quiets is unchanged: real history
+/// values live three orders of magnitude below this.
+const ORD_QUIET_CEIL: i32 = 700_000;
+/// Distance clamp for the pawn bands. A pawn move whose destination cannot
+/// reach the goal is illegal, so this only guards against the `DIST_PENALTY`
+/// sentinel leaking in and dragging a score out of its band.
+const ORD_MAX_DIST: i32 = 20;
 
 /// Compress the saturated SF history range into a pawn-only ordering tie-break.
 /// The clamp also makes the bound hold if a caller seeds a table entry directly.
@@ -5830,10 +5873,12 @@ impl TitaniumSearch {
         self.order_moves_prior(ply, moves, tt_move, cm_move, 0, None);
     }
 
-    /// Ordering: TT > pawn progress > killers > countermove > history. CAT heat
-    /// is a fallback prior ONLY for walls the history table is silent on
-    /// (h == 0), and never for tail moves (≤ 10% of node max attention) — so
-    /// insignificant walls get no ordering credit they haven't earned.
+    /// Ordering: TT > progressing pawn > killer[0] > countermove > killer[1] >
+    /// idle pawn > history. CAT heat is a fallback prior ONLY for walls the
+    /// history table is silent on (h == 0), and never for tail moves (≤ 10% of
+    /// node max attention) — so insignificant walls get no ordering credit they
+    /// haven't earned. See the ORD_* constants for why the tiers sit where they
+    /// do.
     fn order_moves_prior(
         &self,
         ply: usize,
@@ -5851,26 +5896,38 @@ impl TitaniumSearch {
         let k = &self.killers[ply];
         let n = moves.len();
         let mut sc = [0i32; 160];
+        // Distance from where the pawn stands now, so "does this move make
+        // progress" is a comparison and not an assumption.
+        let cur_dist = i32::from(dist_to_goal_at(self.g.pawn[self.g.turn] as u8));
         for i in 0..n {
             let m = moves[i];
+            let pawn_dist = if is_pawn_move(m) {
+                i32::from(dist_to_goal_at(m as u8)).min(ORD_MAX_DIST)
+            } else {
+                0
+            };
             sc[i] = if m == tt_move {
-                2_000_000_000
-            } else if is_pawn_move(m) {
-                let progress = 1_000_000 - dist_to_goal_at(m as u8) as i32 * 1000;
+                ORD_TT
+            } else if is_pawn_move(m) && pawn_dist < cur_dist {
                 // History is only a ±499 tie-break; one shortest-path step
                 // remains worth 1000 points.
-                progress + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
+                ORD_PAWN_PROGRESS - pawn_dist * 1000
+                    + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
             } else if m == k[0] {
-                900_000
+                ORD_KILLER_0
             } else if m == cm_move {
-                870_000
+                ORD_COUNTERMOVE
             } else if m == k[1] {
-                850_000
+                ORD_KILLER_1
+            } else if is_pawn_move(m) {
+                // Sideways or backward: a real reply, but not evidence.
+                ORD_PAWN_IDLE - pawn_dist * 1000
             } else {
                 // main history + half-weight continuation history (reply
                 // quality to the specific previous move); CAT heat stays the
                 // fallback only when BOTH stat surfaces are silent.
-                let h = self.move_hist(self.g.turn, m) + self.cont_hist_read(prev_move, m) / 2;
+                let h = (self.move_hist(self.g.turn, m) + self.cont_hist_read(prev_move, m) / 2)
+                    .clamp(-ORD_QUIET_CEIL, ORD_QUIET_CEIL);
                 if h != 0 {
                     h
                 } else if let Some((heat, max_h)) = cat_prior {
