@@ -70,6 +70,7 @@ fn main() {
         "score-out" => run_score_out(&args),
         "tbgen" => run_tbgen(&args),
         "tbdump" => run_tbdump(&args),
+        "tblayers" => run_tblayers(&args),
         "fields" => run_fields(&args),
         // One engine, reached without ceremony. There used to be a flag, and an
         // unrecognised value -- including none at all, or a version newer than
@@ -780,6 +781,95 @@ fn run_cat_packed_batch() {
 /// Phase-1 label generator: solve the broke-hands subgame for ONE wall
 /// configuration and emit every state as exact ground truth.
 ///
+/// `titanium tblayers [--seeds N] [--depth K] [--rng S] [--out FILE]`
+///
+/// Enumerate the wall CONFIGURATIONS each tablebase tier has to cover, by
+/// peeling walls off full 20-wall boards. Layer k has `20 - k` walls placed and
+/// therefore k walls in hand.
+///
+/// This generates positions only. Who is owed the removed wall is not part of a
+/// configuration -- it does not change the board, and it matters only once these
+/// are handed to a solver.
+///
+/// Output is one JSONL row per configuration: `{layer, walls, hw, vw}`.
+fn run_tblayers(args: &[String]) {
+    use titanium::titanium::endgame::tb_layers;
+    let mut seeds = 1usize;
+    let mut depth = 4usize;
+    let mut rng = 0x5eedu64;
+    let mut out_path = None::<String>;
+    let mut i = 2usize;
+    while i < args.len() {
+        let val = args.get(i + 1).and_then(|s| s.parse::<u64>().ok());
+        match args[i].as_str() {
+            "--seeds" => {
+                seeds = val.unwrap_or(1) as usize;
+                i += 2;
+            }
+            "--depth" => {
+                depth = val.unwrap_or(4) as usize;
+                i += 2;
+            }
+            "--rng" => {
+                rng = val.unwrap_or(0x5eed);
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let t0 = std::time::Instant::now();
+    let boards = tb_layers::seed_boards(seeds, rng);
+    if boards.len() < seeds {
+        eprintln!(
+            "warning: only {} of {seeds} seed boards generated (the rest saturated before 20 walls)",
+            boards.len()
+        );
+    }
+    let layers = tb_layers::expand(&boards, depth);
+
+    let mut total = 0usize;
+    for (k, layer) in layers.iter().enumerate() {
+        total += layer.len();
+        println!(
+            "layer {k}: {:>8} configurations, {} walls on board, {} in hand",
+            layer.len(),
+            20 - k,
+            k
+        );
+    }
+    println!(
+        "total {total} configurations from {} seeds in {:.2}s",
+        boards.len(),
+        t0.elapsed().as_secs_f64()
+    );
+
+    if let Some(path) = out_path {
+        let mut buf = String::new();
+        for (k, layer) in layers.iter().enumerate() {
+            // Sorted so the file is reproducible: a HashSet iterates in an
+            // arbitrary order, and a dataset that differs run to run cannot be
+            // diffed when something later disagrees.
+            let mut rows: Vec<_> = layer.iter().copied().collect();
+            rows.sort_unstable();
+            for (hw, vw) in rows {
+                buf.push_str(&format!(
+                    "{{\"layer\":{k},\"walls\":{},\"hw\":{hw},\"vw\":{vw}}}\n",
+                    20 - k
+                ));
+            }
+        }
+        match std::fs::write(&path, buf) {
+            Ok(()) => println!("wrote {path}"),
+            Err(e) => eprintln!("error writing {path}: {e}"),
+        }
+    }
+}
+
 /// `titanium tbdump --moves e2 e8 e3h ... [--out FILE]`
 ///
 /// The move list supplies the walls; hands are then forced empty, which is the
