@@ -146,6 +146,10 @@ const ORD_QUIET_CEIL: i32 = 700_000;
 /// reach the goal is illegal, so this only guards against the `DIST_PENALTY`
 /// sentinel leaking in and dragging a score out of its band.
 const ORD_MAX_DIST: i32 = 20;
+/// Slots for the pawn-move promotion fixup. A pawn has at most four orthogonal
+/// steps, and a jump replaces the forward step with at most two diagonals, so
+/// five is the true ceiling; eight leaves room and keeps the array cache-cheap.
+const ORD_MAX_PAWN_MOVES: usize = 8;
 
 /// Compress the saturated SF history range into a pawn-only ordering tie-break.
 /// The clamp also makes the bound hold if a caller seeds a table entry directly.
@@ -5902,35 +5906,49 @@ impl TitaniumSearch {
         // distance field being current at ordering time, which it is not
         // guaranteed to be — the original scoring only ever used this field
         // relatively, and that is the property worth keeping.
+        // Knowing which pawn move is best needs the minimum before any pawn
+        // move can be scored, but a second pass over the whole list to find it
+        // costs ~130 iterations at every node. Instead: score pawn moves into
+        // the idle band on the way past, remember where they are, then promote
+        // the ones that tie. A position has at most a handful of legal pawn
+        // moves, so the fixup is O(pawn moves), not O(moves).
+        let mut pawn_at = [(0usize, 0i32); ORD_MAX_PAWN_MOVES];
+        let mut pawn_n = 0usize;
         let mut best_pawn_dist = i32::MAX;
         for i in 0..n {
-            if is_pawn_move(moves[i]) {
-                best_pawn_dist = best_pawn_dist.min(i32::from(dist_to_goal_at(moves[i] as u8)));
-            }
-        }
-        for i in 0..n {
             let m = moves[i];
-            let pawn_dist = if is_pawn_move(m) {
-                i32::from(dist_to_goal_at(m as u8)).min(ORD_MAX_DIST)
+            // The minimum is taken over EVERY pawn move, the TT move included.
+            // Scoring the TT move first and skipping it here would hide the
+            // best step from the comparison whenever the TT move is that step,
+            // promoting a different set of moves — measured as differing node
+            // counts, which is how this was caught.
+            //
+            // `best` tracks the RAW distance while the score uses the clamped
+            // one, matching the two-pass version exactly so this stays a pure
+            // speed change with identical ordering.
+            let pawn_raw = if is_pawn_move(m) {
+                let raw = i32::from(dist_to_goal_at(m as u8));
+                best_pawn_dist = best_pawn_dist.min(raw);
+                raw
             } else {
                 0
             };
             sc[i] = if m == tt_move {
                 ORD_TT
-            } else if is_pawn_move(m) && pawn_dist == best_pawn_dist {
-                // History is only a ±499 tie-break; one shortest-path step
-                // remains worth 1000 points.
-                ORD_PAWN_PROGRESS - pawn_dist * 1000
-                    + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m))
+            } else if is_pawn_move(m) {
+                let d = pawn_raw.min(ORD_MAX_DIST);
+                if pawn_n < pawn_at.len() {
+                    pawn_at[pawn_n] = (i, d);
+                    pawn_n += 1;
+                }
+                // Provisional; promoted below when it ties the best step.
+                ORD_PAWN_IDLE - d * 1000
             } else if m == k[0] {
                 ORD_KILLER_0
             } else if m == cm_move {
                 ORD_COUNTERMOVE
             } else if m == k[1] {
                 ORD_KILLER_1
-            } else if is_pawn_move(m) {
-                // Sideways or backward: a real reply, but not evidence.
-                ORD_PAWN_IDLE - pawn_dist * 1000
             } else {
                 // main history + half-weight continuation history (reply
                 // quality to the specific previous move); CAT heat stays the
@@ -5955,6 +5973,31 @@ impl TitaniumSearch {
                     0
                 }
             };
+        }
+        debug_assert!(
+            pawn_n < pawn_at.len(),
+            "more legal pawn moves ({pawn_n}) than the promotion array holds"
+        );
+        // Promote the best step(s). Killer and countermove checks are repeated
+        // here because the single pass had to claim every pawn move before the
+        // minimum was known; killers are only ever set for wall moves, so those
+        // two arms are unreachable in practice and exist to keep this exactly
+        // equivalent to the tier chain rather than nearly so.
+        for j in 0..pawn_n {
+            let (i, d) = pawn_at[j];
+            let m = moves[i];
+            if d == best_pawn_dist {
+                // History is only a ±499 tie-break; one shortest-path step
+                // remains worth 1000 points.
+                sc[i] = ORD_PAWN_PROGRESS - d * 1000
+                    + sf_pawn_history_tiebreak(self.move_hist(self.g.turn, m));
+            } else if m == k[0] {
+                sc[i] = ORD_KILLER_0;
+            } else if m == cm_move {
+                sc[i] = ORD_COUNTERMOVE;
+            } else if m == k[1] {
+                sc[i] = ORD_KILLER_1;
+            }
         }
         if ply == 0 {
             if let Some(order) = &self.opening_book_order {
