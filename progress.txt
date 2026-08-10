@@ -27,3 +27,42 @@
 - main branch: 14d2348 (all files committed, CI passes)
 - WASM: titanium-v19, 3.0MB, wasm-threads enabled
 - Website: https://titaniummachine1.github.io/Titanium-Website/
+
+### Certificate: slack measured, DFPN retired (2026-08-10)
+
+Question: the certifier proves wins only in a restricted subgame -- S may step
+strictly toward goal, plus one equal-distance re-commit after an opponent wall.
+Any win needing a sideways step is unprovable by construction (the motivating
+case is arena game 1922, where the winning moves were b3 and a4-sideways).
+certify_dfpn on feat/dfpn-certificate exists to lift that restriction with a
+full AND/OR proof search, 433 lines plus GHI-safety machinery.
+
+Measured the cheap version instead: a slack budget of N non-improving steps,
+sound for free because restricting the maximiser can never create a false
+positive. Equal-distance-only slack (switching between equally short routes)
+beat any-non-improving slack at identical rescues and up to 65% fewer nodes --
+a backward step is wandering, not another shortest path.
+
+Result over 1800 random low-wall positions:
+
+  walls   slack0 proves   slack1 rescues   nodes/pos 0 -> 1
+   <= 2    579/600 96.5%    +2  (9.5%)        126 -> 231
+   <= 4    550/600 91.7%    +0  (0.0%)        411 -> 422
+   <= 8    549/600 91.5%    +2  (3.9%)        169 -> 218
+
+  slack 2 and 3 rescue nothing beyond slack 1, at any budget.
+
+So: +4 positions in 1800 (0.2%) for 3-83% more certify nodes. Left at 0.
+
+The finding that matters is negative: the toward-goal restriction is NOT what
+limits the certifier. It already proves 91-96%; the failures are positions
+where the win is not forced, or the node budget ran out -- not positions where
+a sideways step was forbidden. DFPN's entire premise is lifting that
+restriction, so it would be solving the wrong problem. Retired, not merged.
+
+Old DFPN gates cannot be used as evidence either way: 52W-71L over 123 games is
+p = 0.087 (interval -120..+8, contains zero), the per-move telemetry is
+statistically identical to main (same think time, depth, stop-reason mix), so
+the feature was almost certainly inert, and the runs used 541 human openings
+rather than the 39 arena lines. The branch is also pre-purge and reintroduces
+legacy_search; it does not build.
