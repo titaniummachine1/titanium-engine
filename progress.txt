@@ -228,3 +228,69 @@ main is at 19.4.3, pushed, clean. Everything below is context.
 - With pondering off only one side searches at a time, so 8 workers x 2 threads
   is still only 8 active threads. Running 4 workers left half the machine idle;
   verify 8 works before the next long gate.
+
+
+================================================================
+SESSION 2026-08-10 (later) — what shipped, and what is parked
+================================================================
+
+main is at 19.4.5, pushed.
+
+## Shipped
+
+- 19.4.4  CRITICAL: out-of-bounds TT probe killed the engine mid-search in
+          roughly one game in four under Lazy SMP. A worker's `tt_mask`
+          describes the SHARED table while `tt_meta`/`tt_key_*` keep the local
+          array size; ordered_root_moves_snapshot fell back to a local probe
+          masked with the shared mask. "len is 1048576 but the index is
+          2480225". Regression test verified to FAIL without the fix.
+          Invisible for months because the harness ran engines with
+          stderr=DEVNULL and a dead engine merely stopped answering until the
+          read deadline expired -- scored as an ordinary loss on time.
+- 19.4.5  Move-ordering tiers. Killers no longer sit below every pawn move;
+          wall history can no longer climb out of the quiet tier. Gate 53-47,
+          +21 Elo, CI [-47,+91] -- merged on CORRECTNESS, not strength.
+- harness  stall detection + game replay, crash capture with panic text,
+          instant death detection, per-move memory telemetry (rss, commit,
+          page faults, sys free), launcher cleanup fixed (it matched a
+          process named "titanium" and never our actual engine binaries).
+
+## Parked but still promising -- worth re-testing, do not re-derive
+
+1. CONTINUATION HISTORY over 1/2/4/6 plies (branch hist/continuation-stack,
+   committed, rebased on 19.4.5, 338 tests pass). Gate vs 19.4.5: 49-51,
+   -7 Elo, CI [-76,+62]. Pair analysis: 11 pairs swept by candidate, 12 by
+   baseline, sign test p=1.000. NOT merged.
+   Why keep it: it halved root best-move-changes (2.5 vs 4.9), so the signal
+   is real, it just does not convert. Ordering only pays when the values being
+   ordered are worth trusting -- retest AFTER the eval improves. Weights
+   [2,2,1,1]/4 are chosen so a node with no deeper context scores exactly as
+   before, so a null result is interpretable rather than confounded.
+
+2. feat/patience-only -- untouched this session, still one clean gate away.
+
+## Measured, do not repeat
+
+- Cutoff-rank histogram: rank 0 is 58-89% of cutoffs, rank <=7 is 97-99%,
+  essentially nothing past rank 12. Ordering is not hiding refutations.
+- CAT's LMR reduction call: re-search rate 0.03-0.09% in the dead-tail band
+  and RISING with attention (1.7-2.8% at 90-100%). A learned replacement for
+  that decision has ~0.1% to win. cat_v16_lmr_reduction_plies and the
+  CAT_TAIL_DEAD_RATIO_PCT / CAT_COLD_CM thresholds are DEAD CODE.
+- nps is not measurable at this granularity: run-to-run spread on ONE binary
+  reached 29.6% on the same position. Do not attribute nps deltas to code
+  changes without hundreds of samples.
+- Fixed-depth node counts are dominated by search-instability cascades: one
+  position swung +166% at depth 11 and -64% at depth 12 for the same change.
+  Aggregate over positions AND depths, or do not use it.
+
+## The eval is the open lever
+
+The net CANNOT SEE WALLS IN HAND. Input is wall slots + pawn positions,
+bucketed by NET_BKT[pawn] (a pawn-position bucket). wl[0]/wl[1] reach only the
+hand-crafted scalars in evaluate_tail, after the net has run. A placed wall is
+owner-agnostic, so for an identical board the net's input is byte-identical
+whether the split is (10,0), (5,5) or (0,10) -- three completely different
+positions fitted with one blended estimate.
+
+Live net: h=32, f64 throughout, 343 KB, inherited from ACE v13.
