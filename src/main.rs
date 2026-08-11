@@ -795,9 +795,14 @@ fn run_tbsolve(args: &[String]) {
     let mut hands = [1i32, 1i32];
     let mut rng = 0x5eedu64;
     let mut certify = false;
+    let mut index = 0usize;
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
+            "--index" if i + 1 < args.len() => {
+                index = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
             "--hands" if i + 1 < args.len() => {
                 let parts: Vec<i32> = args[i + 1]
                     .split(',')
@@ -828,10 +833,17 @@ fn run_tbsolve(args: &[String]) {
         std::process::exit(1);
     };
     let layers = tb_layers::expand(&[seed], total);
-    let Some(&config) = layers[total].iter().next() else {
+    // Sorted, not `HashSet::iter().next()`. Rust randomises the hash seed per
+    // process, so taking the first element of a set silently solves a DIFFERENT
+    // configuration on every run -- which made these measurements irreproducible
+    // and looked like the solver was nondeterministic.
+    let mut candidates: Vec<_> = layers[total].iter().copied().collect();
+    candidates.sort_unstable();
+    if candidates.is_empty() {
         eprintln!("error: layer {total} is empty");
         std::process::exit(1);
-    };
+    }
+    let config = candidates[index % candidates.len()];
     let g = tb_layers::state_from_config(config, hands);
     assert_eq!(
         tb_layers::wall_count(config) as i32 + hands[0] + hands[1],
@@ -859,7 +871,17 @@ fn run_tbsolve(args: &[String]) {
         s.hit_rate() * 100.0,
         s.bytes() as f64 / 1e6
     );
-    println!("this tier's table: win={w} loss={l} draw={d}");
+    // Separate real draws from the illegal pawn states, which also sit at the
+    // `TbEntry` default of Draw. Conflating them makes a table look like it
+    // found mutual zugzwang when it only skipped unreachable squares.
+    let excluded = 81 * 80 * 2 - tb_layers::live_state_count(config);
+    let real_draws = d.saturating_sub(excluded);
+    println!(
+        "this tier's table: win={w} loss={l} | draws: {real_draws} real, {excluded} excluded as illegal"
+    );
+    if real_draws > 0 {
+        println!("  ^ mutual zugzwang: neither side can force a win");
+    }
 
     if certify {
         let t1 = std::time::Instant::now();

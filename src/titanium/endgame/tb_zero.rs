@@ -40,6 +40,25 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TbResult {
     Loss,
+    /// Neither side can force a win.
+    ///
+    /// NOT the threefold-repetition rule. This table is keyed on
+    /// `(p0, p1, stm)` and carries no move history, so it could not count
+    /// repetitions even in principle. What it holds is the game VALUE: under
+    /// perfect play the position never resolves, and because the state space is
+    /// finite that shows up over the board as a repetition. The rule is how the
+    /// value becomes a result; the value is what a tablebase stores.
+    ///
+    /// This is the entry for mutual zugzwang, and it falls out of the retrograde
+    /// rather than being special-cased: a state becomes a LOSS only once every
+    /// child is a WIN, so one drawing child leaves it unresolved forever. When
+    /// each side would lose by committing — run for the goal and the opponent's
+    /// wall traps you, and the same is true in reverse — neither can be
+    /// compelled to break first, and both shuffle.
+    ///
+    /// Illegal pawn states also end up here, since `TbEntry::default()` is a
+    /// draw and the flood fill never visits them. A caller counting real draws
+    /// must subtract the excluded states — see `tb_layers::live_state_count`.
     Draw,
     Win,
 }
@@ -991,7 +1010,7 @@ mod tests {
         // Whoever is owed the peeled wall is what makes (1,0) and (0,1)
         // different games on the same board, so check both.
         for hands in [[1, 0], [0, 1]] {
-            let config = *layer1[1].iter().next().expect("layer 1 is empty");
+            let config = tb_layers::pick(&layer1[1], 0).expect("layer 1 is empty");
             let g = tb_layers::state_from_config(config, hands);
             assert_eq!(
                 tb_layers::wall_count(config) as i32 + g.wl[0] + g.wl[1],
@@ -1021,10 +1040,8 @@ mod tests {
     fn holding_a_wall_never_hurts() {
         use crate::titanium::endgame::tb_layers;
         let seed = tb_layers::seed_boards(1, 555)[0];
-        let config = *tb_layers::expand(&[seed], 1)[1]
-            .iter()
-            .next()
-            .expect("layer 1 is empty");
+        let config =
+            tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1 is empty");
 
         let mut s = TbSolver::new();
         // Same board, same pawns: once with the wall in hand, once after it is
@@ -1075,10 +1092,8 @@ mod tests {
     fn who_holds_the_wall_changes_the_answer() {
         use crate::titanium::endgame::tb_layers;
         let seed = tb_layers::seed_boards(1, 0x5eed)[0];
-        let config = *tb_layers::expand(&[seed], 2)[2]
-            .iter()
-            .next()
-            .expect("layer 2 is empty");
+        let config =
+            tb_layers::pick(&tb_layers::expand(&[seed], 2)[2], 0).expect("layer 2 is empty");
         let reach = [
             tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 0),
             tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 1),

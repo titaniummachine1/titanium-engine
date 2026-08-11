@@ -239,6 +239,22 @@ pub fn layer_state_census(layer: &HashSet<Config>) -> (usize, usize) {
     (live, layer.len() * 81 * 80 * 2)
 }
 
+/// Pick one configuration from a layer, deterministically.
+///
+/// Never use `HashSet::iter().next()` for this. Rust randomises the hash seed
+/// per process, so the "first" element is a different board on every run — a
+/// test written that way passes and fails at random, and a measurement written
+/// that way reports a different configuration each time while looking like
+/// nondeterminism in the solver.
+pub fn pick(layer: &HashSet<Config>, index: usize) -> Option<Config> {
+    if layer.is_empty() {
+        return None;
+    }
+    let mut v: Vec<Config> = layer.iter().copied().collect();
+    v.sort_unstable();
+    Some(v[index % v.len()])
+}
+
 /// Deterministic xorshift. Seeds must be reproducible: a layer set that cannot
 /// be regenerated is not a dataset, and `Math.random`-style nondeterminism here
 /// would make any later disagreement impossible to investigate.
