@@ -904,6 +904,9 @@ fn run_tbsolve(args: &[String]) {
         println!("  ^ mutual zugzwang: neither side can force a win");
     }
 
+    let (maxd, over) = table.distance_extremes();
+    println!("max distance {maxd} plies, {over} states exceed i8 (+/-127)");
+
     if let Some(path) = &save {
         match s.save(path) {
             Ok(n) => {

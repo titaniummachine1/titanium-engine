@@ -398,40 +398,100 @@ impl ZeroWallTb {
     //   8..16  content hash u64 LE (over the record bytes)
 
     pub const MAGIC: &'static [u8; 4] = b"TBZW";
-    /// v2 stores `live` in the two bytes v1 left reserved.
+    /// v3 packs an entry into TWO bytes instead of five.
     ///
-    /// v1 reconstructed it as `81 * 80 * 2`, which stopped being true once the
-    /// flood fill began excluding pawn squares that cannot reach a goal. A
-    /// reloaded table would have claimed states it does not cover.
-    pub const VERSION: u16 = 2;
+    ///   byte 0  i8 score: `+(k+1)` win in k plies, `-(k+1)` loss in k, `0` draw
+    ///   byte 1  u8 move index, `NO_MOVE` when there is none
+    ///
+    /// The sign carries the result, so `result` stops being a stored field.
+    ///
+    /// WHY THE `k+1` OFFSET, given a terminal is decidable from the coordinates
+    /// and could be rebuilt on decode instead. Because `0` would then carry
+    /// THREE meanings, not two: draw, terminal, and ILLEGAL. Terminals are
+    /// recoverable from `p0 < 9` / `p1 >= 72`; illegal states are not, because
+    /// deciding those needs the wall configuration and the decoder does not have
+    /// it. Rebuilding terminals unconditionally therefore relabels every
+    /// excluded pawn state as a win -- exactly the fabricated-label bug the
+    /// flood fill exists to prevent, reintroduced through the encoding.
+    ///
+    /// With the offset, `0` means one thing: not decisive. The cost is a ceiling
+    /// of 126 rather than 127 plies, against a measured maximum of 35.
+    ///
+    /// Move ids fit a byte already: pawn destinations are 0..80 and wall moves
+    /// 81..208, the same pseudo-legal index the rest of the engine uses.
+    ///
+    /// v2 (five bytes) is still READ so packs solved before this change stay
+    /// usable -- tier 3 costs 19 minutes a configuration and throwing that away
+    /// to change a file format would be its own bug.
+    pub const VERSION: u16 = 3;
     pub const HEADER_LEN: usize = 16;
-    pub const RECORD_LEN: usize = 5;
+    pub const RECORD_LEN: usize = 2;
+    /// Sentinel in the move byte for "no move". Real ids never reach it.
+    pub const NO_MOVE: u8 = 0xFF;
+
+    /// Record width of a given format version, so a pack can carry tables
+    /// written before the width changed.
+    pub fn record_len_for(version: u16) -> Option<usize> {
+        match version {
+            2 => Some(5),
+            3 => Some(2),
+            _ => None,
+        }
+    }
 
     /// FNV-1a over the record bytes. Used to version the table and to detect a
     /// corrupt or stale file at load time.
     pub fn content_hash(&self) -> u64 {
+        self.try_content_hash().unwrap_or(0)
+    }
+
+    fn try_content_hash(&self) -> Result<u64, String> {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for e in &self.tbl {
-            for b in Self::encode_entry(e) {
+            for b in Self::encode_entry(e)? {
                 h ^= b as u64;
                 h = h.wrapping_mul(0x0000_0100_0000_01b3);
             }
         }
-        h
+        Ok(h)
     }
 
-    fn encode_entry(e: &TbEntry) -> [u8; 5] {
-        let r = match e.result {
-            TbResult::Loss => 0u8,
-            TbResult::Draw => 1,
-            TbResult::Win => 2,
+    /// Pack an entry into two bytes. Returns `Err` rather than truncating: a
+    /// distance past the range would otherwise be written as a DIFFERENT, valid
+    /// looking label, which is the one failure mode a training set cannot
+    /// survive.
+    fn encode_entry(e: &TbEntry) -> Result<[u8; 2], String> {
+        let score: i16 = match e.result {
+            TbResult::Draw => 0,
+            TbResult::Win => e.distance + 1,
+            TbResult::Loss => -(e.distance + 1),
         };
-        let d = e.distance.to_le_bytes();
-        let m = e.best_move.to_le_bytes();
-        [r, d[0], d[1], m[0], m[1]]
+        if !(-127..=127).contains(&score) {
+            return Err(format!(
+                "distance {} does not fit a signed byte (score {score});                  the two-byte label format assumes forced wins stay under 127 plies",
+                e.distance
+            ));
+        }
+        let mv = if e.best_move < 0 || e.best_move > 254 {
+            Self::NO_MOVE
+        } else {
+            e.best_move as u8
+        };
+        Ok([score as i8 as u8, mv])
     }
 
     fn decode_entry(b: &[u8]) -> Result<TbEntry, String> {
+        let score = b[0] as i8 as i16;
+        let mv = if b[1] == Self::NO_MOVE { -1 } else { b[1] as i16 };
+        Ok(match score {
+            0 => TbEntry { result: TbResult::Draw, distance: -1, best_move: mv },
+            s if s > 0 => TbEntry { result: TbResult::Win, distance: s - 1, best_move: mv },
+            s => TbEntry { result: TbResult::Loss, distance: -s - 1, best_move: mv },
+        })
+    }
+
+    /// v2's five-byte record, kept so older packs still load.
+    fn decode_entry_v2(b: &[u8]) -> Result<TbEntry, String> {
         let result = match b[0] {
             0 => TbResult::Loss,
             1 => TbResult::Draw,
@@ -446,43 +506,80 @@ impl ZeroWallTb {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes().expect("table does not fit the two-byte label format")
+    }
+
+    /// Serialise, refusing rather than truncating if an entry will not fit.
+    pub fn try_to_bytes(&self) -> Result<Vec<u8>, String> {
         let mut out = Vec::with_capacity(Self::HEADER_LEN + NSTATES * Self::RECORD_LEN);
         out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(&Self::VERSION.to_le_bytes());
         out.extend_from_slice(&(self.live as u16).to_le_bytes());
-        out.extend_from_slice(&self.content_hash().to_le_bytes());
+        out.extend_from_slice(&self.try_content_hash()?.to_le_bytes());
         for e in &self.tbl {
-            out.extend_from_slice(&Self::encode_entry(e));
+            out.extend_from_slice(&Self::encode_entry(e)?);
         }
-        out
+        Ok(out)
     }
 
     /// Parse a table produced by [`to_bytes`], rejecting a wrong magic,
     /// version, length, or content hash.
     pub fn from_bytes(bytes: &[u8]) -> Result<ZeroWallTb, String> {
-        let want = Self::HEADER_LEN + NSTATES * Self::RECORD_LEN;
-        if bytes.len() != want {
-            return Err(format!("length {} != expected {want}", bytes.len()));
+        if bytes.len() < Self::HEADER_LEN {
+            return Err("shorter than its header".into());
         }
         if &bytes[0..4] != Self::MAGIC {
             return Err("bad magic (not a TBZW file)".into());
         }
         let ver = u16::from_le_bytes([bytes[4], bytes[5]]);
-        if ver != Self::VERSION {
-            return Err(format!("version {ver} != supported {}", Self::VERSION));
+        let rec = Self::record_len_for(ver)
+            .ok_or_else(|| format!("version {ver} != supported 2 or 3"))?;
+        let want = Self::HEADER_LEN + NSTATES * rec;
+        if bytes.len() != want {
+            return Err(format!("length {} != expected {want} for v{ver}", bytes.len()));
         }
         let live = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let stored_hash = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let mut tbl = Vec::with_capacity(NSTATES);
         for i in 0..NSTATES {
-            let off = Self::HEADER_LEN + i * Self::RECORD_LEN;
-            tbl.push(Self::decode_entry(&bytes[off..off + Self::RECORD_LEN])?);
+            let off = Self::HEADER_LEN + i * rec;
+            let e = &bytes[off..off + rec];
+            tbl.push(if ver == 2 {
+                Self::decode_entry_v2(e)?
+            } else {
+                Self::decode_entry(e)?
+            });
         }
         let tb = ZeroWallTb { tbl, live };
-        if tb.content_hash() != stored_hash {
+        // The hash is over v3 records, so a v2 file's stored hash is over a
+        // different encoding and cannot be compared. Its integrity was checked
+        // when it was written; re-checking here would reject every old pack.
+        if ver == Self::VERSION && tb.content_hash() != stored_hash {
             return Err("content hash mismatch (file is corrupt or stale)".into());
         }
         Ok(tb)
+    }
+
+    /// Largest |distance| over decisive states, and how many exceed an i8.
+    ///
+    /// Decides whether a packed label can carry `+k`/`-k` in a single signed
+    /// byte. Measured rather than assumed: if even one state overflows, the
+    /// compact format silently corrupts that label instead of failing.
+    pub fn distance_extremes(&self) -> (i16, usize) {
+        let mut max = 0i16;
+        let mut over = 0usize;
+        for e in &self.tbl {
+            if e.result == TbResult::Draw {
+                continue;
+            }
+            if e.distance > max {
+                max = e.distance;
+            }
+            if e.distance > 127 {
+                over += 1;
+            }
+        }
+        (max, over)
     }
 
     pub fn live_states(&self) -> usize {
@@ -795,7 +892,18 @@ impl TbSolver {
             return Err(bad(format!("pack version {ver} != {}", Self::PACK_VERSION)));
         }
         let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
-        let table_len = ZeroWallTb::HEADER_LEN + NSTATES * ZeroWallTb::RECORD_LEN;
+        // Table width comes from the FIRST embedded table's own version, not
+        // from the current constant. A pack written before the two-byte format
+        // holds five-byte tables, and computing the stride from today's value
+        // would walk the file at the wrong pitch and reject it as corrupt.
+        let table_ver = if count == 0 {
+            ZeroWallTb::VERSION
+        } else {
+            u16::from_le_bytes([bytes[16 + 18 + 4], bytes[16 + 18 + 5]])
+        };
+        let entry_len = ZeroWallTb::record_len_for(table_ver)
+            .ok_or_else(|| bad(format!("pack holds unsupported table version {table_ver}")))?;
+        let table_len = ZeroWallTb::HEADER_LEN + NSTATES * entry_len;
         let rec_len = 18 + table_len;
         let want = 16 + count * rec_len;
         if bytes.len() != want {
@@ -1261,6 +1369,51 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    /// How long can a forced win actually take, in PLIES?
+    ///
+    /// This sizes the packed label format. `+k`/`-k` in a single signed byte
+    /// caps at 127, and `distance` counts plies with the sides alternating, so a
+    /// 64-move march is already 128 and overflows. Walls can build a serpentine
+    /// corridor, so the bound is not obviously small — measured, not assumed,
+    /// because an overflow would silently corrupt the label rather than fail.
+    #[test]
+    fn measure_max_distance_for_label_packing() {
+        use crate::titanium::endgame::tb_layers;
+        let mut worst = 0i16;
+        let mut worst_where = (0u64, 0u64);
+        let mut over_i8 = 0usize;
+
+        // Tier 0 is the pure race: no wall can be spent to change the tempo, so
+        // the longest forced marches live here.
+        for &c in &tb_layers::seed_boards(60, 20260811) {
+            let t = ZeroWallTb::build_for(&tb_layers::state_from_config(c, [0, 0]));
+            let (max, over) = t.distance_extremes();
+            over_i8 += over;
+            if max > worst {
+                worst = max;
+                worst_where = c;
+            }
+        }
+        // And a sample with walls still in hand, where a placement can extend
+        // the defender's resistance.
+        for &c in &tb_layers::seed_boards(8, 424242) {
+            for hands in [[1, 0], [0, 1], [1, 1]] {
+                let t = ZeroWallTb::build_for(&tb_layers::state_from_config(c, hands));
+                let (max, over) = t.distance_extremes();
+                over_i8 += over;
+                if max > worst {
+                    worst = max;
+                    worst_where = c;
+                }
+            }
+        }
+
+        println!("max forced distance: {worst} plies (config {worst_where:?})");
+        println!("states exceeding i8 (+/-127): {over_i8}");
+        println!("  -> i8 label {} ", if over_i8 == 0 { "FITS" } else { "OVERFLOWS" });
+        assert!(worst > 0, "no decisive states measured at all");
     }
 
     #[test]
