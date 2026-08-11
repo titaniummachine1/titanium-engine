@@ -71,6 +71,7 @@ fn main() {
         "tbgen" => run_tbgen(&args),
         "tbdump" => run_tbdump(&args),
         "tblayers" => run_tblayers(&args),
+        "tbsolve" => run_tbsolve(&args),
         "fields" => run_fields(&args),
         // One engine, reached without ceremony. There used to be a flag, and an
         // unrecognised value -- including none at all, or a version newer than
@@ -781,6 +782,97 @@ fn run_cat_packed_batch() {
 /// Phase-1 label generator: solve the broke-hands subgame for ONE wall
 /// configuration and emit every state as exact ground truth.
 ///
+/// `titanium tbsolve --hands A,B [--rng S] [--certify]`
+///
+/// Solve one tier exactly and report what it cost.
+///
+/// The tier is the HAND PAIR, not the total. A+B walls in hand means 20-(A+B)
+/// on the board, but (1,1), (2,0) and (0,2) are the same board and three
+/// different games — who holds a wall decides who may place it, so each needs
+/// its own table and they are not interchangeable.
+fn run_tbsolve(args: &[String]) {
+    use titanium::titanium::endgame::{tb_layers, tb_zero::TbSolver};
+    let mut hands = [1i32, 1i32];
+    let mut rng = 0x5eedu64;
+    let mut certify = false;
+    let mut i = 2usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--hands" if i + 1 < args.len() => {
+                let parts: Vec<i32> = args[i + 1]
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                if parts.len() != 2 {
+                    eprintln!("error: --hands wants A,B (e.g. 1,1)");
+                    std::process::exit(2);
+                }
+                hands = [parts[0], parts[1]];
+                i += 2;
+            }
+            "--rng" if i + 1 < args.len() => {
+                rng = args[i + 1].parse().unwrap_or(0x5eed);
+                i += 2;
+            }
+            "--certify" => {
+                certify = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+
+    let total = (hands[0] + hands[1]) as usize;
+    let Some(&seed) = tb_layers::seed_boards(1, rng).first() else {
+        eprintln!("error: could not generate a 20-wall seed board");
+        std::process::exit(1);
+    };
+    let layers = tb_layers::expand(&[seed], total);
+    let Some(&config) = layers[total].iter().next() else {
+        eprintln!("error: layer {total} is empty");
+        std::process::exit(1);
+    };
+    let g = tb_layers::state_from_config(config, hands);
+    assert_eq!(
+        tb_layers::wall_count(config) as i32 + hands[0] + hands[1],
+        20,
+        "wall conservation"
+    );
+
+    println!(
+        "tier ({}, {}): {} walls on board, {} legal pawn states",
+        hands[0],
+        hands[1],
+        tb_layers::wall_count(config),
+        tb_layers::live_state_count(config)
+    );
+
+    let t0 = std::time::Instant::now();
+    let mut s = TbSolver::new();
+    let table = s.solve(&g);
+    let solve_s = t0.elapsed().as_secs_f64();
+    let (w, l, d) = table.census();
+
+    println!(
+        "solved in {solve_s:.2}s | {} tables held, {:.1}% cache hits, {:.0} MB resident",
+        s.cached(),
+        s.hit_rate() * 100.0,
+        s.bytes() as f64 / 1e6
+    );
+    println!("this tier's table: win={w} loss={l} draw={d}");
+
+    if certify {
+        let t1 = std::time::Instant::now();
+        match s.certify(&g) {
+            Ok(()) => println!("certified locally consistent in {:.2}s", t1.elapsed().as_secs_f64()),
+            Err(e) => {
+                eprintln!("CERTIFY FAILED: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 /// `titanium tblayers [--seeds N] [--depth K] [--rng S] [--out FILE]`
 ///
 /// Enumerate the wall CONFIGURATIONS each tablebase tier has to cover, by

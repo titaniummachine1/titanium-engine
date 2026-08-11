@@ -1062,6 +1062,58 @@ mod tests {
         assert!(checked > 500, "too few states compared: {checked}");
     }
 
+    /// (2,0) and (0,2) are the same board and DIFFERENT games, so their tables
+    /// must differ somewhere.
+    ///
+    /// This is the guard against the symmetric collapse: keying a table on the
+    /// TOTAL walls in hand rather than the pair looks harmless — the board is
+    /// identical either way — and silently answers "player 0 holds both walls"
+    /// with the solution to "player 1 holds both". Their aggregate win/loss
+    /// counts happen to come out equal, so a census check would not catch it;
+    /// only a per-state comparison does.
+    #[test]
+    fn who_holds_the_wall_changes_the_answer() {
+        use crate::titanium::endgame::tb_layers;
+        let seed = tb_layers::seed_boards(1, 0x5eed)[0];
+        let config = *tb_layers::expand(&[seed], 2)[2]
+            .iter()
+            .next()
+            .expect("layer 2 is empty");
+        let reach = [
+            tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 0),
+            tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 1),
+        ];
+
+        let mut s = TbSolver::new();
+        let a = s.solve(&tb_layers::state_from_config(config, [2, 0]));
+        let b = s.solve(&tb_layers::state_from_config(config, [0, 2]));
+
+        let mut differ = 0usize;
+        let mut compared = 0usize;
+        for p0 in 9..81 {
+            if !reach[0][p0] {
+                continue;
+            }
+            for p1 in 0..72 {
+                if p0 == p1 || !reach[1][p1] {
+                    continue;
+                }
+                for stm in 0..2 {
+                    compared += 1;
+                    if a.probe_raw(p0, p1, stm).result != b.probe_raw(p0, p1, stm).result {
+                        differ += 1;
+                    }
+                }
+            }
+        }
+        println!("(2,0) vs (0,2): {differ}/{compared} states differ");
+        assert!(
+            differ > 0,
+            "(2,0) and (0,2) are identical on all {compared} states — \
+             the solver is keying on the wall TOTAL, not on who holds them"
+        );
+    }
+
     #[test]
     fn applies_accepts_broke_hands_with_walls_on_board() {
         let mut g = GameState::new();
