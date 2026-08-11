@@ -115,56 +115,51 @@ fn read_h_header(bytes: &[u8]) -> usize {
     h
 }
 
-fn load_net_from_bytes(bytes: &[u8]) -> Net {
-    let h = read_h_header(bytes);
-    let mut offset = H_HEADER_LEN;
+/// Marker for the section-table blob format, at bytes 4..8.
+///
+/// Safe as a discriminator because the legacy header is a u64 LE holding `h`,
+/// and `h <= MAX_NET_H = 256`, so bytes 1..8 are zero in every legacy blob.
+const TLV_MAGIC: &[u8; 4] = b"TNW1";
 
-    // Accept the legacy blob (5 route planes) OR the retraining-ready blob that
-    // additionally carries the `cat_heat` plane. Legacy → cat_heat zero-padded.
-    let payload_f64s_no_cat =
-        WSKIP_LEN + h + h + 9 * 128 * h + 81 * h + 81 * h + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
-    let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
-    let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
-    let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
-    let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
-    // Distance-field extension: 3 additional field planes (dist_me, dist_opp,
-    // dist_diff), each 81 f64s. Can be combined with any of the above variants.
-    let dist_field_extra = FIELD_PLANE_LEN * 3 * 8;
-    let expected_no_cat_dist = expected_no_cat + dist_field_extra;
-    let expected_cat_v5_dist = expected_cat_v5 + dist_field_extra;
-    let expected_cat_v5_witness_dist = expected_cat_v5_witness + dist_field_extra;
-    let expected_cat_v5_normalized_dist = expected_cat_v5_normalized + dist_field_extra;
+/// Section tags. Four ASCII bytes, matched exactly.
+mod tag {
+    pub const WSKP: u32 = u32::from_le_bytes(*b"WSKP");
+    pub const B1__: u32 = u32::from_le_bytes(*b"B1__");
+    pub const W2__: u32 = u32::from_le_bytes(*b"W2__");
+    pub const W1C_: u32 = u32::from_le_bytes(*b"W1C_");
+    pub const PO__: u32 = u32::from_le_bytes(*b"PO__");
+    pub const PX__: u32 = u32::from_le_bytes(*b"PX__");
+    pub const ROUT: u32 = u32::from_le_bytes(*b"ROUT");
+    pub const CATV: u32 = u32::from_le_bytes(*b"CATV");
+    pub const DIST: u32 = u32::from_le_bytes(*b"DIST");
+}
 
-    let has_cat_v5 = bytes.len() == expected_cat_v5;
-    let has_cat_v5_witness = bytes.len() == expected_cat_v5_witness;
-    let has_cat_v5_normalized = bytes.len() == expected_cat_v5_normalized;
-    let has_dist_only = bytes.len() == expected_no_cat_dist;
-    let has_cat_v5_dist = bytes.len() == expected_cat_v5_dist;
-    let has_cat_v5_witness_dist = bytes.len() == expected_cat_v5_witness_dist;
-    let has_cat_v5_normalized_dist = bytes.len() == expected_cat_v5_normalized_dist;
-    let has_dist =
-        has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
+/// Build the hot-path derived tables and assemble a `Net`.
+///
+/// Shared by both blob formats on purpose: the section-table reader and the
+/// legacy length-matcher must produce byte-identical nets, and the only way to
+/// guarantee that is for them to converge before anything is derived.
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    h: usize,
+    ws_v: Vec<f64>,
+    b1_v: Vec<f64>,
+    w2_v: Vec<f64>,
+    w1c: Vec<f64>,
+    po: Vec<f64>,
+    px: Vec<f64>,
+    route: [Vec<f64>; 5],
+    cat: [Vec<f64>; 5],
+    dist: [Vec<f64>; 3],
+) -> Net {
+    let [route_me, route_opp, route_near_me, route_near_opp, route_contested] = route;
+    let [cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined] =
+        cat;
+    let [dist_me, dist_opp, dist_diff] = dist;
 
-    assert!(
-        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized
-        || has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist,
-        "net_weights blob size mismatch for declared NET_H={h} \
-         (got {} bytes, expected {expected_no_cat}, {expected_cat_v5}, or {expected_cat_v5_witness}) — \
-         run training/freeze_baseline_weights.py",
-        bytes.len()
-    );
-
-    let ws_v = read_f64s(bytes, &mut offset, WSKIP_LEN);
-    let b1_v = read_f64s(bytes, &mut offset, h);
-    let w2_v = read_f64s(bytes, &mut offset, h);
-    let w1c = read_f64s(bytes, &mut offset, 9 * 128 * h);
-    let po = read_f64s(bytes, &mut offset, 81 * h);
-    let px = read_f64s(bytes, &mut offset, 81 * h);
-    let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    // Presence is derived from the weights, not from the blob length: a section
+    // that is present but all-zero is as inert as an absent one, and the
+    // consumers skip the whole (expensive) feature computation on a false flag.
     let route_active = route_me
         .iter()
         .chain(&route_opp)
@@ -172,56 +167,6 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&route_near_opp)
         .chain(&route_contested)
         .any(|&w| w != 0.0);
-    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
-        if has_cat_v5_normalized || has_cat_v5_normalized_dist {
-            (
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            )
-        } else if has_cat_v5_witness || has_cat_v5_witness_dist {
-            let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut raw_me {
-                *w *= 4.0;
-            }
-            for w in &mut raw_opp {
-                *w *= 4.0;
-            }
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                raw_me,
-                raw_opp,
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else if has_cat_v5 || has_cat_v5_dist {
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else {
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-            )
-        };
     let cat_active = cat_raw_me
         .iter()
         .chain(&cat_raw_opp)
@@ -229,21 +174,6 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         .chain(&cat_propagated_opp)
         .chain(&cat_propagated_combined)
         .any(|&w| w != 0.0);
-
-    // Distance-field extension weights (zero-padded if blob doesn't carry them)
-    let (dist_me, dist_opp, dist_diff) = if has_dist {
-        (
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-        )
-    } else {
-        (
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-            vec![0.0; FIELD_PLANE_LEN],
-        )
-    };
     let dist_field_active = dist_me
         .iter()
         .chain(&dist_opp)
@@ -307,6 +237,315 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
         dist_opp_canon,
         dist_diff_canon,
     }
+}
+
+fn load_net_from_bytes(bytes: &[u8]) -> Net {
+    if bytes.len() >= H_HEADER_LEN && &bytes[4..8] == TLV_MAGIC {
+        return load_net_tlv(bytes);
+    }
+    load_net_legacy(bytes)
+}
+
+/// Section-table format.
+///
+///   0..4    u32 LE  NET_H
+///   4..8    magic   b"TNW1"
+///   8..12   u32 LE  section count
+///   12..    directory of {u32 tag, u64 byte_len}, payloads follow in order
+///
+/// Missing sections are zero-filled and unknown tags are ignored, so a blob
+/// written by a newer trainer still loads and an older blob still works. That
+/// replaces a length enumeration that had grown to eight accepted sizes -- of
+/// which only two were ever shipped -- duplicated across three files and
+/// already out of sync between the Rust and Python sides.
+fn load_net_tlv(bytes: &[u8]) -> Net {
+    let bad = |m: String| -> ! { panic!("net_weights TLV blob: {m}") };
+    if bytes.len() < 12 {
+        bad("shorter than its header".into());
+    }
+    let h = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if h == 0 || h > MAX_NET_H {
+        bad(format!("NET_H = {h}, out of range (1..={MAX_NET_H})"));
+    }
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let dir_len = count
+        .checked_mul(12)
+        .unwrap_or_else(|| bad("section count overflows".into()));
+    let body = 12usize
+        .checked_add(dir_len)
+        .unwrap_or_else(|| bad("directory overflows".into()));
+    if bytes.len() < body {
+        bad(format!("truncated directory ({count} sections)"));
+    }
+
+    // tag -> payload slice
+    let mut found: Vec<(u32, &[u8])> = Vec::with_capacity(count);
+    let mut off = body;
+    for i in 0..count {
+        let e = 12 + i * 12;
+        let t = u32::from_le_bytes(bytes[e..e + 4].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[e + 4..e + 12].try_into().unwrap()) as usize;
+        let end = off
+            .checked_add(len)
+            .unwrap_or_else(|| bad(format!("section {i} length overflows")));
+        if end > bytes.len() {
+            bad(format!("section {i} runs past end of blob"));
+        }
+        found.push((t, &bytes[off..end]));
+        off = end;
+    }
+
+    // Required sections error rather than zero-fill: a net with no `w1c` is not
+    // a net with an inert feature, it is a corrupt file.
+    let need = |t: u32, n: usize, name: &str| -> Vec<f64> {
+        let Some(&(_, sl)) = found.iter().find(|(tt, _)| *tt == t) else {
+            bad(format!("missing required section {name}"));
+        };
+        if sl.len() != n * 8 {
+            bad(format!(
+                "section {name}: {} bytes, expected {} for NET_H={h}",
+                sl.len(),
+                n * 8
+            ));
+        }
+        let mut v = Vec::with_capacity(n);
+        for c in sl.chunks_exact(8) {
+            v.push(f64::from_le_bytes(c.try_into().unwrap()));
+        }
+        v
+    };
+    // Optional: absent -> zeros, which the `*_active` flags then read as inert.
+    let opt = |t: u32, planes: usize| -> Vec<Vec<f64>> {
+        let n = FIELD_PLANE_LEN;
+        match found.iter().find(|(tt, _)| *tt == t) {
+            Some(&(_, sl)) if sl.len() == planes * n * 8 => sl
+                .chunks_exact(n * 8)
+                .map(|p| {
+                    p.chunks_exact(8)
+                        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                        .collect()
+                })
+                .collect(),
+            Some(&(_, sl)) => bad(format!(
+                "optional section has {} bytes, expected {}",
+                sl.len(),
+                planes * n * 8
+            )),
+            None => (0..planes).map(|_| vec![0.0; n]).collect(),
+        }
+    };
+
+    let ws_v = need(tag::WSKP, WSKIP_LEN, "WSKP");
+    let b1_v = need(tag::B1__, h, "B1__");
+    let w2_v = need(tag::W2__, h, "W2__");
+    let w1c = need(tag::W1C_, 9 * 128 * h, "W1C_");
+    let po = need(tag::PO__, 81 * h, "PO__");
+    let px = need(tag::PX__, 81 * h, "PX__");
+    let to5 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 5] { v.try_into().unwrap() };
+    let to3 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 3] { v.try_into().unwrap() };
+    let route = to5(opt(tag::ROUT, 5));
+    // CAT is stored already-rescaled in this format. The legacy loader applies
+    // historic x4 / x400/256 factors while reading; carrying those into a new
+    // format would preserve an accident of the old one.
+    let cat = to5(opt(tag::CATV, 5));
+    let dist = to3(opt(tag::DIST, 3));
+
+    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, route, cat, dist)
+}
+
+/// Serialize a net in the section-table format.
+pub fn net_to_tlv(n: &Net) -> Vec<u8> {
+    let mut sections: Vec<(u32, Vec<f64>)> = Vec::new();
+    let flat = |ps: [&Vec<f64>; 5]| -> Vec<f64> { ps.iter().flat_map(|p| p.iter().copied()).collect() };
+    sections.push((tag::WSKP, n.ws.to_vec()));
+    sections.push((tag::B1__, n.b1[..n.h].to_vec()));
+    sections.push((tag::W2__, n.w2[..n.h].to_vec()));
+    sections.push((tag::W1C_, n.w1c.clone()));
+    sections.push((tag::PO__, n.po.clone()));
+    sections.push((tag::PX__, n.px.clone()));
+    sections.push((
+        tag::ROUT,
+        flat([
+            &n.route_me,
+            &n.route_opp,
+            &n.route_near_me,
+            &n.route_near_opp,
+            &n.route_contested,
+        ]),
+    ));
+    sections.push((
+        tag::CATV,
+        flat([
+            &n.cat_raw_me,
+            &n.cat_raw_opp,
+            &n.cat_propagated_me,
+            &n.cat_propagated_opp,
+            &n.cat_propagated_combined,
+        ]),
+    ));
+    sections.push((
+        tag::DIST,
+        n.dist_me
+            .iter()
+            .chain(&n.dist_opp)
+            .chain(&n.dist_diff)
+            .copied()
+            .collect(),
+    ));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(n.h as u32).to_le_bytes());
+    out.extend_from_slice(TLV_MAGIC);
+    out.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+    for (t, v) in &sections {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&((v.len() * 8) as u64).to_le_bytes());
+    }
+    for (_, v) in &sections {
+        for x in v {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn load_net_legacy(bytes: &[u8]) -> Net {
+    let h = read_h_header(bytes);
+    let mut offset = H_HEADER_LEN;
+
+    // Accept the legacy blob (5 route planes) OR the retraining-ready blob that
+    // additionally carries the `cat_heat` plane. Legacy → cat_heat zero-padded.
+    let payload_f64s_no_cat =
+        WSKIP_LEN + h + h + 9 * 128 * h + 81 * h + 81 * h + FIELD_PLANE_LEN * FIELD_PLANE_SETS;
+    let expected_no_cat = H_HEADER_LEN + payload_f64s_no_cat * 8;
+    let expected_cat_v5 = expected_no_cat + FIELD_PLANE_LEN * 8;
+    let expected_cat_v5_witness = expected_no_cat + FIELD_PLANE_LEN * 3 * 8;
+    let expected_cat_v5_normalized = expected_no_cat + FIELD_PLANE_LEN * 5 * 8;
+    // Distance-field extension: 3 additional field planes (dist_me, dist_opp,
+    // dist_diff), each 81 f64s. Can be combined with any of the above variants.
+    let dist_field_extra = FIELD_PLANE_LEN * 3 * 8;
+    let expected_no_cat_dist = expected_no_cat + dist_field_extra;
+    let expected_cat_v5_dist = expected_cat_v5 + dist_field_extra;
+    let expected_cat_v5_witness_dist = expected_cat_v5_witness + dist_field_extra;
+    let expected_cat_v5_normalized_dist = expected_cat_v5_normalized + dist_field_extra;
+
+    let has_cat_v5 = bytes.len() == expected_cat_v5;
+    let has_cat_v5_witness = bytes.len() == expected_cat_v5_witness;
+    let has_cat_v5_normalized = bytes.len() == expected_cat_v5_normalized;
+    let has_dist_only = bytes.len() == expected_no_cat_dist;
+    let has_cat_v5_dist = bytes.len() == expected_cat_v5_dist;
+    let has_cat_v5_witness_dist = bytes.len() == expected_cat_v5_witness_dist;
+    let has_cat_v5_normalized_dist = bytes.len() == expected_cat_v5_normalized_dist;
+    let has_dist = has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
+
+    assert!(
+        bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized
+        || has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist,
+        "net_weights blob size mismatch for declared NET_H={h} \
+         (got {} bytes, expected {expected_no_cat}, {expected_cat_v5}, or {expected_cat_v5_witness}) — \
+         run training/freeze_baseline_weights.py",
+        bytes.len()
+    );
+
+    let ws_v = read_f64s(bytes, &mut offset, WSKIP_LEN);
+    let b1_v = read_f64s(bytes, &mut offset, h);
+    let w2_v = read_f64s(bytes, &mut offset, h);
+    let w1c = read_f64s(bytes, &mut offset, 9 * 128 * h);
+    let po = read_f64s(bytes, &mut offset, 81 * h);
+    let px = read_f64s(bytes, &mut offset, 81 * h);
+    let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_near_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let route_contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
+        if has_cat_v5_normalized || has_cat_v5_normalized_dist {
+            (
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            )
+        } else if has_cat_v5_witness || has_cat_v5_witness_dist {
+            let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            for w in &mut raw_me {
+                *w *= 4.0;
+            }
+            for w in &mut raw_opp {
+                *w *= 4.0;
+            }
+            for w in &mut combined {
+                *w *= 400.0 / 256.0;
+            }
+            (
+                raw_me,
+                raw_opp,
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                combined,
+            )
+        } else if has_cat_v5 || has_cat_v5_dist {
+            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+            for w in &mut combined {
+                *w *= 400.0 / 256.0;
+            }
+            (
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                combined,
+            )
+        } else {
+            (
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+                vec![0.0; FIELD_PLANE_LEN],
+            )
+        };
+    // Distance-field extension weights (zero-padded if blob doesn't carry them)
+    let (dist_me, dist_opp, dist_diff) = if has_dist {
+        (
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+            read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
+        )
+    } else {
+        (
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+            vec![0.0; FIELD_PLANE_LEN],
+        )
+    };
+    assemble(
+        h,
+        ws_v,
+        b1_v,
+        w2_v,
+        w1c,
+        po,
+        px,
+        [
+            route_me,
+            route_opp,
+            route_near_me,
+            route_near_opp,
+            route_contested,
+        ],
+        [
+            cat_raw_me,
+            cat_raw_opp,
+            cat_propagated_me,
+            cat_propagated_opp,
+            cat_propagated_combined,
+        ],
+        [dist_me, dist_opp, dist_diff],
+    )
 }
 
 /// Training / deployed weights (`net_weights.bin`, overridable via `TITANIUM_NET_WEIGHTS_PATH`).
@@ -422,3 +661,139 @@ const fn build_bkt() -> [usize; 81] {
 pub static NET_MIRC: [usize; 81] = build_mirc();
 pub static NET_MIRS: [usize; 64] = build_mirs();
 pub static NET_BKT: [usize; 81] = build_bkt();
+
+#[cfg(test)]
+mod tlv_tests {
+    use super::*;
+
+    fn shipped() -> Vec<(&'static str, &'static [u8])> {
+        vec![
+            ("net_weights.bin", NET_BYTES),
+            ("net_weights_frozen.bin", NET_FROZEN_BYTES),
+            ("net_weights_medium.bin", NET_MEDIUM_BYTES),
+            ("net_weights_v17.bin", NET_V17_BYTES),
+        ]
+    }
+
+    fn assert_same(name: &str, a: &Net, b: &Net) {
+        assert_eq!(a.h, b.h, "{name}: h");
+        assert_eq!(a.ws, b.ws, "{name}: ws");
+        assert_eq!(a.b1, b.b1, "{name}: b1");
+        assert_eq!(a.w2, b.w2, "{name}: w2");
+        assert_eq!(a.w1c, b.w1c, "{name}: w1c");
+        assert_eq!(a.po, b.po, "{name}: po");
+        assert_eq!(a.px, b.px, "{name}: px");
+        assert_eq!(a.route_me, b.route_me, "{name}: route_me");
+        assert_eq!(a.route_opp, b.route_opp, "{name}: route_opp");
+        assert_eq!(a.route_near_me, b.route_near_me, "{name}: route_near_me");
+        assert_eq!(a.route_near_opp, b.route_near_opp, "{name}: route_near_opp");
+        assert_eq!(a.route_contested, b.route_contested, "{name}: route_contested");
+        assert_eq!(a.cat_raw_me, b.cat_raw_me, "{name}: cat_raw_me");
+        assert_eq!(a.cat_raw_opp, b.cat_raw_opp, "{name}: cat_raw_opp");
+        assert_eq!(a.cat_propagated_me, b.cat_propagated_me, "{name}: cat_prop_me");
+        assert_eq!(a.cat_propagated_opp, b.cat_propagated_opp, "{name}: cat_prop_opp");
+        assert_eq!(
+            a.cat_propagated_combined, b.cat_propagated_combined,
+            "{name}: cat_prop_combined"
+        );
+        assert_eq!(a.dist_me, b.dist_me, "{name}: dist_me");
+        assert_eq!(a.dist_opp, b.dist_opp, "{name}: dist_opp");
+        assert_eq!(a.dist_diff, b.dist_diff, "{name}: dist_diff");
+        // Derived tables and presence flags must agree too, or the hot path
+        // would differ while the raw weights matched.
+        assert_eq!(a.route_active, b.route_active, "{name}: route_active");
+        assert_eq!(a.cat_active, b.cat_active, "{name}: cat_active");
+        assert_eq!(a.dist_field_active, b.dist_field_active, "{name}: dist_active");
+        assert_eq!(a.route_bybit, b.route_bybit, "{name}: route_bybit");
+        assert_eq!(a.dist_me_canon, b.dist_me_canon, "{name}: dist_me_canon");
+        assert_eq!(a.dist_opp_canon, b.dist_opp_canon, "{name}: dist_opp_canon");
+        assert_eq!(a.dist_diff_canon, b.dist_diff_canon, "{name}: dist_diff_canon");
+    }
+
+    /// Every shipped blob must survive legacy -> TLV -> legacy-equivalent with
+    /// bit-identical f64s, including the derived hot-path tables.
+    ///
+    /// This is the whole justification for the format change being callable a
+    /// no-op. Comparing raw weights alone would not do it: `route_bybit` and the
+    /// `*_canon` tables are what the hot path actually reads.
+    #[test]
+    fn every_shipped_blob_roundtrips_through_tlv() {
+        for (name, bytes) in shipped() {
+            let legacy = load_net_from_bytes(bytes);
+            let tlv_bytes = net_to_tlv(&legacy);
+            assert_eq!(
+                &tlv_bytes[4..8],
+                TLV_MAGIC,
+                "{name}: written blob must carry the TLV magic"
+            );
+            let back = load_net_from_bytes(&tlv_bytes);
+            assert_same(name, &legacy, &back);
+        }
+    }
+
+    /// The dispatcher must still route legacy blobs to the legacy reader. A
+    /// magic check that accidentally matched would silently reinterpret every
+    /// shipped net.
+    #[test]
+    fn shipped_blobs_are_not_mistaken_for_tlv() {
+        for (name, bytes) in shipped() {
+            assert_ne!(&bytes[4..8], TLV_MAGIC, "{name} must not look like TLV");
+        }
+    }
+
+    /// Unknown sections are ignored and absent optional sections zero-fill.
+    /// Together these are what let a newer trainer add a tail without a Rust
+    /// change, and an older blob keep loading after one.
+    #[test]
+    fn tlv_tolerates_unknown_and_missing_sections() {
+        let base = load_net_from_bytes(NET_BYTES);
+        let mut bytes = net_to_tlv(&base);
+
+        // Append an unknown section: bump the count, add a directory entry, and
+        // put its payload at the very end.
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let payload_start = 12 + count as usize * 12;
+        let junk: Vec<u8> = (0..64u8).collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(&bytes[0..8]);
+        out.extend_from_slice(&(count + 1).to_le_bytes());
+        out.extend_from_slice(&bytes[12..payload_start]);
+        out.extend_from_slice(&u32::from_le_bytes(*b"ZZZZ").to_le_bytes());
+        out.extend_from_slice(&(junk.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bytes[payload_start..]);
+        out.extend_from_slice(&junk);
+        let with_junk = load_net_from_bytes(&out);
+        assert_same("unknown-section", &base, &with_junk);
+
+        // Drop the optional DIST section entirely -> zero-filled, inert.
+        bytes = net_to_tlv(&base);
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let mut keep: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut off = 12 + count * 12;
+        for i in 0..count {
+            let e = 12 + i * 12;
+            let t = u32::from_le_bytes(bytes[e..e + 4].try_into().unwrap());
+            let len = u64::from_le_bytes(bytes[e + 4..e + 12].try_into().unwrap()) as usize;
+            if t != tag::DIST {
+                keep.push((t, bytes[off..off + len].to_vec()));
+            }
+            off += len;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&bytes[0..8]);
+        out.extend_from_slice(&(keep.len() as u32).to_le_bytes());
+        for (t, p) in &keep {
+            out.extend_from_slice(&t.to_le_bytes());
+            out.extend_from_slice(&((p.len()) as u64).to_le_bytes());
+        }
+        for (_, p) in &keep {
+            out.extend_from_slice(p);
+        }
+        let without_dist = load_net_from_bytes(&out);
+        assert!(
+            !without_dist.dist_field_active,
+            "absent DIST must be inert, not merely zero"
+        );
+        assert_eq!(without_dist.w1c, base.w1c, "dropping DIST disturbed w1c");
+    }
+}
