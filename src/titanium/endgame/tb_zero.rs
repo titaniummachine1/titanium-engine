@@ -398,7 +398,12 @@ impl ZeroWallTb {
     //   8..16  content hash u64 LE (over the record bytes)
 
     pub const MAGIC: &'static [u8; 4] = b"TBZW";
-    pub const VERSION: u16 = 1;
+    /// v2 stores `live` in the two bytes v1 left reserved.
+    ///
+    /// v1 reconstructed it as `81 * 80 * 2`, which stopped being true once the
+    /// flood fill began excluding pawn squares that cannot reach a goal. A
+    /// reloaded table would have claimed states it does not cover.
+    pub const VERSION: u16 = 2;
     pub const HEADER_LEN: usize = 16;
     pub const RECORD_LEN: usize = 5;
 
@@ -444,7 +449,7 @@ impl ZeroWallTb {
         let mut out = Vec::with_capacity(Self::HEADER_LEN + NSTATES * Self::RECORD_LEN);
         out.extend_from_slice(Self::MAGIC);
         out.extend_from_slice(&Self::VERSION.to_le_bytes());
-        out.extend_from_slice(&[0u8, 0]);
+        out.extend_from_slice(&(self.live as u16).to_le_bytes());
         out.extend_from_slice(&self.content_hash().to_le_bytes());
         for e in &self.tbl {
             out.extend_from_slice(&Self::encode_entry(e));
@@ -466,19 +471,12 @@ impl ZeroWallTb {
         if ver != Self::VERSION {
             return Err(format!("version {ver} != supported {}", Self::VERSION));
         }
+        let live = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let stored_hash = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let mut tbl = Vec::with_capacity(NSTATES);
         for i in 0..NSTATES {
             let off = Self::HEADER_LEN + i * Self::RECORD_LEN;
             tbl.push(Self::decode_entry(&bytes[off..off + Self::RECORD_LEN])?);
-        }
-        let mut live = 0usize;
-        for p0 in 0..NCELLS {
-            for p1 in 0..NCELLS {
-                if p0 != p1 {
-                    live += 2;
-                }
-            }
         }
         let tb = ZeroWallTb { tbl, live };
         if tb.content_hash() != stored_hash {
@@ -732,6 +730,94 @@ impl TbSolver {
             }
         }
         Ok(())
+    }
+
+    // ── Pack file ───────────────────────────────────────────────────────────
+    //
+    // Every solved table, keyed by configuration and hands, in one file:
+    //
+    //   0..4    magic  b"TBPK"
+    //   4..6    version u16 LE
+    //   6..8    reserved
+    //   8..16   record count u64 LE
+    //   then, per record:
+    //     hw u64 LE, vw u64 LE, wl0 i8, wl1 i8, then a whole TBZW table
+    //
+    // One file rather than a file per configuration: at millions of tables,
+    // 65 KB each, a directory tree is what makes the store unusable on Windows.
+    //
+    // Why persist at all: without it each tier re-solves every tier beneath it
+    // from scratch, so the ladder cannot be climbed one step at a time. With it,
+    // tier 3 loads tier 2 and only pays for its own level.
+
+    pub const PACK_MAGIC: &'static [u8; 4] = b"TBPK";
+    pub const PACK_VERSION: u16 = 1;
+
+    /// Write every held table to `path`.
+    pub fn save(&self, path: &str) -> std::io::Result<usize> {
+        use std::io::Write;
+        let f = std::fs::File::create(path)?;
+        let mut w = std::io::BufWriter::new(f);
+        w.write_all(Self::PACK_MAGIC)?;
+        w.write_all(&Self::PACK_VERSION.to_le_bytes())?;
+        w.write_all(&[0u8, 0])?;
+        w.write_all(&(self.cache.len() as u64).to_le_bytes())?;
+        // Sorted, so the same cache always produces a byte-identical file and
+        // two runs can be diffed when they disagree.
+        let mut keys: Vec<&TbKey> = self.cache.keys().collect();
+        keys.sort_unstable();
+        for k in &keys {
+            w.write_all(&k.0.to_le_bytes())?;
+            w.write_all(&k.1.to_le_bytes())?;
+            w.write_all(&[k.2 as u8, k.3 as u8])?;
+            w.write_all(&self.cache[k].to_bytes())?;
+        }
+        w.flush()?;
+        Ok(keys.len())
+    }
+
+    /// Load tables from `path` into the cache, returning how many were added.
+    ///
+    /// Existing entries win: anything already solved in this process is at least
+    /// as trustworthy as what is on disk, and silently replacing it would make a
+    /// stale file able to override a fresh solve.
+    pub fn load(&mut self, path: &str) -> std::io::Result<usize> {
+        let bytes = std::fs::read(path)?;
+        let bad = |m: String| std::io::Error::new(std::io::ErrorKind::InvalidData, m);
+        if bytes.len() < 16 {
+            return Err(bad("pack shorter than its header".into()));
+        }
+        if &bytes[0..4] != Self::PACK_MAGIC {
+            return Err(bad("bad magic (not a TBPK pack)".into()));
+        }
+        let ver = u16::from_le_bytes([bytes[4], bytes[5]]);
+        if ver != Self::PACK_VERSION {
+            return Err(bad(format!("pack version {ver} != {}", Self::PACK_VERSION)));
+        }
+        let count = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        let table_len = ZeroWallTb::HEADER_LEN + NSTATES * ZeroWallTb::RECORD_LEN;
+        let rec_len = 18 + table_len;
+        let want = 16 + count * rec_len;
+        if bytes.len() != want {
+            return Err(bad(format!("pack length {} != expected {want}", bytes.len())));
+        }
+        let mut added = 0usize;
+        for i in 0..count {
+            let off = 16 + i * rec_len;
+            let hw = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
+            let vw = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
+            let key = (hw, vw, bytes[off + 16] as i8 as i32, bytes[off + 17] as i8 as i32);
+            if self.cache.contains_key(&key) {
+                continue;
+            }
+            // `from_bytes` re-checks the content hash, so a truncated or edited
+            // pack is rejected here rather than answering wrongly later.
+            let tb = ZeroWallTb::from_bytes(&bytes[off + 18..off + 18 + table_len])
+                .map_err(|e| bad(format!("record {i}: {e}")))?;
+            self.cache.insert(key, Arc::new(tb));
+            added += 1;
+        }
+        Ok(added)
     }
 
     /// Distinct configurations solved and held.
@@ -1127,6 +1213,54 @@ mod tests {
             "(2,0) and (0,2) are identical on all {compared} states — \
              the solver is keying on the wall TOTAL, not on who holds them"
         );
+    }
+
+    /// A saved pack must reload to tables identical to the ones solved, on a
+    /// configuration where the flood fill actually excluded squares.
+    ///
+    /// That last part is the point: format v1 reconstructed `live` as
+    /// `81 * 80 * 2` instead of storing it, so a pruned table came back claiming
+    /// states it does not cover. A bare board would not have caught it.
+    #[test]
+    fn pack_roundtrips_a_pruned_table() {
+        use crate::titanium::endgame::tb_layers;
+        let stranding = tb_layers::seed_boards(40, 4242)
+            .into_iter()
+            .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
+            .expect("no stranding board among the seeds");
+
+        let mut s = TbSolver::new();
+        let original = s.solve(&tb_layers::state_from_config(stranding, [1, 0]));
+        assert!(
+            original.live_states() < 81 * 80 * 2,
+            "test needs a table with excluded squares"
+        );
+
+        let path = std::env::temp_dir().join("titanium_tb_roundtrip.tbpk");
+        let path = path.to_str().unwrap();
+        let saved = s.save(path).expect("save failed");
+
+        let mut back = TbSolver::new();
+        let loaded = back.load(path).expect("load failed");
+        assert_eq!(loaded, saved, "every saved table must reload");
+
+        let again = back.solve(&tb_layers::state_from_config(stranding, [1, 0]));
+        assert_eq!(again.live_states(), original.live_states(), "live count");
+        for p0 in 0..81 {
+            for p1 in 0..81 {
+                if p0 == p1 {
+                    continue;
+                }
+                for stm in 0..2 {
+                    let a = original.probe_raw(p0, p1, stm);
+                    let b = again.probe_raw(p0, p1, stm);
+                    assert_eq!(a.result, b.result, "result at ({p0},{p1},{stm})");
+                    assert_eq!(a.distance, b.distance, "distance at ({p0},{p1},{stm})");
+                    assert_eq!(a.best_move, b.best_move, "best move at ({p0},{p1},{stm})");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -796,6 +796,8 @@ fn run_tbsolve(args: &[String]) {
     let mut rng = 0x5eedu64;
     let mut certify = false;
     let mut index = 0usize;
+    let mut save = None::<String>;
+    let mut load = None::<String>;
     let mut i = 2usize;
     while i < args.len() {
         match args[i].as_str() {
@@ -822,6 +824,14 @@ fn run_tbsolve(args: &[String]) {
             "--certify" => {
                 certify = true;
                 i += 1;
+            }
+            "--save" if i + 1 < args.len() => {
+                save = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--load" if i + 1 < args.len() => {
+                load = Some(args[i + 1].clone());
+                i += 2;
             }
             _ => i += 1,
         }
@@ -861,6 +871,17 @@ fn run_tbsolve(args: &[String]) {
 
     let t0 = std::time::Instant::now();
     let mut s = TbSolver::new();
+    // Load first, so the tiers below are read from disk instead of re-solved.
+    // That is what makes the ladder climbable one step per run.
+    if let Some(path) = &load {
+        match s.load(path) {
+            Ok(n) => println!("loaded {n} tables from {path}"),
+            Err(e) => {
+                eprintln!("error loading {path}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let table = s.solve(&g);
     let solve_s = t0.elapsed().as_secs_f64();
     let (w, l, d) = table.census();
@@ -881,6 +902,19 @@ fn run_tbsolve(args: &[String]) {
     );
     if real_draws > 0 {
         println!("  ^ mutual zugzwang: neither side can force a win");
+    }
+
+    if let Some(path) = &save {
+        match s.save(path) {
+            Ok(n) => {
+                let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                println!("saved {n} tables to {path} ({:.0} MB)", bytes as f64 / 1e6);
+            }
+            Err(e) => {
+                eprintln!("error saving {path}: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     if certify {
