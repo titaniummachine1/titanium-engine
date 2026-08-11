@@ -72,6 +72,7 @@ fn main() {
         "tbdump" => run_tbdump(&args),
         "tblayers" => run_tblayers(&args),
         "tbsolve" => run_tbsolve(&args),
+        "tbmerge" => run_tbmerge(&args),
         "fields" => run_fields(&args),
         // One engine, reached without ceremony. There used to be a flag, and an
         // unrecognised value -- including none at all, or a version newer than
@@ -782,6 +783,62 @@ fn run_cat_packed_batch() {
 /// Phase-1 label generator: solve the broke-hands subgame for ONE wall
 /// configuration and emit every state as exact ground truth.
 ///
+/// `titanium tbmerge --out STORE IN.tbpk [IN.tbpk ...]`
+///
+/// Fold packs into one store holding each configuration ONCE, converting to the
+/// two-byte format on the way. Solving is already a DAG that never repeats
+/// work; writing one pack per run is what duplicates it on disk, since every run
+/// dumps its whole descendant cone and the cones overlap.
+fn run_tbmerge(args: &[String]) {
+    use titanium::titanium::endgame::tb_zero::TbSolver;
+    let mut out = None::<String>;
+    let mut inputs = Vec::<String>::new();
+    let mut i = 2usize;
+    while i < args.len() {
+        if args[i] == "--out" && i + 1 < args.len() {
+            out = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            inputs.push(args[i].clone());
+            i += 1;
+        }
+    }
+    let Some(out) = out else {
+        eprintln!("error: tbmerge needs --out STORE");
+        std::process::exit(2);
+    };
+    if inputs.is_empty() {
+        eprintln!("error: tbmerge needs at least one input pack");
+        std::process::exit(2);
+    }
+    let before: u64 = inputs
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+        .sum();
+    let t0 = std::time::Instant::now();
+    match TbSolver::merge_packs(&inputs, &out) {
+        Ok((distinct, seen)) => {
+            let after = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "{seen} records in, {distinct} distinct ({:.2}x duplication, {:.1}% redundant)",
+                seen as f64 / distinct.max(1) as f64,
+                100.0 * (1.0 - distinct as f64 / seen.max(1) as f64)
+            );
+            println!(
+                "{:.2} GB -> {:.2} GB ({:.1}x smaller) in {:.1}s",
+                before as f64 / 1e9,
+                after as f64 / 1e9,
+                before as f64 / after.max(1) as f64,
+                t0.elapsed().as_secs_f64()
+            );
+        }
+        Err(e) => {
+            eprintln!("merge failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `titanium tbsolve --hands A,B [--rng S] [--certify]`
 ///
 /// Solve one tier exactly and report what it cost.

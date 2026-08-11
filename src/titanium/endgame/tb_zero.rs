@@ -928,6 +928,101 @@ impl TbSolver {
         Ok(added)
     }
 
+    /// Merge packs into one store, keeping each configuration ONCE.
+    ///
+    /// The solve graph is already a DAG with no duplicated work: walls only
+    /// decrease, so tiers never cycle, and a configuration reached from two
+    /// parents is solved once. But writing one pack per run defeats that on
+    /// disk, because every run dumps its whole descendant cone and the cones
+    /// overlap almost entirely -- all four tier-3 hand distributions rest on the
+    /// SAME tier-0 tables, since a board does not record who placed its walls.
+    ///
+    /// Streams rather than loading: only the key index is held, so merging tens
+    /// of gigabytes costs a few megabytes of memory. Output is v3 regardless of
+    /// input version, so old five-byte packs are compacted on the way through.
+    ///
+    /// Returns `(distinct, seen)`.
+    pub fn merge_packs(inputs: &[String], out: &str) -> Result<(usize, usize), String> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // key -> (input index, byte offset of its table, table version)
+        let mut first: HashMap<TbKey, (usize, u64, u16)> = HashMap::new();
+        let mut order: Vec<TbKey> = Vec::new();
+        let mut seen = 0usize;
+
+        for (fi, path) in inputs.iter().enumerate() {
+            let mut f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+            let mut hdr = [0u8; 16];
+            f.read_exact(&mut hdr).map_err(|e| format!("{path}: {e}"))?;
+            if &hdr[0..4] != Self::PACK_MAGIC {
+                return Err(format!("{path}: not a TBPK pack"));
+            }
+            let count = u64::from_le_bytes(hdr[8..16].try_into().unwrap()) as usize;
+            if count == 0 {
+                continue;
+            }
+            // Stride comes from the first embedded table's own version, so a
+            // pack written before the two-byte format is walked at ITS pitch.
+            let mut vb = [0u8; 2];
+            f.seek(SeekFrom::Start(16 + 18 + 4)).map_err(|e| e.to_string())?;
+            f.read_exact(&mut vb).map_err(|e| e.to_string())?;
+            let tver = u16::from_le_bytes(vb);
+            let entry = ZeroWallTb::record_len_for(tver)
+                .ok_or_else(|| format!("{path}: unsupported table version {tver}"))?;
+            let table_len = (ZeroWallTb::HEADER_LEN + NSTATES * entry) as u64;
+            let stride = 18 + table_len;
+
+            let mut kb = [0u8; 18];
+            for i in 0..count {
+                let off = 16 + i as u64 * stride;
+                f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+                f.read_exact(&mut kb).map_err(|e| format!("{path} rec {i}: {e}"))?;
+                let key = (
+                    u64::from_le_bytes(kb[0..8].try_into().unwrap()),
+                    u64::from_le_bytes(kb[8..16].try_into().unwrap()),
+                    kb[16] as i8 as i32,
+                    kb[17] as i8 as i32,
+                );
+                seen += 1;
+                if !first.contains_key(&key) {
+                    first.insert(key, (fi, off + 18, tver));
+                    order.push(key);
+                }
+            }
+        }
+
+        order.sort_unstable();
+        let mut w = std::io::BufWriter::new(
+            std::fs::File::create(out).map_err(|e| format!("{out}: {e}"))?,
+        );
+        let mut hw = |b: &[u8]| -> Result<(), String> { w.write_all(b).map_err(|e| e.to_string()) };
+        hw(Self::PACK_MAGIC)?;
+        hw(&Self::PACK_VERSION.to_le_bytes())?;
+        hw(&[0u8, 0])?;
+        hw(&(order.len() as u64).to_le_bytes())?;
+
+        let mut handles: Vec<std::fs::File> = Vec::new();
+        for p in inputs {
+            handles.push(std::fs::File::open(p).map_err(|e| format!("{p}: {e}"))?);
+        }
+        for key in &order {
+            let (fi, off, tver) = first[key];
+            let entry = ZeroWallTb::record_len_for(tver).unwrap();
+            let table_len = ZeroWallTb::HEADER_LEN + NSTATES * entry;
+            let mut buf = vec![0u8; table_len];
+            handles[fi].seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+            handles[fi].read_exact(&mut buf).map_err(|e| e.to_string())?;
+            // Decode and re-encode so mixed-version inputs all land as v3.
+            let tb = ZeroWallTb::from_bytes(&buf)?;
+            w.write_all(&key.0.to_le_bytes()).map_err(|e| e.to_string())?;
+            w.write_all(&key.1.to_le_bytes()).map_err(|e| e.to_string())?;
+            w.write_all(&[key.2 as u8, key.3 as u8]).map_err(|e| e.to_string())?;
+            w.write_all(&tb.try_to_bytes()?).map_err(|e| e.to_string())?;
+        }
+        w.flush().map_err(|e| e.to_string())?;
+        Ok((order.len(), seen))
+    }
+
     /// Distinct configurations solved and held.
     pub fn cached(&self) -> usize {
         self.cache.len()
@@ -1414,6 +1509,56 @@ mod tests {
         println!("states exceeding i8 (+/-127): {over_i8}");
         println!("  -> i8 label {} ", if over_i8 == 0 { "FITS" } else { "OVERFLOWS" });
         assert!(worst > 0, "no decisive states measured at all");
+    }
+
+    /// Merging overlapping packs must keep each configuration once and lose
+    /// nothing.
+    ///
+    /// Two cones over the same board share their whole `(0,0)` layer -- a board
+    /// does not record who placed its walls -- so writing a pack per run stores
+    /// those tables twice. The solve graph never repeats that work; only the
+    /// saving did.
+    #[test]
+    fn merging_packs_deduplicates_without_losing_tables() {
+        use crate::titanium::endgame::tb_layers;
+        let seed = tb_layers::seed_boards(1, 909)[0];
+        let config = tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1");
+        let dir = std::env::temp_dir();
+        let a_path = dir.join("titanium_merge_a.tbpk");
+        let b_path = dir.join("titanium_merge_b.tbpk");
+        let m_path = dir.join("titanium_merge_out.tbpk");
+        let (a, b, m) = (
+            a_path.to_str().unwrap().to_string(),
+            b_path.to_str().unwrap().to_string(),
+            m_path.to_str().unwrap().to_string(),
+        );
+
+        // Two cones over the SAME board, differing only in who holds the wall.
+        let mut sa = TbSolver::new();
+        sa.solve(&tb_layers::state_from_config(config, [1, 0]));
+        let na = sa.save(&a).expect("save a");
+        let mut sb = TbSolver::new();
+        sb.solve(&tb_layers::state_from_config(config, [0, 1]));
+        let nb = sb.save(&b).expect("save b");
+
+        let (distinct, seen) =
+            TbSolver::merge_packs(&[a.clone(), b.clone()], &m).expect("merge");
+        assert_eq!(seen, na + nb, "merge must see every input record");
+        assert!(distinct < seen, "the two cones share tables, so merging must shrink");
+
+        // Everything either cone needed must still be answerable from the merge
+        // alone, with no re-solving.
+        let mut back = TbSolver::new();
+        assert_eq!(back.load(&m).expect("load merged"), distinct);
+        for hands in [[1, 0], [0, 1]] {
+            back.certify(&tb_layers::state_from_config(config, hands))
+                .unwrap_or_else(|e| panic!("merged store fails to certify {hands:?}: {e}"));
+        }
+        assert_eq!(back.cached(), distinct, "certify had to solve something new");
+
+        for p in [a_path, b_path, m_path] {
+            let _ = std::fs::remove_file(p);
+        }
     }
 
     #[test]
