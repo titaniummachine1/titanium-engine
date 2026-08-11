@@ -814,3 +814,110 @@ disagreement with the race solver surfaced.
 
 The real win today was the 19.4.4 crash fix, which was never gated because it
 was not a strength question.
+
+
+================================================================
+TABLEBASE: tiers 0-3 solved, verified and persisted (2026-08-11)
+================================================================
+
+## What exists now
+
+POSITION GENERATION (tb_layers.rs). Layers are wall configurations with 20-k
+walls placed, hence k in hand, peeled off 20-wall seed boards. Configurations
+are TRANSPOSITIONS -- keyed on (hw_bits, vw_bits), order of placement
+irrelevant, and who is owed the wall is deliberately not part of the key. From
+one seed the layers are exactly C(20,k): 1/20/190/1140/4845, asserted.
+
+Removal never needs a legality check: a wall can only block a path, so peeling
+one off a legal board leaves a legal board.
+
+PAWN CONFIGURATIONS. A configuration is only half a position. The legal pawn
+squares are a flood fill from the nine goal squares outward -- the inverse of
+forward play, where the BFS decides whether a WALL may be placed. Jumps are
+ignored deliberately: a jump needs an adjacent enemy pawn and never opens an
+edge the walls closed.
+
+SOLVER (tb_zero.rs). One code path for every tier. build_core takes wall
+placements as extra children carrying their already-solved lower-tier tables;
+an empty slice is (0,0). Retrograde in nondecreasing distance order via a heap.
+TbSolver memoises on (hw_bits, vw_bits, wl[0], wl[1]) -- the PAIR, never the
+total.
+
+PERSISTENCE. TBPK pack file, records sorted so output is byte-identical run to
+run, each table's content hash re-checked on load.
+
+## Measured, reproducibly (rng 202, index 0)
+
+  tier    solve     tables   hit rate   resident   pack     real draws
+  (1,1)     29s      2,420      73.9%     191 MB   152 MB       0
+  (3,0)    625s     57,452      66.1%    4523 MB     --         0
+  (2,1)   1156s     60,011      82.6%    4725 MB   3.7 GB      62
+
+Reload instead of solve: tier 2  29s -> 0.6s, tier 3  1156s -> 30s. Both
+certify locally consistent after reload.
+
+TIER 3 IS THE CEILING. ~24x tables and ~24x memory per wall added. Tier 4
+extrapolates to ~1.4M tables and ~110 GB for ONE configuration. Stopping at 3
+is a limit, not a preference.
+
+BOTH SIDES ARMED COSTS MORE, AND SHARES MORE. (2,1) took 1.85x the time of
+(3,0) despite a HIGHER hit rate (82.6% vs 66.1%): both players place, so every
+node has roughly twice the children, but placements from the two sides converge
+on the same boards more often. Time is driven by children per node, not by
+cache misses.
+
+## Bugs found and fixed in the existing (0,0) table
+
+1. UNREACHABLE PAWN STATES. build_for solved all 12,960 placements regardless of
+   whether a pawn could stand there. wall_legal only guarantees a path from
+   where the pawns STAND, so walls may legally seal an empty pocket; a pawn
+   dropped in one can never arrive, shuffles, and was filed as a repetition
+   draw. 26 of 40 legal 20-wall boards strand at least one square; 6.77% of
+   layer-0 states. Those were exact-looking labels for positions no game can
+   reach.
+
+2. DISTANCE-TO-MATE WAS WRONG, INCLUDING ON THE BARE BOARD. The fixpoint marked
+   a state won the moment any child was known lost and froze that distance;
+   a nearer losing child found later never shortened it. Verdicts stayed right,
+   so no test saw it -- every test compared win/loss only. Proof it was live:
+   win/loss/draw is unchanged at 7119/5841/0 but the bare-board content hash
+   moved e9f5e9817371bcef -> 237864baf7f9e666, and nothing but distance and
+   best_move feeds that hash.
+
+3. PACK FORMAT v1 reconstructed `live` as 81*80*2 instead of storing it, so a
+   reloaded PRUNED table claimed states it does not cover. v2 stores it.
+
+## Draw semantics
+
+Draw is the GAME VALUE -- neither side can force a win -- not the threefold
+repetition RULE. The table is keyed on (p0,p1,stm) with no history and could not
+count repetitions in principle; the finite state space is why the value shows up
+over the board as a repetition. Mutual zugzwang falls out of the retrograde
+rather than being special-cased: a state is LOST only once EVERY child is WON,
+so one drawing child leaves it unresolved forever.
+
+(0,0) IS NEVER A DRAW, structurally: with no wall to spend there is no way to
+lose a tempo, so the race is always decisive. Above that, draws are real but
+rare and strongly board-dependent -- one wall in hand is already enough (a (1,0)
+configuration with 87 real draws was measured).
+
+## Traps for the next session
+
+- HashSet::iter().next() is NOT a stable pick. Rust randomises the hash seed per
+  process, so it selects a different configuration every run. This made an
+  entire round of tier-2 measurements irreproducible and produced a wrong
+  published claim (that zugzwang needs both players armed). Use tb_layers::pick.
+- A CENSUS CANNOT DETECT THE SYMMETRIC COLLAPSE. (2,0) and (0,2) returned
+  identical win/loss totals -- 6492/5832 both ways -- while differing on 4988 of
+  9128 states. Compare per state, not in aggregate.
+- Random seed boards do NOT dedupe. 1000 of them gave exactly 1000x6196
+  configurations, zero collisions, even 4 walls up. Seeds must come from real
+  games or the layer union grows strictly linearly.
+
+## Not done
+
+- Tier 3 is one configuration, not a sweep. A full tier-3 layer is unstorable.
+- tbdump still forces wl=[0,0] regardless of walls placed, so its output still
+  violates conservation and is NOT safe training data.
+- Nothing is wired into search. These tiers are a LABEL SOURCE; 19.4.6 already
+  gated neutral as a strength play and there is no reason to expect otherwise.
