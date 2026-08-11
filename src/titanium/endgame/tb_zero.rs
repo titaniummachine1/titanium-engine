@@ -32,7 +32,8 @@
 //! the engine's own movegen.
 
 use crate::titanium::position::game::GameState;
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Result from the side-to-move's perspective.
@@ -112,6 +113,20 @@ impl ZeroWallTb {
     /// Both hands are empty in this subgame, so no wall can ever be placed and
     /// the configuration is fixed for the whole solve.
     pub fn build_for(template: &GameState) -> ZeroWallTb {
+        Self::build_core(template, &[])
+    }
+
+    /// Solve one tier.
+    ///
+    /// `wall_children` are the placements available to a side that still holds a
+    /// wall, each carrying the already-solved table one tier down that it leads
+    /// to. An empty slice is the `(0,0)` case, where no wall can be placed and
+    /// the configuration is fixed for the whole solve.
+    ///
+    /// Tier 0 and tier 1 deliberately share this one path. Two solvers would be
+    /// two chances to disagree, and the tier that is easy to verify is exactly
+    /// the one that would not catch it.
+    fn build_core(template: &GameState, wall_children: &[WallChild]) -> ZeroWallTb {
         let mut tbl = vec![TbEntry::default(); NSTATES];
         let mut live = 0usize;
 
@@ -133,11 +148,25 @@ impl ZeroWallTb {
         let mut moves: Vec<Vec<i16>> = vec![Vec::new(); NSTATES];
         let mut preds: Vec<Vec<u32>> = vec![Vec::new(); NSTATES];
         let mut remaining = vec![0u32; NSTATES];
+        let mut wall_kids = vec![0u32; NSTATES];
         let mut finalized = vec![false; NSTATES];
-        // Terminals all sit at distance 0 and every state entered afterwards is
-        // one ply further out, so a FIFO queue visits states in nondecreasing
-        // distance order and no bucket or heap is needed.
-        let mut queue: VecDeque<usize> = VecDeque::new();
+
+        // Events, popped in nondecreasing distance:
+        //
+        //   WIN_AT      this state is won at `d`
+        //   CHILD_WON   one of this state's children is won at `d`, so the state
+        //               is one step nearer to having every child won, which is
+        //               what makes it lost
+        //
+        // A heap rather than a FIFO because wall placements seed events at
+        // arbitrary distances taken from lower-tier tables, not just at 0.
+        //
+        // The two kinds can never race for the same state: WIN_AT means some
+        // child is lost, CHILD_WON reaching zero means every child is won, and
+        // those cannot both hold.
+        const WIN_AT: u8 = 0;
+        const CHILD_WON: u8 = 1;
+        let mut queue: BinaryHeap<Reverse<(i16, u8, u32, i16)>> = BinaryHeap::new();
 
         for p0 in 0..NCELLS {
             if !reach[0][p0] {
@@ -158,7 +187,6 @@ impl ZeroWallTb {
                             best_move: -1,
                         };
                         finalized[idx] = true;
-                        queue.push_back(idx);
                         continue;
                     }
                     if p1 >= 72 {
@@ -168,7 +196,6 @@ impl ZeroWallTb {
                             best_move: -1,
                         };
                         finalized[idx] = true;
-                        queue.push_back(idx);
                         continue;
                     }
                     g.pawn[0] = p0;
@@ -177,6 +204,41 @@ impl ZeroWallTb {
                     let mut buf = [0i16; 160];
                     let n = g.gen_pawn_moves(&mut buf, 0);
                     moves[idx] = buf[..n].to_vec();
+
+                    // Wall placements by the side to move. Their tables are one
+                    // tier down and already solved, so these values are known
+                    // before the walk starts and simply seed the queue.
+                    //
+                    // Legality is re-tested per state because `wall_legal` runs
+                    // the path check against THESE pawns; only where a placement
+                    // LANDS is pawn-independent, which is what lets the child
+                    // tables be shared across all states of the configuration.
+                    for wc in wall_children.iter().filter(|w| w.stm == stm) {
+                        if !g.wall_legal(wc.wall_type, wc.slot) {
+                            continue;
+                        }
+                        wall_kids[idx] += 1;
+                        let e = wc.table.probe_raw(p0, p1, 1 - stm);
+                        match e.result {
+                            // The opponent is lost there, so we win here.
+                            TbResult::Loss => queue.push(Reverse((
+                                e.distance + 1,
+                                WIN_AT,
+                                idx as u32,
+                                wc.move_id,
+                            ))),
+                            TbResult::Win => queue.push(Reverse((
+                                e.distance,
+                                CHILD_WON,
+                                idx as u32,
+                                wc.move_id,
+                            ))),
+                            // Counted in `remaining` and never decremented: a
+                            // side that can step into a draw is never forced to
+                            // lose.
+                            TbResult::Draw => {}
+                        }
+                    }
                 }
             }
         }
@@ -185,17 +247,40 @@ impl ZeroWallTb {
         // component as the square moved from, so a move out of a legal square
         // can only land on another legal square and no child needs filtering.
         for idx in 0..NSTATES {
-            if moves[idx].is_empty() {
+            if moves[idx].is_empty() && wall_kids[idx] == 0 {
                 continue;
             }
             let stm = idx & 1;
             let p0 = idx / 2 / NCELLS;
             let p1 = (idx / 2) % NCELLS;
+            // Wall placements are children too, so they count toward "every
+            // child is won" even though they live in another table.
+            remaining[idx] = wall_kids[idx];
             for &mv in &moves[idx] {
                 let dest = mv as usize;
                 let (c0, c1) = if stm == 0 { (dest, p1) } else { (p0, dest) };
                 preds[tb_index(c0, c1, 1 - stm)].push(idx as u32);
                 remaining[idx] += 1;
+            }
+        }
+
+        // Seed the walk from the terminals, which all sit at distance 0.
+        for idx in 0..NSTATES {
+            if !finalized[idx] {
+                continue;
+            }
+            let ct = idx & 1;
+            let dest = if ct == 1 {
+                (idx / 2 / NCELLS) as i16
+            } else {
+                ((idx / 2) % NCELLS) as i16
+            };
+            for &p in &preds[idx] {
+                match tbl[idx].result {
+                    TbResult::Loss => queue.push(Reverse((1, WIN_AT, p, dest))),
+                    TbResult::Win => queue.push(Reverse((0, CHILD_WON, p, dest))),
+                    TbResult::Draw => {}
+                }
             }
         }
 
@@ -210,48 +295,52 @@ impl ZeroWallTb {
         // wrong as a training label. Processing in nondecreasing distance makes
         // the FIRST time a state is reached its true distance, so it is
         // finalised once and never revised.
-        while let Some(idx) = queue.pop_front() {
-            let (result, d) = (tbl[idx].result, tbl[idx].distance);
-            // The move that led here, from the predecessor's point of view: the
-            // side that moved is the one NOT to move in this state.
-            let ct = idx & 1;
-            let c0 = idx / 2 / NCELLS;
-            let c1 = (idx / 2) % NCELLS;
-            let dest = if ct == 1 { c0 as i16 } else { c1 as i16 };
+        while let Some(Reverse((d, kind, target, mv))) = queue.pop() {
+            let idx = target as usize;
+            if finalized[idx] {
+                continue;
+            }
+            let (result, dist) = match kind {
+                // Reached from a lost child. Popping in increasing distance
+                // means this is the NEAREST such child, so `d` is already the
+                // true distance and never needs revising.
+                WIN_AT => (TbResult::Win, d),
+                // One more child won. The state is lost only once every child
+                // is, and because these arrive in increasing distance the one
+                // that empties the counter is the longest resistance — so it is
+                // both the right distance and the right move to record.
+                _ => {
+                    remaining[idx] -= 1;
+                    if remaining[idx] != 0 {
+                        continue;
+                    }
+                    (TbResult::Loss, d + 1)
+                }
+            };
+            tbl[idx] = TbEntry {
+                result,
+                distance: dist,
+                best_move: mv,
+            };
+            finalized[idx] = true;
 
+            // Propagate to the pawn-move predecessors inside this table. Wall
+            // placements need no propagation: they only ever point DOWN a tier,
+            // and that tier was solved before this one started.
+            let ct = idx & 1;
+            let dest = if ct == 1 {
+                (idx / 2 / NCELLS) as i16
+            } else {
+                ((idx / 2) % NCELLS) as i16
+            };
             for pi in 0..preds[idx].len() {
-                let p = preds[idx][pi] as usize;
-                if finalized[p] {
+                let p = preds[idx][pi];
+                if finalized[p as usize] {
                     continue;
                 }
                 match result {
-                    // A child the opponent loses in makes this a win, and the
-                    // first one found is the shortest.
-                    TbResult::Loss => {
-                        tbl[p] = TbEntry {
-                            result: TbResult::Win,
-                            distance: d + 1,
-                            best_move: dest,
-                        };
-                        finalized[p] = true;
-                        queue.push_back(p);
-                    }
-                    // One more child known won. Only when every child is won is
-                    // the state lost, and the child that got it there last is
-                    // the longest resistance -- so this is also the right move
-                    // to record.
-                    TbResult::Win => {
-                        remaining[p] -= 1;
-                        if remaining[p] == 0 {
-                            tbl[p] = TbEntry {
-                                result: TbResult::Loss,
-                                distance: d + 1,
-                                best_move: dest,
-                            };
-                            finalized[p] = true;
-                            queue.push_back(p);
-                        }
-                    }
+                    TbResult::Loss => queue.push(Reverse((dist + 1, WIN_AT, p, dest))),
+                    TbResult::Win => queue.push(Reverse((dist, CHILD_WON, p, dest))),
                     TbResult::Draw => {}
                 }
             }
@@ -402,6 +491,254 @@ impl ZeroWallTb {
             }
         }
         (w, l, d)
+    }
+}
+
+// ── Tier 1: one wall still in hand ──────────────────────────────────────────
+
+/// A wall placement available in a tier, with the already-solved table it leads
+/// to. Built once per configuration and shared across every pawn state, because
+/// where a placement LANDS depends only on the walls.
+struct WallChild {
+    stm: usize,
+    wall_type: usize,
+    slot: usize,
+    move_id: i16,
+    table: Arc<ZeroWallTb>,
+}
+
+/// Cache key: the wall configuration plus the hand PAIR.
+///
+/// Keyed by the pair and never the total. `(2,0)` and `(1,1)` are different
+/// games — the configuration is the same board either way, but who holds the
+/// wall decides who may place it, so the solutions differ.
+pub type TbKey = (u64, u64, i32, i32);
+
+/// Solve a tier on demand, memoising the lower tiers it rests on.
+///
+/// Play only ever moves DOWN a tier: walls in hand cannot increase, so placing
+/// the last wall lands in `(0,0)` and stays there. Taking walls back off a board
+/// is our enumeration device for finding configurations, never a move.
+///
+/// The memo is what makes this finite. A held wall may be placed in ANY legal
+/// slot, not back where it came from, so a 19-wall position's children are ~109
+/// DIFFERENT 20-wall boards — only one of which is the board it was peeled from.
+/// Peeling gives the positions to solve; it does not give the positions needed
+/// to solve them.
+pub struct TbSolver {
+    cache: HashMap<TbKey, Arc<ZeroWallTb>>,
+    hits: u64,
+    misses: u64,
+}
+
+impl Default for TbSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TbSolver {
+    pub fn new() -> TbSolver {
+        TbSolver {
+            cache: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    pub fn key(g: &GameState) -> TbKey {
+        (g.hw_bits, g.vw_bits, g.wl[0], g.wl[1])
+    }
+
+    /// Solve the tier `template` sits in, recursing into the tiers below.
+    ///
+    /// Terminates because every recursive call spends a wall, and `(0,0)` has
+    /// none left to spend.
+    pub fn solve(&mut self, template: &GameState) -> Arc<ZeroWallTb> {
+        let key = Self::key(template);
+        if let Some(t) = self.cache.get(&key) {
+            self.hits += 1;
+            return Arc::clone(t);
+        }
+        self.misses += 1;
+        let built = Arc::new(self.build(template));
+        self.cache.insert(key, Arc::clone(&built));
+        built
+    }
+
+    fn build(&mut self, template: &GameState) -> ZeroWallTb {
+        if template.wl[0] <= 0 && template.wl[1] <= 0 {
+            return ZeroWallTb::build_for(template);
+        }
+        let children = self.children_of(template);
+        ZeroWallTb::build_core(template, &children)
+    }
+
+    /// The wall placements available in `template`'s tier, each with its solved
+    /// child table.
+    fn children_of(&mut self, template: &GameState) -> Vec<WallChild> {
+        let mut children = Vec::new();
+        for stm in 0..2 {
+            if template.wl[stm] <= 0 {
+                continue;
+            }
+            for wall_type in 0..2 {
+                for slot in 0..64 {
+                    // `wall_fits` is the pawn-INDEPENDENT half of legality:
+                    // overlap and crossing. The path check is the pawn-dependent
+                    // half and is re-run per state in `build_core`, so this
+                    // over-generates rather than under-. That is the safe
+                    // direction — a child table no state can reach costs memory,
+                    // a missing one would be a wrong answer.
+                    if !template.wall_fits(wall_type, slot) {
+                        continue;
+                    }
+                    let move_id = if wall_type == 0 {
+                        crate::titanium::MOVE_HW_BASE
+                    } else {
+                        crate::titanium::MOVE_VW_BASE
+                    } + slot as i16;
+                    // Made as a real move rather than by editing bits, so the
+                    // child's walls, hands and turn are what the engine would
+                    // produce.
+                    let mut c = template.clone();
+                    c.turn = stm;
+                    c.make_move(move_id);
+                    let table = self.solve(&c);
+                    children.push(WallChild {
+                        stm,
+                        wall_type,
+                        slot,
+                        move_id,
+                        table,
+                    });
+                }
+            }
+        }
+        children
+    }
+
+    /// Verify a solved tier by LOCAL CONSISTENCY: every state's verdict and
+    /// distance must follow from its children's.
+    ///
+    /// This is a proof, not a spot check. If every state is locally consistent
+    /// and the tier below is correct, the tier is correct by induction — and
+    /// `(0,0)` is independently verified against
+    /// `hands_empty_race_stm_wins_oracle`, so the induction has a base.
+    ///
+    /// It is also the only check available up here. `exact_dp` solves the
+    /// hands-empty class only, so no external oracle exists for a tier holding a
+    /// wall, and a plain negamax cannot be one either — the pawn-shuffle cycles
+    /// are exactly what the retrograde exists to resolve.
+    pub fn certify(&mut self, template: &GameState) -> Result<(), String> {
+        let table = self.solve(template);
+        let children = self.children_of(template);
+        let reach = [
+            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
+            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+        ];
+        let mut g = template.clone();
+
+        for p0 in 9..NCELLS {
+            if !reach[0][p0] {
+                continue;
+            }
+            for p1 in 0..72 {
+                if p0 == p1 || !reach[1][p1] {
+                    continue;
+                }
+                for stm in 0..2 {
+                    let got = table.probe_raw(p0, p1, stm);
+                    g.pawn[0] = p0;
+                    g.pawn[1] = p1;
+                    g.turn = stm;
+
+                    let mut vals: Vec<TbEntry> = Vec::with_capacity(16);
+                    let mut buf = [0i16; 160];
+                    let n = g.gen_pawn_moves(&mut buf, 0);
+                    for &mv in &buf[..n] {
+                        let dest = mv as usize;
+                        let (c0, c1) = if stm == 0 { (dest, p1) } else { (p0, dest) };
+                        vals.push(table.probe_raw(c0, c1, 1 - stm));
+                    }
+                    for wc in children.iter().filter(|w| w.stm == stm) {
+                        if g.wall_legal(wc.wall_type, wc.slot) {
+                            vals.push(wc.table.probe_raw(p0, p1, 1 - stm));
+                        }
+                    }
+                    if vals.is_empty() {
+                        continue;
+                    }
+
+                    let mut nearest_loss: Option<i16> = None;
+                    let mut furthest_win: Option<i16> = None;
+                    let mut all_win = true;
+                    for e in &vals {
+                        match e.result {
+                            TbResult::Loss => {
+                                if nearest_loss.map_or(true, |b| e.distance < b) {
+                                    nearest_loss = Some(e.distance);
+                                }
+                            }
+                            TbResult::Win => {
+                                if furthest_win.map_or(true, |b| e.distance > b) {
+                                    furthest_win = Some(e.distance);
+                                }
+                            }
+                            TbResult::Draw => all_win = false,
+                        }
+                    }
+
+                    let (want, want_d) = if let Some(d) = nearest_loss {
+                        (TbResult::Win, d + 1)
+                    } else if all_win {
+                        (TbResult::Loss, furthest_win.unwrap_or(-2) + 1)
+                    } else {
+                        (TbResult::Draw, -1)
+                    };
+
+                    if got.result != want {
+                        return Err(format!(
+                            "(p0={p0}, p1={p1}, stm={stm}): table {:?}, children imply {want:?}",
+                            got.result
+                        ));
+                    }
+                    if want != TbResult::Draw && got.distance != want_d {
+                        return Err(format!(
+                            "(p0={p0}, p1={p1}, stm={stm}) {want:?}: distance {} but children imply {want_d}",
+                            got.distance
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Distinct configurations solved and held.
+    pub fn cached(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Share of `solve` calls answered from cache. This is the number that
+    /// decides how far the ladder can climb — memory, not time, binds first.
+    pub fn hit_rate(&self) -> f64 {
+        let total = self.hits + self.misses;
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+
+    /// Drop every held table. The tiers are solved bottom-up, so once a tier is
+    /// finished the ones beneath it are dead weight.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.cache.len() * NSTATES * std::mem::size_of::<TbEntry>()
     }
 }
 
@@ -638,6 +975,91 @@ mod tests {
             t.live_states() < 81 * 80 * 2,
             "this board strands squares, so the table must be smaller than the full grid"
         );
+    }
+
+    /// Tier 1: one wall in hand, solved on top of the `(0,0)` tables its
+    /// placements reach.
+    ///
+    /// Uses a REAL layer-1 configuration — a 20-wall board with one wall peeled
+    /// back off — so conservation holds (board + both hands == 20) and the
+    /// position is one a game could actually be in.
+    #[test]
+    fn tier_one_is_locally_consistent() {
+        use crate::titanium::endgame::tb_layers;
+        let seed = tb_layers::seed_boards(1, 20260811)[0];
+        let layer1 = tb_layers::expand(&[seed], 1);
+        // Whoever is owed the peeled wall is what makes (1,0) and (0,1)
+        // different games on the same board, so check both.
+        for hands in [[1, 0], [0, 1]] {
+            let config = *layer1[1].iter().next().expect("layer 1 is empty");
+            let g = tb_layers::state_from_config(config, hands);
+            assert_eq!(
+                tb_layers::wall_count(config) as i32 + g.wl[0] + g.wl[1],
+                20,
+                "wall conservation"
+            );
+            let mut s = TbSolver::new();
+            if let Err(e) = s.certify(&g) {
+                panic!("tier-1 {hands:?} is not locally consistent: {e}");
+            }
+            println!(
+                "tier-1 {hands:?}: {} configs solved, hit rate {:.1}%, {:.1} MB",
+                s.cached(),
+                s.hit_rate() * 100.0,
+                s.bytes() as f64 / 1e6
+            );
+        }
+    }
+
+    /// A wall in hand can only help the side holding it: giving a player a wall
+    /// must never turn a position they had won into one they lose.
+    ///
+    /// Independent of local consistency — that check would pass just as happily
+    /// on a table that mixed the two players up, which is the mistake the
+    /// pair-keying exists to prevent.
+    #[test]
+    fn holding_a_wall_never_hurts() {
+        use crate::titanium::endgame::tb_layers;
+        let seed = tb_layers::seed_boards(1, 555)[0];
+        let config = *tb_layers::expand(&[seed], 1)[1]
+            .iter()
+            .next()
+            .expect("layer 1 is empty");
+
+        let mut s = TbSolver::new();
+        // Same board, same pawns: once with the wall in hand, once after it is
+        // spent. `(0,0)` on this 19-wall board is the same race with no wall to
+        // place, so any position won there must still be won holding one.
+        let with_wall = s.solve(&tb_layers::state_from_config(config, [1, 0]));
+        let without = s.solve(&tb_layers::state_from_config(config, [0, 0]));
+        let reach = [
+            tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 0),
+            tb_layers::goal_reachable(&tb_layers::state_from_config(config, [0, 0]), 1),
+        ];
+
+        let mut checked = 0usize;
+        for p0 in 9..81 {
+            if !reach[0][p0] {
+                continue;
+            }
+            for p1 in 0..72 {
+                if p0 == p1 || !reach[1][p1] {
+                    continue;
+                }
+                // Player 0 to move, holding the wall.
+                let a = with_wall.probe_raw(p0, p1, 0);
+                let b = without.probe_raw(p0, p1, 0);
+                if b.result == TbResult::Win {
+                    assert_ne!(
+                        a.result,
+                        TbResult::Loss,
+                        "p0={p0} p1={p1}: won without a wall but lost while holding one"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 500, "too few states compared: {checked}");
     }
 
     #[test]
