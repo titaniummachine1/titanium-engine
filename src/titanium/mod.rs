@@ -1,25 +1,21 @@
-//! **Titanium v15** — the production Titanium engine — and the ACE v13
-//! reference family live in this module.
+//! **Titanium** — the production engine, and the only search in this crate.
 //!
-//! ## Titanium v15
-//! The flagship engine: grafts the Titanium O1 pawn-LUT movegen, adaptive TT,
-//! win-certificate solver (`certify.rs`), and incremental HalfPW accumulator
-//! onto the gen13 search core.  It is NOT just an ACE port — it is the
-//! Titanium engine, using ACE v13 as its search algorithm foundation.
-//! Session: `run_titanium_session_stdio` (warm TT, `go TIME_SEC`).  Optional
-//! `run_titanium_session_stdio` (infinite search) is compiled but not routed.
+//! Version is `titanium-v{CARGO_PKG_VERSION}` (see `uci::session::ENGINE_VERSION`);
+//! there is no second engine, no reference port, and no flag that selects one.
+//! An engine flag this binary does not recognise is rejected rather than routed,
+//! because a weaker search silently reachable by a stale flag has cost real Elo
+//! here before.
 //!
-//! ## ACE v13 reference engines
-//! Faithful Rust ports of `ACEV13.html` ("pathfix gen11_ghi +
-//! RaceProof/ThreatPrice/WallSense").  Rules, movegen, and HalfPW net are
-//! byte-identical to the JS (verified `net_weights.bin` Wskip match).
-//! gen13 addition: `certify_win.js` is inlined so `RP_CERT` always exists;
-//! the static win-certificate solver and last-wall commitment gate are ported.
-//! ThreatPrice / WallSense ship false in gen13 and are not ported.
+//! Titanium grafts the O1 pawn-LUT movegen, an adaptive TT, the win-certificate
+//! solver (`certify.rs`), and an incremental HalfPW accumulator onto the search
+//! core it originally inherited from the ACE v13 JavaScript engine. That
+//! ancestry survives only as history: the ACE crate and its faithful-port
+//! variants are deleted, and nothing in the tree is required to match their
+//! behaviour. Comments elsewhere that pin behaviour to "what the JS did" are
+//! constraints on a reference implementation that no longer exists — treat them
+//! as suspect, not as invariants.
 //!
-//! - **`ace-v13-ti`** — optimized: Titanium O1 movegen, fully-legal tree.
-//! - **`ace-v13-pure`** — faithful 1:1 port: native ACE movegen, JS-matching.
-//! - **`ace-v13-ti-pure`** — O1 movegen + pure_mode=true (JS baseline for Elo).
+//! Session entry point: `run_titanium_session_stdio` (warm TT, `go TIME_SEC`).
 //!
 //! ## Coordinate mapping (ACE row 0 = top, Titanium row 0 = bottom)
 //!   pawn  m = (8 - row) * 9 + col

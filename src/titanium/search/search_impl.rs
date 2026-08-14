@@ -436,7 +436,6 @@ mod lazy_smp_tests {
             123,
             456,
             7,
-            false,
             20,
             SharedTtEntry {
                 key_hi: 456,
@@ -1053,7 +1052,6 @@ impl SharedTitaniumTt {
         hash_lo: u32,
         hash_hi: u32,
         tt_gen: u8,
-        pure_mode: bool,
         root_walls: u8,
         entry: SharedTtEntry,
     ) {
@@ -1065,7 +1063,7 @@ impl SharedTitaniumTt {
         // More walls in hand than the root means an earlier game phase, which no
         // line from here can reach. Overwrite it regardless of depth.
         let unreachable = !was_empty && slot.walls > root_walls;
-        let stale_gen = !pure_mode && !was_empty && slot.entry_gen != tt_gen;
+        let stale_gen = !was_empty && slot.entry_gen != tt_gen;
         let deeper = !was_empty
             && !stale_gen
             && !unreachable
@@ -6933,7 +6931,7 @@ impl TitaniumSearch {
                 rb = 1;
             }
         }
-        // Depth-preferred replacement (gen-aware when pure_mode=false).
+        // Depth-preferred, generation-aware replacement.
         // Recompute idx: a child may have grown the TT (adaptive path) after our probe.
         let idx = (self.g.hash_lo & self.tt_mask) as usize;
         #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -6943,7 +6941,6 @@ impl TitaniumSearch {
                 self.g.hash_lo,
                 self.g.hash_hi,
                 self.tt_gen,
-                false, // pure_mode: retired faithful-JS baseline
                 self.root_walls,
                 SharedTtEntry {
                     key_hi: self.g.hash_hi,
@@ -8492,10 +8489,10 @@ mod shared_tt_phase_tests {
     fn earlier_phase_entry_is_evicted_even_when_deeper() {
         let tt = table(4);
         // Deep entry from a position with 18 walls still in hand.
-        tt.store(0, 0xABCD, 7, false, 18, entry(0, 30, 18));
+        tt.store(0, 0xABCD, 7, 18, entry(0, 30, 18));
         // Root is now down to 6 walls, so that entry can never be reached again.
         // A far shallower store must still take the slot.
-        tt.store(0, 0xABCD, 7, false, 6, entry(0, 2, 6));
+        tt.store(0, 0xABCD, 7, 6, entry(0, 2, 6));
         let got = tt.probe(0, 0xABCD).expect("slot occupied");
         assert_eq!(tt_unpack_depth(got.meta), 2, "dead entry must lose to a shallow live one");
         assert_eq!(got.walls, 6);
@@ -8504,8 +8501,8 @@ mod shared_tt_phase_tests {
     #[test]
     fn live_entry_is_kept_against_a_shallower_store() {
         let tt = table(4);
-        tt.store(0, 0xABCD, 7, false, 6, entry(0, 30, 6));
-        tt.store(0, 0xABCD, 7, false, 6, entry(0, 2, 6));
+        tt.store(0, 0xABCD, 7, 6, entry(0, 30, 6));
+        tt.store(0, 0xABCD, 7, 6, entry(0, 2, 6));
         let got = tt.probe(0, 0xABCD).expect("slot occupied");
         assert_eq!(tt_unpack_depth(got.meta), 30, "same phase must stay depth-preferred");
     }
@@ -8516,7 +8513,7 @@ mod shared_tt_phase_tests {
         let tt = table(bits);
         // Fill every slot with entries from an early phase (18 walls in hand).
         for i in 0..(1u32 << bits) {
-            tt.store(i, 0xABCD, 7, false, 20, entry(i, 5, 18));
+            tt.store(i, 0xABCD, 7, 20, entry(i, 5, 18));
         }
         assert!(tt.live_fraction(20) > 0.9, "all live while the root still holds 20");
         assert_eq!(
@@ -8530,7 +8527,7 @@ mod shared_tt_phase_tests {
     fn growth_rehashes_entries_into_the_larger_table() {
         let small = table(4);
         for i in 0..8u32 {
-            small.store(i, 0xABCD, 7, false, 6, entry(i, 5, 6));
+            small.store(i, 0xABCD, 7, 6, entry(i, 5, 6));
         }
         let big = small.grown_to(6);
         assert_eq!(big.bits, 6);
