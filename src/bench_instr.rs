@@ -230,7 +230,7 @@ impl BenchInstr {
         }
         let nodes = self.search_nodes;
         let total_ns = self.measured_ns;
-          let ops: [(&str, &OpStat); 60] = [
+        let ops: [(&str, &OpStat); 60] = [
             ("evaluate", &self.evaluate),
             ("eval_race_bound", &self.eval_race_bound),
             ("race_gate_cached", &self.race_gate_cached),
@@ -324,20 +324,10 @@ impl BenchInstr {
             })
             .collect();
 
-        // DistTopoEntry layout sizes — sourced from helpers next to DistTopoEntry
-        // so JSON stays aligned with search_impl (scalar ≈ key+depths+d0+d1 = 174).
-        let dist_topo_entry_bytes = crate::titanium::search::dist_topo_entry_size_bytes();
-        let dist_topo_scalar_bytes = crate::titanium::search::dist_topo_scalar_bytes();
-        let dist_topo_layer_bytes = crate::titanium::search::dist_topo_layer_bytes();
-
         let dist_layer_depth_samples: u64 = self.dist_layer_depth_hist.iter().sum();
         format!(
-            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","dist_topo_entry_bytes":{},"dist_topo_scalar_bytes":{},"dist_topo_layer_bytes":{},"dist_lru_layer_copy_bytes":{},"dist_layer_depth_hist":{{"0_4":{},"5_8":{},"9_12":{},"13_16":{},"17_32":{},"33_plus":{}}},"dist_layer_depth_samples":{},"dist_layer_depth_max":{},"refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
+            r#"{{"search_nodes":{nodes},"measured_ns":{total_ns},"stop_reason":"{}","dist_layer_depth_hist":{{"0_4":{},"5_8":{},"9_12":{},"13_16":{},"17_32":{},"33_plus":{}}},"dist_layer_depth_samples":{},"dist_layer_depth_max":{},"refresh_dist_calls":{},"refresh_site_calls_sum":{},"refresh_ab_skipped":{},"cat_path_lmr":{{"child_ab_entries":{},"dup_valid":{},"dup_refresh":{},"dup_avoided":{},"tt_cutoff_before_eval":{},"incr_no_edge_cut":{},"no_edge_skip":{},"edge_test_calls":{}}},"ops":[{}],"refresh_sites":[{}]}}"#,
             self.stop_reason,
-            dist_topo_entry_bytes,
-            dist_topo_scalar_bytes,
-            dist_topo_layer_bytes,
-            self.dist_lru_layer_copy_bytes,
             self.dist_layer_depth_hist[0],
             self.dist_layer_depth_hist[1],
             self.dist_layer_depth_hist[2],
