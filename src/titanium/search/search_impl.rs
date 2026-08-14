@@ -4302,6 +4302,10 @@ impl TitaniumSearch {
                         );
                     }
                 }
+                // Same rule as the full path: a flood that just ran is a free
+                // witness. Most refloods land here, so seeding only in the full
+                // path would leave the majority of proofs unminted.
+                self.seed_witnesses_from_layers(ply, refresh0, refresh1);
                 crate::bench_instr::refresh_site_path(1);
                 self.cached_stamp = stamp;
                 return;
@@ -4350,43 +4354,65 @@ impl TitaniumSearch {
         self.d1_key[ply] = wkey;
         self.cached_stamp = stamp;
 
-        // Extract witness paths from eval's layers so movegen can reuse them.
-        // Only when route_active (layers are populated) and only if the
-        // witness set doesn't already have paths for that player (don't
-        // overwrite inherited or previously-minted paths).
-        if self.net.route_active {
-            let masks = self.current_dir_masks();
-            let p0_bit = FLOOD_BIT_BY_SQ[self.g.pawn[0] as usize];
-            let p1_bit = FLOOD_BIT_BY_SQ[self.g.pawn[1] as usize];
-            let p0_path = if d0_todo {
-                path_witness_from_eval_layers(
-                    p0_bit,
-                    &self.d0_layers[ply],
-                    self.d0_layer_depth[ply],
-                    masks,
-                )
-            } else {
-                None
-            };
-            let p1_path = if d1_todo {
-                path_witness_from_eval_layers(
-                    p1_bit,
-                    &self.d1_layers[ply],
-                    self.d1_layer_depth[ply],
-                    masks,
-                )
-            } else {
-                None
-            };
-            if let Some(bridge) = self.bridge.as_mut() {
-                if ply < bridge.witness.len() {
-                    if let Some(p) = p0_path {
-                        bridge.witness[ply].seed_from_eval(0, p);
-                    }
-                    if let Some(p) = p1_path {
-                        bridge.witness[ply].seed_from_eval(1, p);
-                    }
-                }
+        self.seed_witnesses_from_layers(ply, d0_todo, d1_todo);
+    }
+
+    /// Mint witness paths from the distance layers a refresh just flooded, so
+    /// movegen's legality proof can reuse them instead of flooding again.
+    ///
+    /// Every shortest-path flood is eligible. The layers ARE the shortest-path
+    /// DAG for this wall set, so a path read out of them is a standing proof
+    /// that the player reaches goal -- and one that stays valid for the whole
+    /// subtree until some wall actually cuts it, because walls are only ever
+    /// added going down. `WitnessSet::survives` is what tests that, and
+    /// `propagate_up` hands anything discovered here to later siblings.
+    ///
+    /// This used to be gated on `net.route_active`, which is true only when the
+    /// loaded weights carry non-zero route planes -- false for every shipped
+    /// net, so the supply was dead and movegen fell back to flooding. The gate
+    /// was never needed: the layers are populated by every refresh regardless
+    /// of what eval does with them.
+    ///
+    /// `mint0`/`mint1` must be set only for players whose layers this refresh
+    /// actually wrote at `ply`; another player's slot may still hold an
+    /// ancestor's fields.
+    fn seed_witnesses_from_layers(&mut self, ply: usize, mint0: bool, mint1: bool) {
+        // Extracting a path costs a walk down the layers, so skip any player
+        // that already holds an inherited or previously-minted path --
+        // `seed_from_eval` would discard the result anyway.
+        let (need0, need1) = match self.bridge.as_ref() {
+            Some(bridge) if ply < bridge.witness.len() => (
+                mint0 && bridge.witness[ply].shortest_distance(0).is_none(),
+                mint1 && bridge.witness[ply].shortest_distance(1).is_none(),
+            ),
+            _ => return,
+        };
+        if !(need0 || need1) {
+            return;
+        }
+        let masks = self.current_dir_masks();
+        let p0_path = need0.then(|| {
+            path_witness_from_eval_layers(
+                FLOOD_BIT_BY_SQ[self.g.pawn[0] as usize],
+                &self.d0_layers[ply],
+                self.d0_layer_depth[ply],
+                masks,
+            )
+        });
+        let p1_path = need1.then(|| {
+            path_witness_from_eval_layers(
+                FLOOD_BIT_BY_SQ[self.g.pawn[1] as usize],
+                &self.d1_layers[ply],
+                self.d1_layer_depth[ply],
+                masks,
+            )
+        });
+        if let Some(bridge) = self.bridge.as_mut() {
+            if let Some(Some(p)) = p0_path {
+                bridge.witness[ply].seed_from_eval(0, p);
+            }
+            if let Some(Some(p)) = p1_path {
+                bridge.witness[ply].seed_from_eval(1, p);
             }
         }
     }
