@@ -10,9 +10,9 @@ use crate::movegen::pawn_bits::{
 use crate::movegen::wall_masks::{wall_occupied_mask, WALL_EDGE_MASK, WALL_TOUCH_MASKS};
 use crate::pathfinding::bff::wall::{
     bff_path_to_goal, bff_path_to_goal_cached_with_visited, bff_path_to_goal_with_visited,
-    bff_resume_path_to_goal, bff_to_goal, bff_wall_legal,
-    delta_touches_visited, pawn_bit, wall_delta, CachedPathResult, PathWitness, WallGrids,
-    MAX_PATH_LAYERS, P1_GOAL_BITS, P2_GOAL_BITS,
+    bff_resume_path_to_goal, bff_to_goal, bff_wall_legal, delta_touches_visited, pawn_bit,
+    wall_delta, CachedPathResult, PathWitness, WallGrids, MAX_PATH_LAYERS, P1_GOAL_BITS,
+    P2_GOAL_BITS,
 };
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
@@ -517,7 +517,13 @@ fn collect_wall_orientation(
         |b| &mut b.collect_wall_orientation,
         || {
             collect_wall_orientation_inner(
-                board, candidates, needs_flood, orientation, out, ctx, witness,
+                board,
+                candidates,
+                needs_flood,
+                orientation,
+                out,
+                ctx,
+                witness,
             )
         },
     )
@@ -853,7 +859,6 @@ impl WallTrialCtx {
         ctx
     }
 
-
     /// Speculative trial: place the wall's blocked-edge delta, run binary flood fill
     /// for both players (P2 reuses P1's visited bits), then roll back.
     #[inline]
@@ -913,12 +918,7 @@ impl WallTrialCtx {
     /// placed in `self.grids`, and back-propagate whatever path the flood finds
     /// into the shared sets so every later candidate at this node can use it.
     #[inline]
-    fn trial_and_learn(
-        &mut self,
-        p1_safe: bool,
-        p2_safe: bool,
-        witness: &mut NodeWitness,
-    ) -> bool {
+    fn trial_and_learn(&mut self, p1_safe: bool, p2_safe: bool, witness: &mut NodeWitness) -> bool {
         if p1_safe != p2_safe {
             // Only one side is in doubt, so only that side floods — and the
             // shortest path that comes back is simultaneously the verdict and
@@ -1538,8 +1538,12 @@ mod tests {
             col: 0,
             orientation: WallOrientation::Horizontal,
         }; MAX_LEGAL_MOVES];
-        let n_walls =
-            generate_wall_moves_slice(&mut board, &mut wall_only, &mut scratch, &mut NodeWitness::default());
+        let n_walls = generate_wall_moves_slice(
+            &mut board,
+            &mut wall_only,
+            &mut scratch,
+            &mut NodeWitness::default(),
+        );
         assert_eq!(count, n_walls);
         assert_eq!(stats.wall_generation_calls, 1);
         assert_eq!(stats.hits_eval, 1);

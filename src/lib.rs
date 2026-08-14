@@ -49,13 +49,13 @@ pub use pathfinding::{both_players_reach_goals, can_reach_goal, shortest_distanc
 pub use util::perft::perft_fast_timed;
 #[cfg(feature = "parallel")]
 pub use util::perft::perft_parallel_root;
-pub use util::perft_engine::{Engine, EngineLimits, ThreadBenchResult};
 pub use util::perft::{
     format_move, perft, perft_divide, perft_fast, perft_fast_anchor_baseline, perft_fast_ctx,
     perft_fast_mode, perft_fast_mode_ctx, perft_iterative, perft_naive,
     perft_no_tt_anchor_baseline, perft_no_tt_mode, perft_pawn_only_mode, PerftContext,
     PERFT3_STARTPOS, PERFT4_STARTPOS, PERFT5_STARTPOS, PERFT5_TIMEOUT_SECS,
 };
+pub use util::perft_engine::{Engine, EngineLimits, ThreadBenchResult};
 
 // Re-export for sibling engines (e.g. `engines/ace`) that need ACE-row goal bits.
 pub use titanium::dist;
@@ -66,8 +66,7 @@ pub use titanium::fields_viz;
 pub use titanium::opening_book;
 pub use titanium::{
     algebraic_to_move_id, board_move_to_move_id, decode_packed_state, move_id_to_algebraic,
-    move_id_to_board, pack_state, run_titanium_session_stdio,
-    titanium_game_from_packed,
-    titanium_genmove, GameState, TitaniumParams, TitaniumSearch,
-    FEATURE_SCHEMA, PACKED_STATE_LEN, POSITION_SCHEMA_VERSION, TITANIUM_NO_MOVE,
+    move_id_to_board, pack_state, run_titanium_session_stdio, titanium_game_from_packed,
+    titanium_genmove, GameState, TitaniumParams, TitaniumSearch, FEATURE_SCHEMA, PACKED_STATE_LEN,
+    POSITION_SCHEMA_VERSION, TITANIUM_NO_MOVE,
 };

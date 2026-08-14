@@ -314,7 +314,9 @@ pub fn seed_boards(n: usize, rng_seed: u64) -> Vec<Config> {
     let mut attempts = 0usize;
     while out.len() < n && attempts < n * 1000 + 1000 {
         attempts += 1;
-        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         if let Some(c) = random_seed_board(s) {
             if seen.insert(c) {
                 out.push(c);
@@ -368,8 +370,14 @@ mod tests {
     #[test]
     fn a_bare_board_reaches_every_square() {
         let ok = legal_pawn_squares((0, 0));
-        assert!(ok[0].iter().all(|&b| b), "no walls: every square reaches row 0");
-        assert!(ok[1].iter().all(|&b| b), "no walls: every square reaches row 8");
+        assert!(
+            ok[0].iter().all(|&b| b),
+            "no walls: every square reaches row 0"
+        );
+        assert!(
+            ok[1].iter().all(|&b| b),
+            "no walls: every square reaches row 8"
+        );
         assert_eq!(live_state_count((0, 0)), 81 * 80 * 2);
     }
 

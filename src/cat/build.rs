@@ -15,9 +15,7 @@ use crate::pathfinding::bfs::layers::{
 };
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
-use crate::util::grid::{
-    flood_bit_sq, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT,
-};
+use crate::util::grid::{flood_bit_sq, square_index, FLOOD_PLAYABLE, FLOOD_SQ_BY_BIT};
 
 fn corridor_heat(delta: u16) -> u16 {
     if delta > MAX_RELEVANT_CORRIDOR_DELTA {
@@ -575,7 +573,6 @@ fn add_catv5_propagated_heat(
         }
     }
 }
-
 
 /// CATv5 NN fields. The raw 0..4 witness value identifies which deterministic
 /// unique path owns a cell (paths may overlap only on the first ply). This is

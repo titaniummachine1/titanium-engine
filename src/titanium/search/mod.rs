@@ -3,9 +3,9 @@
 //! LMR helpers (`v16_lmr`, `cat_index_lmr`) and TT cache-tier sizing live here
 //! next to the play engine. Historical αβ/CLI lives in `engine/legacy/search/`.
 
-mod search_impl;
-pub mod v16_lmr;
 pub mod cat_index_lmr;
+mod search_impl;
 pub mod tt_sizing;
+pub mod v16_lmr;
 
 pub use search_impl::*;

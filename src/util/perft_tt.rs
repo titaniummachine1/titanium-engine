@@ -341,7 +341,6 @@ impl TranspositionTable {
     }
 }
 
-
 /// Per-run perft state. Trivial wrappers, kept so the perft entry points read
 /// the same as before the legacy tree was removed.
 pub struct SharedState {

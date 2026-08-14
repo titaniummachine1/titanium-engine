@@ -192,7 +192,6 @@ fn spend_policy(remaining_ms: u64) -> (f64, f64) {
     }
 }
 
-
 // ── Value-of-thinking planner ────────────────────────────────────────────────
 //
 // The clock is split in proportion to how much a longer search can still change
@@ -357,8 +356,14 @@ pub fn allocate_move_budget_with_dists_and_walls(
     walls_remaining: [i32; 2],
 ) -> MoveBudget {
     allocate_move_budget_with_length_and_walls(
-        remaining_ms, ply, stm, pawn, dist0, dist1,
-        LengthBound::optimistic_board(stm, pawn), walls_remaining,
+        remaining_ms,
+        ply,
+        stm,
+        pawn,
+        dist0,
+        dist1,
+        LengthBound::optimistic_board(stm, pawn),
+        walls_remaining,
     )
 }
 
@@ -377,7 +382,14 @@ pub fn allocate_move_budget_with_length(
     // Unknown walls: assume a full board rather than an empty one, so callers
     // that do not pass walls are not silently starved by the planner.
     allocate_move_budget_with_length_and_walls(
-        remaining_ms, ply, stm, pawn, dist0, dist1, length_hint, [10, 10],
+        remaining_ms,
+        ply,
+        stm,
+        pawn,
+        dist0,
+        dist1,
+        length_hint,
+        [10, 10],
     )
 }
 
@@ -461,9 +473,7 @@ fn allocate_move_budget_with_length_and_walls(
         let lo = MIN_MOVE_MS.min(spendable).max(1);
         opt = opt.clamp(lo, spendable);
 
-        let hard = ((opt as f64) * MAX_RATIO)
-            .round()
-            .max(opt as f64) as u64;
+        let hard = ((opt as f64) * MAX_RATIO).round().max(opt as f64) as u64;
         let hard = hard.clamp(opt, spendable);
         (opt, hard)
     };
@@ -498,10 +508,8 @@ mod tests {
 
     /// Budget for a 3min+2s game at `ply`, with given walls and leader distance.
     fn plan_at(rem_ms: u64, ply: usize, walls: [i32; 2], lead: Option<u32>) -> u64 {
-        allocate_move_budget_with_dists_and_walls(
-            rem_ms, ply, ply % 2, [76, 4], lead, lead, walls,
-        )
-        .optimum_ms
+        allocate_move_budget_with_dists_and_walls(rem_ms, ply, ply % 2, [76, 4], lead, lead, walls)
+            .optimum_ms
     }
 
     #[test]
@@ -523,7 +531,10 @@ mod tests {
         // nodes buy almost nothing.
         let rich = plan_at(60_000, 24, [10, 10], None);
         let poor = plan_at(60_000, 24, [1, 0], None);
-        assert!(poor < rich, "wall-less {poor} should undercut wall-rich {rich}");
+        assert!(
+            poor < rich,
+            "wall-less {poor} should undercut wall-rich {rich}"
+        );
     }
 
     #[test]
@@ -532,7 +543,10 @@ mod tests {
         // against ~42% mid-board: nothing left to decide.
         let far = plan_at(60_000, 30, [5, 5], Some(9));
         let near = plan_at(60_000, 30, [5, 5], Some(1));
-        assert!(near < far, "near-goal {near} should undercut mid-board {far}");
+        assert!(
+            near < far,
+            "near-goal {near} should undercut mid-board {far}"
+        );
     }
 
     #[test]
@@ -558,7 +572,12 @@ mod tests {
         }
         let total: u64 = spend.iter().sum();
         let pct = |i: usize| 100 * spend[i] / total.max(1);
-        assert!(pct(1) >= 45, "decision zone underfunded: {:?} -> {}%", spend, pct(1));
+        assert!(
+            pct(1) >= 45,
+            "decision zone underfunded: {:?} -> {}%",
+            spend,
+            pct(1)
+        );
         assert!(pct(0) <= 20, "opening overfunded: {}%", pct(0));
         assert!(rem < 20_000, "hoarded {rem}ms of a 60s clock");
     }
@@ -590,22 +609,16 @@ mod tests {
         assert!((base.expected_own_moves - 30.0).abs() < 1e-9);
 
         // min(8, 12) = 8 < 30 → stay on mean-game plan.
-        let below = allocate_move_budget_with_dists(
-            60_000, 0, 0, [76, 4], Some(8), Some(12),
-        );
+        let below = allocate_move_budget_with_dists(60_000, 0, 0, [76, 4], Some(8), Some(12));
         assert!((below.expected_own_moves - 30.0).abs() < 1e-9);
 
         // min(40, 55) = 40 raises above plan-30 (long game via extension).
-        let raised = allocate_move_budget_with_dists(
-            60_000, 0, 0, [76, 4], Some(40), Some(55),
-        );
+        let raised = allocate_move_budget_with_dists(60_000, 0, 0, [76, 4], Some(40), Some(55));
         assert!((raised.expected_own_moves - 40.0).abs() < 1e-9);
         assert!(raised.optimum_ms <= base.optimum_ms);
 
         // Only one side: that value is the lb.
-        let one = allocate_move_budget_with_dists(
-            60_000, 0, 0, [76, 4], Some(45), None,
-        );
+        let one = allocate_move_budget_with_dists(60_000, 0, 0, [76, 4], Some(45), None);
         assert!((one.expected_own_moves - 45.0).abs() < 1e-9);
     }
 

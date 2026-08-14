@@ -64,8 +64,8 @@ pub use packed_state::{
     titanium_game_from_packed, FEATURE_SCHEMA, PACKED_STATE_LEN, POSITION_SCHEMA_VERSION,
 };
 pub use perft::{
-    default_timeout, oracle_nodes, perft_titanium_native_timed,
-    perft_titanium_ti_timed, perft_titanium_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
+    default_timeout, oracle_nodes, perft_titanium_native_timed, perft_titanium_ti_timed,
+    perft_titanium_timed, TimedPerftResult, TITANIUM_PERFT4_STARTPOS,
 };
 pub use race::RaceOutcomeStats;
 pub use search::{
@@ -402,5 +402,4 @@ mod tests {
             "Titanium oracle must accept a6h on h3v line"
         );
     }
-
 }

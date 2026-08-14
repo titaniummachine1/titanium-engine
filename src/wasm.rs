@@ -282,12 +282,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::build(
-            g,
-            None,
-            ceiling,
-            crate::titanium::net::net_v17(),
-        );
+        let mut search = TitaniumSearch::build(g, None, ceiling, crate::titanium::net::net_v17());
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,
@@ -308,12 +303,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::build(
-            g,
-            None,
-            ceiling,
-            crate::titanium::net::net(),
-        );
+        let mut search = TitaniumSearch::build(g, None, ceiling, crate::titanium::net::net());
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,
@@ -334,12 +324,7 @@ impl WasmEngine {
             5 => 1000,
             _ => 800,
         };
-        let mut search = TitaniumSearch::build(
-            g,
-            None,
-            ceiling,
-            crate::titanium::net::net(),
-        );
+        let mut search = TitaniumSearch::build(g, None, ceiling, crate::titanium::net::net());
         search.set_opening_book(crate::titanium::opening_book::OpeningBookMode::Order, None);
         WasmEngine {
             search,

@@ -6,11 +6,10 @@
 //! taking movegen validation with it.
 
 use crate::core::board::Board;
-use crate::util::perft_tt::{SharedState, WorkerContext};
 #[cfg(feature = "parallel")]
 use crate::util::perft::perft_parallel_root;
 use crate::util::perft::{perft_fast_ctx, perft_iterative as perft_iterative_inner};
-
+use crate::util::perft_tt::{SharedState, WorkerContext};
 
 /// Run configuration — `threads = 1` keeps CI deterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +23,6 @@ impl Default for EngineLimits {
     }
 }
 
-
 impl EngineLimits {
     pub fn single_threaded() -> Self {
         Self { threads: 1 }
@@ -37,7 +35,6 @@ impl EngineLimits {
     }
 }
 
-
 /// Result for `thread-bench` / video episode — 1 thread vs N at same node count.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadBenchResult {
@@ -47,7 +44,6 @@ pub struct ThreadBenchResult {
     pub threads_n_secs: f64,
     pub threads_n: usize,
 }
-
 
 impl ThreadBenchResult {
     pub fn speedup(&self) -> f64 {

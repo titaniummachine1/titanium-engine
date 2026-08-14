@@ -201,7 +201,11 @@ impl ZeroWallTb {
                     // Terminal: a pawn already stands on its goal row.
                     if p0 < 9 {
                         tbl[idx] = TbEntry {
-                            result: if stm == 0 { TbResult::Win } else { TbResult::Loss },
+                            result: if stm == 0 {
+                                TbResult::Win
+                            } else {
+                                TbResult::Loss
+                            },
                             distance: 0,
                             best_move: -1,
                         };
@@ -210,7 +214,11 @@ impl ZeroWallTb {
                     }
                     if p1 >= 72 {
                         tbl[idx] = TbEntry {
-                            result: if stm == 1 { TbResult::Win } else { TbResult::Loss },
+                            result: if stm == 1 {
+                                TbResult::Win
+                            } else {
+                                TbResult::Loss
+                            },
                             distance: 0,
                             best_move: -1,
                         };
@@ -246,12 +254,9 @@ impl ZeroWallTb {
                                 idx as u32,
                                 wc.move_id,
                             ))),
-                            TbResult::Win => queue.push(Reverse((
-                                e.distance,
-                                CHILD_WON,
-                                idx as u32,
-                                wc.move_id,
-                            ))),
+                            TbResult::Win => {
+                                queue.push(Reverse((e.distance, CHILD_WON, idx as u32, wc.move_id)))
+                            }
                             // Counted in `remaining` and never decremented: a
                             // side that can step into a draw is never forced to
                             // lose.
@@ -482,11 +487,27 @@ impl ZeroWallTb {
 
     fn decode_entry(b: &[u8]) -> Result<TbEntry, String> {
         let score = b[0] as i8 as i16;
-        let mv = if b[1] == Self::NO_MOVE { -1 } else { b[1] as i16 };
+        let mv = if b[1] == Self::NO_MOVE {
+            -1
+        } else {
+            b[1] as i16
+        };
         Ok(match score {
-            0 => TbEntry { result: TbResult::Draw, distance: -1, best_move: mv },
-            s if s > 0 => TbEntry { result: TbResult::Win, distance: s - 1, best_move: mv },
-            s => TbEntry { result: TbResult::Loss, distance: -s - 1, best_move: mv },
+            0 => TbEntry {
+                result: TbResult::Draw,
+                distance: -1,
+                best_move: mv,
+            },
+            s if s > 0 => TbEntry {
+                result: TbResult::Win,
+                distance: s - 1,
+                best_move: mv,
+            },
+            s => TbEntry {
+                result: TbResult::Loss,
+                distance: -s - 1,
+                best_move: mv,
+            },
         })
     }
 
@@ -506,7 +527,8 @@ impl ZeroWallTb {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.try_to_bytes().expect("table does not fit the two-byte label format")
+        self.try_to_bytes()
+            .expect("table does not fit the two-byte label format")
     }
 
     /// Serialise, refusing rather than truncating if an entry will not fit.
@@ -536,7 +558,10 @@ impl ZeroWallTb {
             .ok_or_else(|| format!("version {ver} != supported 2 or 3"))?;
         let want = Self::HEADER_LEN + NSTATES * rec;
         if bytes.len() != want {
-            return Err(format!("length {} != expected {want} for v{ver}", bytes.len()));
+            return Err(format!(
+                "length {} != expected {want} for v{ver}",
+                bytes.len()
+            ));
         }
         let live = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let stored_hash = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -907,14 +932,22 @@ impl TbSolver {
         let rec_len = 18 + table_len;
         let want = 16 + count * rec_len;
         if bytes.len() != want {
-            return Err(bad(format!("pack length {} != expected {want}", bytes.len())));
+            return Err(bad(format!(
+                "pack length {} != expected {want}",
+                bytes.len()
+            )));
         }
         let mut added = 0usize;
         for i in 0..count {
             let off = 16 + i * rec_len;
             let hw = u64::from_le_bytes(bytes[off..off + 8].try_into().unwrap());
             let vw = u64::from_le_bytes(bytes[off + 8..off + 16].try_into().unwrap());
-            let key = (hw, vw, bytes[off + 16] as i8 as i32, bytes[off + 17] as i8 as i32);
+            let key = (
+                hw,
+                vw,
+                bytes[off + 16] as i8 as i32,
+                bytes[off + 17] as i8 as i32,
+            );
             if self.cache.contains_key(&key) {
                 continue;
             }
@@ -964,7 +997,8 @@ impl TbSolver {
             // Stride comes from the first embedded table's own version, so a
             // pack written before the two-byte format is walked at ITS pitch.
             let mut vb = [0u8; 2];
-            f.seek(SeekFrom::Start(16 + 18 + 4)).map_err(|e| e.to_string())?;
+            f.seek(SeekFrom::Start(16 + 18 + 4))
+                .map_err(|e| e.to_string())?;
             f.read_exact(&mut vb).map_err(|e| e.to_string())?;
             let tver = u16::from_le_bytes(vb);
             let entry = ZeroWallTb::record_len_for(tver)
@@ -976,7 +1010,8 @@ impl TbSolver {
             for i in 0..count {
                 let off = 16 + i as u64 * stride;
                 f.seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
-                f.read_exact(&mut kb).map_err(|e| format!("{path} rec {i}: {e}"))?;
+                f.read_exact(&mut kb)
+                    .map_err(|e| format!("{path} rec {i}: {e}"))?;
                 let key = (
                     u64::from_le_bytes(kb[0..8].try_into().unwrap()),
                     u64::from_le_bytes(kb[8..16].try_into().unwrap()),
@@ -992,9 +1027,8 @@ impl TbSolver {
         }
 
         order.sort_unstable();
-        let mut w = std::io::BufWriter::new(
-            std::fs::File::create(out).map_err(|e| format!("{out}: {e}"))?,
-        );
+        let mut w =
+            std::io::BufWriter::new(std::fs::File::create(out).map_err(|e| format!("{out}: {e}"))?);
         let mut hw = |b: &[u8]| -> Result<(), String> { w.write_all(b).map_err(|e| e.to_string()) };
         hw(Self::PACK_MAGIC)?;
         hw(&Self::PACK_VERSION.to_le_bytes())?;
@@ -1010,14 +1044,22 @@ impl TbSolver {
             let entry = ZeroWallTb::record_len_for(tver).unwrap();
             let table_len = ZeroWallTb::HEADER_LEN + NSTATES * entry;
             let mut buf = vec![0u8; table_len];
-            handles[fi].seek(SeekFrom::Start(off)).map_err(|e| e.to_string())?;
-            handles[fi].read_exact(&mut buf).map_err(|e| e.to_string())?;
+            handles[fi]
+                .seek(SeekFrom::Start(off))
+                .map_err(|e| e.to_string())?;
+            handles[fi]
+                .read_exact(&mut buf)
+                .map_err(|e| e.to_string())?;
             // Decode and re-encode so mixed-version inputs all land as v3.
             let tb = ZeroWallTb::from_bytes(&buf)?;
-            w.write_all(&key.0.to_le_bytes()).map_err(|e| e.to_string())?;
-            w.write_all(&key.1.to_le_bytes()).map_err(|e| e.to_string())?;
-            w.write_all(&[key.2 as u8, key.3 as u8]).map_err(|e| e.to_string())?;
-            w.write_all(&tb.try_to_bytes()?).map_err(|e| e.to_string())?;
+            w.write_all(&key.0.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            w.write_all(&key.1.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            w.write_all(&[key.2 as u8, key.3 as u8])
+                .map_err(|e| e.to_string())?;
+            w.write_all(&tb.try_to_bytes()?)
+                .map_err(|e| e.to_string())?;
         }
         w.flush().map_err(|e| e.to_string())?;
         Ok((order.len(), seen))
@@ -1507,7 +1549,10 @@ mod tests {
 
         println!("max forced distance: {worst} plies (config {worst_where:?})");
         println!("states exceeding i8 (+/-127): {over_i8}");
-        println!("  -> i8 label {} ", if over_i8 == 0 { "FITS" } else { "OVERFLOWS" });
+        println!(
+            "  -> i8 label {} ",
+            if over_i8 == 0 { "FITS" } else { "OVERFLOWS" }
+        );
         assert!(worst > 0, "no decisive states measured at all");
     }
 
@@ -1541,10 +1586,12 @@ mod tests {
         sb.solve(&tb_layers::state_from_config(config, [0, 1]));
         let nb = sb.save(&b).expect("save b");
 
-        let (distinct, seen) =
-            TbSolver::merge_packs(&[a.clone(), b.clone()], &m).expect("merge");
+        let (distinct, seen) = TbSolver::merge_packs(&[a.clone(), b.clone()], &m).expect("merge");
         assert_eq!(seen, na + nb, "merge must see every input record");
-        assert!(distinct < seen, "the two cones share tables, so merging must shrink");
+        assert!(
+            distinct < seen,
+            "the two cones share tables, so merging must shrink"
+        );
 
         // Everything either cone needed must still be answerable from the merge
         // alone, with no re-solving.
@@ -1554,7 +1601,11 @@ mod tests {
             back.certify(&tb_layers::state_from_config(config, hands))
                 .unwrap_or_else(|e| panic!("merged store fails to certify {hands:?}: {e}"));
         }
-        assert_eq!(back.cached(), distinct, "certify had to solve something new");
+        assert_eq!(
+            back.cached(),
+            distinct,
+            "certify had to solve something new"
+        );
 
         for p in [a_path, b_path, m_path] {
             let _ = std::fs::remove_file(p);
@@ -1568,7 +1619,10 @@ mod tests {
             g.make_move(crate::titanium::algebraic_to_move_id(w));
         }
         g.wl = [0, 0];
-        assert!(g.hw_bits != 0 || g.vw_bits != 0, "test needs walls on board");
+        assert!(
+            g.hw_bits != 0 || g.vw_bits != 0,
+            "test needs walls on board"
+        );
         assert!(
             applies(&g),
             "broke hands with walls on board is the subgame this table exists for"
@@ -1601,13 +1655,23 @@ mod tests {
                     checked += 1;
                     if tb_stm_wins != oracle_stm_wins {
                         if mismatches.len() < 20 {
-                            mismatches.push((p0, p1, stm, tb_stm_wins, oracle_stm_wins, e.distance));
+                            mismatches.push((
+                                p0,
+                                p1,
+                                stm,
+                                tb_stm_wins,
+                                oracle_stm_wins,
+                                e.distance,
+                            ));
                         }
                     }
                 }
             }
         }
-        println!("checked {checked} zero-wall states, {} mismatches", mismatches.len());
+        println!(
+            "checked {checked} zero-wall states, {} mismatches",
+            mismatches.len()
+        );
         assert!(
             mismatches.is_empty(),
             "TB disagrees with hands_empty_race oracle on {} states, first: {:?}",

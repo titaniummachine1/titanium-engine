@@ -4,7 +4,7 @@
 
 pub mod cert_bridge;
 pub mod certify;
-pub mod tb_layers;
-pub mod tb_zero;
 pub mod exact_dp;
 pub mod race;
+pub mod tb_layers;
+pub mod tb_zero;

@@ -750,7 +750,6 @@ pub fn bff_path_to_goal_cached_with_visited(
     CachedPathResult::Path(path, visited)
 }
 
-
 /// Convenience wrapper for one-off queries (oracle / replay validation).
 pub fn bff_wall_legal_board(board: &Board) -> bool {
     let grids = WallGrids::from_board(board);

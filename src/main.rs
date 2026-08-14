@@ -4,9 +4,8 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use titanium::{
-    both_players_reach_goals, cat_snapshot_json, format_move, generate_legal_moves,
-    perft_divide, perft_fast_anchor_baseline, perft_no_tt_anchor_baseline, Board, Engine,
-    PERFT5_TIMEOUT_SECS,
+    both_players_reach_goals, cat_snapshot_json, format_move, generate_legal_moves, perft_divide,
+    perft_fast_anchor_baseline, perft_no_tt_anchor_baseline, Board, Engine, PERFT5_TIMEOUT_SECS,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,7 +84,9 @@ fn main() {
             // returns titanium-* names, so testing it directly rejected the very
             // flag every existing caller passes.
             if let Some(flag) = ace_engine_flag(&args).filter(|f| f.starts_with("ace-")) {
-                eprintln!("error: ACE engines ({flag}) live in the `ace` binary under engines/ace/");
+                eprintln!(
+                    "error: ACE engines ({flag}) live in the `ace` binary under engines/ace/"
+                );
                 std::process::exit(2);
             }
             titanium::run_titanium_session_stdio(parse_threads_arg(&args));
@@ -980,7 +981,10 @@ fn run_tbsolve(args: &[String]) {
     if certify {
         let t1 = std::time::Instant::now();
         match s.certify(&g) {
-            Ok(()) => println!("certified locally consistent in {:.2}s", t1.elapsed().as_secs_f64()),
+            Ok(()) => println!(
+                "certified locally consistent in {:.2}s",
+                t1.elapsed().as_secs_f64()
+            ),
             Err(e) => {
                 eprintln!("CERTIFY FAILED: {e}");
                 std::process::exit(1);
@@ -1366,8 +1370,8 @@ fn run_score_out(args: &[String]) {
     let game = if let Some(hex) = packed_for_engine {
         let mut packed = [0u8; titanium::PACKED_STATE_LEN];
         for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
-            packed[i] = u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("zz"), 16)
-                .unwrap_or(0);
+            packed[i] =
+                u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("zz"), 16).unwrap_or(0);
         }
         match titanium::titanium_game_from_packed(&packed) {
             Ok(g) => g,
@@ -1484,7 +1488,6 @@ fn score_out_error_json(message: &str) -> String {
         json_escape(message)
     )
 }
-
 
 fn looks_like_algebraic_move(arg: &str) -> bool {
     let b = arg.as_bytes();

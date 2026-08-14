@@ -128,7 +128,6 @@ const PONDER_PROBE_MS: u64 = 400;
 
 // ── Search daemon ─────────────────────────────────────────────────────────────
 
-
 /// Is the engine's live position exactly `g`?
 ///
 /// The Zobrist pair alone is not enough to act on: a 64-bit collision would let
@@ -145,7 +144,6 @@ fn position_is_exactly(live: &GameState, g: &GameState) -> bool {
         && live.hw_bits == g.hw_bits
         && live.vw_bits == g.vw_bits
 }
-
 
 /// The search that produces the move we play. Pondering deliberately does not
 /// use this: it stays single-threaded so the abort flag has one search to stop.
@@ -214,7 +212,11 @@ fn search_daemon(
                 let r = timed_search(&mut search, time_ms, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
-                let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r)), PonderTelemetry::default()));
+                let _ = tx.send(Reply::BestMove(
+                    mv,
+                    Some(Box::new(r)),
+                    PonderTelemetry::default(),
+                ));
             }
             Cmd::GoInfinite(hint_mv) => {
                 // Ponder mode: tt_gen and history are frozen for the whole
@@ -299,9 +301,7 @@ fn search_daemon(
                     } else {
                         // A command is in flight: do not start a search we
                         // cannot see the end of.
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            PONDER_IDLE_POLL_MS,
-                        ));
+                        std::thread::sleep(std::time::Duration::from_millis(PONDER_IDLE_POLL_MS));
                     }
 
                     match rx.try_recv() {
@@ -360,8 +360,7 @@ fn search_daemon(
                             // keep it and keep searching. Resetting would throw
                             // away the tree, the root ordering and the
                             // accumulator for a position we already hold.
-                            let hit = spec_hash.is_some()
-                                && position_is_exactly(&search.g, &g);
+                            let hit = spec_hash.is_some() && position_is_exactly(&search.g, &g);
                             if hit {
                                 tel.hit = true;
                                 cur_g = g;
@@ -400,7 +399,11 @@ fn search_daemon(
                 let r = timed_search(&mut search, time_ms, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
-                let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r)), PonderTelemetry::default()));
+                let _ = tx.send(Reply::BestMove(
+                    mv,
+                    Some(Box::new(r)),
+                    PonderTelemetry::default(),
+                ));
             }
             Cmd::MoveMiss { new_game, time_ms } => {
                 cur_g = new_game.clone();
@@ -408,7 +411,11 @@ fn search_daemon(
                 let r = timed_search(&mut search, time_ms, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
-                let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r)), PonderTelemetry::default()));
+                let _ = tx.send(Reply::BestMove(
+                    mv,
+                    Some(Box::new(r)),
+                    PonderTelemetry::default(),
+                ));
             }
             Cmd::Quit => return,
         }
@@ -453,12 +460,19 @@ fn emit_info_json(
     // Jump-aware distances (accounts for opponent pawn jumps).
     let mut g_for_ja = g.clone();
     let ja = crate::titanium::race::jump_aware_goal_distances(&mut g_for_ja);
-    let ja_d0 = if ja.d0 == u8::MAX { -1i32 } else { ja.d0 as i32 };
-    let ja_d1 = if ja.d1 == u8::MAX { -1i32 } else { ja.d1 as i32 };
+    let ja_d0 = if ja.d0 == u8::MAX {
+        -1i32
+    } else {
+        ja.d0 as i32
+    };
+    let ja_d1 = if ja.d1 == u8::MAX {
+        -1i32
+    } else {
+        ja.d1 as i32
+    };
     // Lower bound on remaining plies: both sides need at least dist_to_goal moves.
-    let min_remaining_plies = (dist_p0.min(dist_p1) as u32).saturating_add(
-        (dist_p0.max(dist_p1) as u32).saturating_sub(dist_p0.min(dist_p1) as u32),
-    );
+    let min_remaining_plies = (dist_p0.min(dist_p1) as u32)
+        .saturating_add((dist_p0.max(dist_p1) as u32).saturating_sub(dist_p0.min(dist_p1) as u32));
     // Wall differential: positive = side to move has more walls.
     let wall_diff = walls_p0 as i32 - walls_p1 as i32;
     let wall_diff_side = if turn == 0 { wall_diff } else { -wall_diff };
@@ -594,7 +608,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 current_g = GameState::new();
                 applied.clear();
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { let r = cmd_tx.send(Cmd::SetGame(GameState::new())); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::SetGame(GameState::new()));
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 ok!("ready");
             }
             "position" => {
@@ -624,12 +642,20 @@ pub fn run_titanium_session_stdio(threads: usize) {
                         continue;
                     }
                     // Incremental update: send only the new game state.
-                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
+                    let _ = {
+                        let r = cmd_tx.send(Cmd::SetGame(current_g.clone()));
+                        abort_io.store(true, Ordering::Relaxed);
+                        r
+                    };
                 } else {
                     match replay_moves(&moves) {
                         Ok(g) => {
                             current_g = g.clone();
-                            let _ = { let r = cmd_tx.send(Cmd::SetGame(g)); abort_io.store(true, Ordering::Relaxed); r };
+                            let _ = {
+                                let r = cmd_tx.send(Cmd::SetGame(g));
+                                abort_io.store(true, Ordering::Relaxed);
+                                r
+                            };
                         }
                         Err(msg) => {
                             err!(msg);
@@ -655,7 +681,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 current_g.make_move(mv);
                 applied.push((*mv_str).to_string());
                 ponder_mv = TITANIUM_NO_MOVE;
-                let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::SetGame(current_g.clone()));
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 ok!("ready");
             }
             "go" => {
@@ -672,14 +702,15 @@ pub fn run_titanium_session_stdio(threads: usize) {
                     } else {
                         algebraic_to_move_id(pm_str)
                     };
-                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(ponder_mv)); abort_io.store(true, Ordering::Relaxed); r };
+                    let _ = {
+                        let r = cmd_tx.send(Cmd::GoInfinite(ponder_mv));
+                        abort_io.store(true, Ordering::Relaxed);
+                        r
+                    };
                     // No reply expected — daemon starts pondering.
                 } else {
                     let time_ms = if arg1 == "rem" {
-                        let rem_sec: f64 = parts
-                            .get(2)
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(4.0);
+                        let rem_sec: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4.0);
                         let remaining_ms = (rem_sec * 1000.0).max(0.0) as u64;
                         let ja = crate::titanium::race::jump_aware_goal_distances(&mut current_g);
                         let d0 = (ja.d0 != u8::MAX).then_some(u32::from(ja.d0));
@@ -699,7 +730,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                         let time_sec: f64 = arg1.parse().unwrap_or(4.0);
                         (time_sec * 1000.0).max(1.0) as u64
                     };
-                    let _ = { let r = cmd_tx.send(Cmd::GoTimed(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
+                    let _ = {
+                        let r = cmd_tx.send(Cmd::GoTimed(time_ms));
+                        abort_io.store(true, Ordering::Relaxed);
+                        r
+                    };
                     match reply_rx.recv() {
                         Ok(Reply::BestMove(mv, info, ponder)) => {
                             if let Some(r) = info.as_deref() {
@@ -713,8 +748,16 @@ pub fn run_titanium_session_stdio(threads: usize) {
                                 if auto_ponder && current_g.winner() < 0 {
                                     current_g.make_move(mv);
                                     applied.push(mv_text);
-                                    let _ = { let r = cmd_tx.send(Cmd::SetGame(current_g.clone())); abort_io.store(true, Ordering::Relaxed); r };
-                                    let _ = { let r = cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE)); abort_io.store(true, Ordering::Relaxed); r };
+                                    let _ = {
+                                        let r = cmd_tx.send(Cmd::SetGame(current_g.clone()));
+                                        abort_io.store(true, Ordering::Relaxed);
+                                        r
+                                    };
+                                    let _ = {
+                                        let r = cmd_tx.send(Cmd::GoInfinite(TITANIUM_NO_MOVE));
+                                        abort_io.store(true, Ordering::Relaxed);
+                                        r
+                                    };
                                 }
                             }
                         }
@@ -724,7 +767,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 }
             }
             "stop" => {
-                let _ = { let r = cmd_tx.send(Cmd::StopAndGet); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::StopAndGet);
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -755,7 +802,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                     }
                     ponder_mv = TITANIUM_NO_MOVE;
                 }
-                let _ = { let r = cmd_tx.send(Cmd::PonderHit(time_ms)); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::PonderHit(time_ms));
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -791,7 +842,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 }
                 ponder_mv = TITANIUM_NO_MOVE;
                 let new_game = current_g.clone();
-                let _ = { let r = cmd_tx.send(Cmd::MoveMiss { new_game, time_ms }); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::MoveMiss { new_game, time_ms });
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 match reply_rx.recv() {
                     Ok(Reply::BestMove(mv, info, ponder)) => {
                         if let Some(r) = info.as_deref() {
@@ -808,7 +863,11 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 }
             }
             "quit" => {
-                let _ = { let r = cmd_tx.send(Cmd::Quit); abort_io.store(true, Ordering::Relaxed); r };
+                let _ = {
+                    let r = cmd_tx.send(Cmd::Quit);
+                    abort_io.store(true, Ordering::Relaxed);
+                    r
+                };
                 break;
             }
             _ => err!("unknown command"),

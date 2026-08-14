@@ -142,7 +142,8 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
     let has_cat_v5_dist = bytes.len() == expected_cat_v5_dist;
     let has_cat_v5_witness_dist = bytes.len() == expected_cat_v5_witness_dist;
     let has_cat_v5_normalized_dist = bytes.len() == expected_cat_v5_normalized_dist;
-    let has_dist = has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
+    let has_dist =
+        has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
 
     assert!(
         bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized
@@ -243,7 +244,11 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
             vec![0.0; FIELD_PLANE_LEN],
         )
     };
-    let dist_field_active = dist_me.iter().chain(&dist_opp).chain(&dist_diff).any(|&w| w != 0.0);
+    let dist_field_active = dist_me
+        .iter()
+        .chain(&dist_opp)
+        .chain(&dist_diff)
+        .any(|&w| w != 0.0);
 
     // Pre-compute side-to-move canonicalized weight tables for the hot path.
     let mut dist_me_canon = Box::new([[0.0f64; 81]; 2]);

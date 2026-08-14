@@ -437,7 +437,14 @@ fn bench_profile(sec: u64, position: &str, moves: Option<&str>, full: bool, thre
 fn bench_think_once(time_ms: u64, moves: Option<&str>, full: bool, threads: usize) {
     reset_lazy_seal_stats();
     let moves_s = moves.unwrap_or("").trim();
-    let mut search = fresh_search("startpos", if moves_s.is_empty() { None } else { Some(moves_s) });
+    let mut search = fresh_search(
+        "startpos",
+        if moves_s.is_empty() {
+            None
+        } else {
+            Some(moves_s)
+        },
+    );
     let t0 = Instant::now();
     let r = run_think(&mut search, time_ms, MAX_DEPTH, full, false, threads);
     let wall_ms = t0.elapsed().as_millis() as u64;
@@ -449,10 +456,7 @@ fn bench_think_once(time_ms: u64, moves: Option<&str>, full: bool, threads: usiz
         full,
         false,
         threads,
-        &format!(
-            ",\"time_ms\":{time_ms},\"moves\":{}",
-            json_str(moves_s)
-        ),
+        &format!(",\"time_ms\":{time_ms},\"moves\":{}", json_str(moves_s)),
     );
     println!("{}", r.race_outcome_stats.to_json());
     if let Some(instr) = bench_instr::take_json_report() {

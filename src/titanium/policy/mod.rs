@@ -188,7 +188,11 @@ impl SpatialPolicyNet {
 
         // Canonical transforms: identity for side 0, 180-degree rotation for side 1
         let cell_idx = |plane: usize, c: u8| -> usize {
-            let cc = if side == 0 { c as usize } else { 80 - c as usize };
+            let cc = if side == 0 {
+                c as usize
+            } else {
+                80 - c as usize
+            };
             plane * PLANE_SIZE + cc
         };
         let slot_idx = |plane: usize, s: usize| -> usize {
@@ -233,8 +237,16 @@ impl SpatialPolicyNet {
         for c in 0u8..81 {
             let d_own = own_field[c as usize];
             let d_opp = opp_field[c as usize];
-            let norm_own = if d_own == u8::MAX { 1.0 } else { (d_own as f32).min(DIST_NORM) / DIST_NORM };
-            let norm_opp = if d_opp == u8::MAX { 1.0 } else { (d_opp as f32).min(DIST_NORM) / DIST_NORM };
+            let norm_own = if d_own == u8::MAX {
+                1.0
+            } else {
+                (d_own as f32).min(DIST_NORM) / DIST_NORM
+            };
+            let norm_opp = if d_opp == u8::MAX {
+                1.0
+            } else {
+                (d_opp as f32).min(DIST_NORM) / DIST_NORM
+            };
             out[cell_idx(7, c)] = norm_own;
             out[cell_idx(8, c)] = norm_opp;
         }
