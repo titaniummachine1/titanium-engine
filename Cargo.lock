@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "titanium"
-version = "19.4.7"
+version = "19.4.8"
 dependencies = [
  "core_affinity",
  "criterion",

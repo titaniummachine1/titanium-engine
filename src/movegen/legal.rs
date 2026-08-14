@@ -566,8 +566,12 @@ fn collect_wall_orientation_inner(
                 col,
                 orientation == WallOrientation::Horizontal
             ));
+            // Distinct counter from the `wall_legality` timer wrapping the whole
+            // call: they nest, and `record` does not subtract inner time, so
+            // sharing one counter made this work count twice and read as if the
+            // wall complex cost ~3x what it does.
             let legal = crate::bench_instr::record(
-                |b| &mut b.wall_legality,
+                |b| &mut b.wall_path_trial,
                 || ctx.wall_keeps_paths_open(row, col, orientation, witness),
             );
             if legal {
