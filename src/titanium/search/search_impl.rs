@@ -38,7 +38,7 @@ use crate::titanium::race::{
     RaceScratch, RACE_MATE, RACE_STATES, RACE_WIN_FLOOR,
 };
 use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_PLAYABLE};
-use std::collections::HashMap;
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 use std::sync::Mutex;
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -607,6 +607,21 @@ impl Default for EvalCacheEntry {
     }
 }
 
+/// Ways per eval-cache set.
+///
+/// Four 16-byte entries share one 64-byte cache line, so a 4-way probe pulls
+/// exactly the line the direct-mapped probe already pulled -- same memory
+/// traffic, minus the conflict misses that direct mapping guarantees whenever
+/// two live positions hash to one slot.
+const EVAL_CACHE_WAYS: usize = 4;
+
+/// Base index of the set holding `hash64`. Masking the low bits off the slot
+/// keeps the table exactly the same size; it only changes how it is divided.
+#[inline]
+fn eval_cache_set(hash64: u64, bits: usize) -> usize {
+    eval_cache_slot(hash64, bits) & !(EVAL_CACHE_WAYS - 1)
+}
+
 #[inline]
 fn eval_cache_slot(hash64: u64, bits: usize) -> usize {
     if bits == 0 {
@@ -861,14 +876,41 @@ impl SharedEvalCache {
     }
 
     #[inline]
-    fn probe(&self, idx: usize, key: u64, meta: u16) -> Option<f32> {
-        let e = self.slots[idx].read().ok()?;
-        (e.key == key && e.meta == meta).then_some(e.val)
+    fn probe(&self, base: usize, key: u64, meta: u16) -> Option<f32> {
+        for i in 0..EVAL_CACHE_WAYS {
+            if let Ok(e) = self.slots[base + i].read() {
+                if e.key == key && e.meta == meta {
+                    return Some(e.val);
+                }
+            }
+        }
+        None
     }
 
     #[inline]
-    fn store(&self, idx: usize, entry: EvalCacheEntry) {
-        if let Ok(mut slot) = self.slots[idx].write() {
+    fn store(&self, base: usize, entry: EvalCacheEntry) {
+        // Refresh this key's way if the set already holds it, else take an
+        // empty way, else evict the way the key's low bits select.
+        let mut empty = None;
+        for i in 0..EVAL_CACHE_WAYS {
+            if let Ok(e) = self.slots[base + i].read() {
+                if e.key == entry.key && e.meta == entry.meta {
+                    drop(e);
+                    if let Ok(mut slot) = self.slots[base + i].write() {
+                        *slot = entry;
+                    }
+                    return;
+                }
+                if empty.is_none() && e.meta == u16::MAX {
+                    empty = Some(i);
+                }
+            }
+        }
+        let way = empty.unwrap_or_else(|| {
+            crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
+            entry.key as usize & (EVAL_CACHE_WAYS - 1)
+        });
+        if let Ok(mut slot) = self.slots[base + way].write() {
             *slot = entry;
         }
     }
@@ -3345,7 +3387,8 @@ impl TitaniumSearch {
         worker.tt_entry_gen = vec![0; 1];
         // Helpers search as temporary workers. Private giant eval/dist caches
         // duplicate ~70MB each and thrash LLC; same rationale as dropping local TT.
-        worker.eval_cache = vec![EvalCacheEntry::default(); 1];
+        // One full set: a 4-way probe must never index past the stub.
+        worker.eval_cache = vec![EvalCacheEntry::default(); EVAL_CACHE_WAYS];
         worker.eval_cache_bits = 0;
         // Helpers rarely need spill; keep pools empty (1-slot stub thrash).
         if self.bridge.is_some() {
@@ -5010,6 +5053,42 @@ impl TitaniumSearch {
         false
     }
 
+    /// Probe the 4-way set at `base` for this key. The whole set is one cache
+    /// line, so the extra ways are read from a line already in flight.
+    #[inline]
+    fn eval_cache_probe_local(
+        cache: &[EvalCacheEntry],
+        base: usize,
+        key: u64,
+        meta: u16,
+    ) -> Option<f32> {
+        cache[base..base + EVAL_CACHE_WAYS]
+            .iter()
+            .find(|e| e.key == key && e.meta == meta)
+            .map(|e| e.val)
+    }
+
+    /// Refresh this key's way if the set already holds it, else take an empty
+    /// way, else evict the way the key's low bits select. Only that last case
+    /// loses information, which is what `eval_cache_replace` counts.
+    #[inline]
+    fn eval_cache_store_local(cache: &mut [EvalCacheEntry], base: usize, entry: EvalCacheEntry) {
+        let ways = &mut cache[base..base + EVAL_CACHE_WAYS];
+        if let Some(slot) = ways
+            .iter_mut()
+            .find(|s| s.key == entry.key && s.meta == entry.meta)
+        {
+            *slot = entry;
+            return;
+        }
+        if let Some(slot) = ways.iter_mut().find(|s| s.meta == u16::MAX) {
+            *slot = entry;
+            return;
+        }
+        crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
+        ways[entry.key as usize & (EVAL_CACHE_WAYS - 1)] = entry;
+    }
+
     /// Static/quiescence eval. `depth <= 0` = leaf (cert oracle eligible when gated).
     fn evaluate(&mut self, depth: i32) -> i32 {
         let _eval_timer = crate::bench_instr::OpTimer::start(|b| &mut b.evaluate);
@@ -5081,22 +5160,16 @@ impl TitaniumSearch {
         }
 
         let hash64 = (self.g.hash_hi as u64) << 32 | self.g.hash_lo as u64;
-        let ec_idx = eval_cache_slot(hash64, self.eval_cache_bits);
+        let ec_idx = eval_cache_set(hash64, self.eval_cache_bits);
         let ec_meta = ((self.g.wl[0] as u16) << 8) | (self.g.wl[1] as u16);
         {
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             let hit = match self.shared_eval.as_ref() {
                 Some(sc) => sc.probe(ec_idx, hash64, ec_meta),
-                None => {
-                    let e = &self.eval_cache[ec_idx];
-                    (e.key == hash64 && e.meta == ec_meta).then_some(e.val)
-                }
+                None => Self::eval_cache_probe_local(&self.eval_cache, ec_idx, hash64, ec_meta),
             };
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-            let hit = {
-                let e = &self.eval_cache[ec_idx];
-                (e.key == hash64 && e.meta == ec_meta).then_some(e.val)
-            };
+            let hit = Self::eval_cache_probe_local(&self.eval_cache, ec_idx, hash64, ec_meta);
             if let Some(val) = hit {
                 let out = val as f64;
                 crate::bench_instr::bump(|b| &mut b.eval_cache_hit);
@@ -5237,22 +5310,10 @@ impl TitaniumSearch {
         #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         match self.shared_eval.as_ref() {
             Some(sc) => sc.store(ec_idx, entry),
-            None => {
-                let slot = &mut self.eval_cache[ec_idx];
-                if slot.meta != u16::MAX && slot.key != hash64 {
-                    crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
-                }
-                *slot = entry;
-            }
+            None => Self::eval_cache_store_local(&mut self.eval_cache, ec_idx, entry),
         }
         #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-        {
-            let slot = &mut self.eval_cache[ec_idx];
-            if slot.meta != u16::MAX && slot.key != hash64 {
-                crate::bench_instr::bump(|b| &mut b.eval_cache_replace);
-            }
-            *slot = entry;
-        }
+        Self::eval_cache_store_local(&mut self.eval_cache, ec_idx, entry);
         self.evaluate_tail(out, depth, me, d_me_i, d_opp_i, w_me_i, w_opp_i)
     }
 
