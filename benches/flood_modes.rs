@@ -26,10 +26,10 @@ use std::time::Instant;
 use titanium::core::board::Board;
 use titanium::core::board::WallOrientation;
 use titanium::movegen::o1::{wall_masks, WallMasks};
-use titanium::validation::canta::board_after_canta_game;
 use titanium::pathfinding::bff::wall::{
     pawn_bit, pbff_ks_wall_legal, pbff_wall_legal, wall_delta, WallGrids,
 };
+use titanium::validation::canta::board_after_canta_game;
 
 /// A precomputed flood trial: base grids with one candidate wall's delta applied.
 struct Trial {

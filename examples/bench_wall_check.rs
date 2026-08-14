@@ -2,7 +2,6 @@
 //! measured on the 15 canta midgame positions (wall-heavy, realistic).
 use std::time::Instant;
 use titanium::core::board::{Board, Player, WallOrientation};
-use titanium::validation::canta::board_after_canta_game;
 use titanium::path::flood::{flood_to_goal, goal_square_mask};
 use titanium::path::masks::DirMasks;
 use titanium::path::parallel::{
@@ -10,6 +9,7 @@ use titanium::path::parallel::{
 };
 use titanium::path::BfsScratch;
 use titanium::util::grid::{has_wall, set_wall, square_index, FLOOD_PLAYABLE};
+use titanium::validation::canta::board_after_canta_game;
 
 fn collides(b: &Board, r: u8, c: u8, o: WallOrientation) -> bool {
     let p = match o {

@@ -88,11 +88,7 @@ fn emit_git_commit() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    let stamp = if dirty {
-        format!("{hash}-dirty")
-    } else {
-        hash
-    };
+    let stamp = if dirty { format!("{hash}-dirty") } else { hash };
     println!("cargo:rustc-env=GIT_COMMIT_HASH={stamp}");
 
     // Rebuild when HEAD moves, so the stamp cannot go stale behind a cached build.
