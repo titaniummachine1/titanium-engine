@@ -216,12 +216,27 @@ sqlite. But the right design is to emit features *during selfplay*, at the momen
 the engine already has the position — making the separate featurization pass
 disappear rather than merely become cheap.
 
-**Selfplay games do not reach the trainer.** `self_play_overnight` writes to
-`games_turso.db`; the trainer reads `teacher_dataset_good`, whose manifest is
-`immutable: true`. So the flywheel generates fresh games that currently bank for
-later rather than feeding the next cycle. Closing this needs a decision about
-what the canonical training corpus is — `extend_teacher_dataset.py` deliberately
-writes a *non-active* experimental dataset.
+**Selfplay games do not reach the trainer — THREE independent breaks.** Traced
+2026-08-16; the first is fixed, the other two are decisions:
+
+1. *(fixed)* `extend_teacher_dataset.py` read `canonical/games.db`, which does not
+   exist (`labels.db` is 0 bytes). `iter_selfplay_positions` guards with
+   `if not GAMES_DB.exists(): return`, so it silently yielded ZERO positions —
+   the same fail-open pattern as the genmove harnesses. Now points at
+   `games_turso.db` / `labels_turso.db`, which is where selfplay actually writes
+   (confirmed: 81,317 games, modified during tonight's run).
+2. *(open)* That function filters `source IN ('selfplay_train','selfplay_verify')`,
+   but `self_play_overnight` tags its games `overnight_selfplay` /
+   `overnight_mixed`. Only **12** rows match the filter. Widening it is a
+   judgement call about which game sources are trusted for labels, not an
+   obvious bug.
+3. *(open)* Its output, `teacher_dataset_experimental_extended`, is deliberately
+   NOT the active dataset; `teacher_dataset_good` is `immutable: true`,
+   `promotion_allowed: false`. Pointing training at the extended set is a
+   corpus-policy decision.
+
+Until 2 and 3 are settled the flywheel generates fresh games that BANK but do not
+feed the next cycle, so training re-chews a fixed corpus and will plateau.
 
 **QAT/engine agreement unverified.** QAT trains and the engine runs int16, but
 the check that a QAT-trained net evaluated by the engine reproduces the trainer's
