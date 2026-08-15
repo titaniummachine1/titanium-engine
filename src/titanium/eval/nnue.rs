@@ -50,18 +50,6 @@ pub struct Net {
     pub w1c: Vec<f64>,
     pub po: Vec<f64>,
     pub px: Vec<f64>,
-    /// Sparse route embeddings, canonicalized to side-to-move coordinates.
-    pub route_me: Vec<f64>,
-    pub route_opp: Vec<f64>,
-    pub route_near_me: Vec<f64>,
-    pub route_near_opp: Vec<f64>,
-    pub route_contested: Vec<f64>,
-    pub route_active: bool,
-    /// Route plane weights re-indexed by centered flood bit, per side to move
-    /// (`[turn][plane][flood_bit]`, planes: me/opp/near_me/near_opp/contested;
-    /// turn 1 pre-applies NET_MIRC). Leaf route scoring then reads `tbl[bit]`
-    /// per set bit instead of bit→square→canonical translation each time.
-    pub route_bybit: Box<[[[f64; 128]; 5]; 2]>,
     /// Combined CAT impact heatmap as a direct input plane (81, side-to-move
     /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
     /// not even computed, so the live net is unaffected. A retrained blob carries
@@ -122,6 +110,11 @@ fn read_h_header(bytes: &[u8]) -> usize {
 const TLV_MAGIC: &[u8; 4] = b"TNW1";
 
 /// Section tags. Four ASCII bytes, matched exactly.
+///
+/// `b"ROUT"` is retired and deliberately absent: the five route planes were
+/// learned in v13/v17 but zeroed in every net shipped since, and the eval that
+/// consumed them is gone. A blob that still carries the section loads fine --
+/// an unrecognised tag takes the ignore path, which is exactly the intent.
 mod tag {
     pub const WSKP: u32 = u32::from_le_bytes(*b"WSKP");
     pub const B1__: u32 = u32::from_le_bytes(*b"B1__");
@@ -129,7 +122,6 @@ mod tag {
     pub const W1C_: u32 = u32::from_le_bytes(*b"W1C_");
     pub const PO__: u32 = u32::from_le_bytes(*b"PO__");
     pub const PX__: u32 = u32::from_le_bytes(*b"PX__");
-    pub const ROUT: u32 = u32::from_le_bytes(*b"ROUT");
     pub const CATV: u32 = u32::from_le_bytes(*b"CATV");
     pub const DIST: u32 = u32::from_le_bytes(*b"DIST");
 }
@@ -148,11 +140,9 @@ fn assemble(
     w1c: Vec<f64>,
     po: Vec<f64>,
     px: Vec<f64>,
-    route: [Vec<f64>; 5],
     cat: [Vec<f64>; 5],
     dist: [Vec<f64>; 3],
 ) -> Net {
-    let [route_me, route_opp, route_near_me, route_near_opp, route_contested] = route;
     let [cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined] =
         cat;
     let [dist_me, dist_opp, dist_diff] = dist;
@@ -160,13 +150,6 @@ fn assemble(
     // Presence is derived from the weights, not from the blob length: a section
     // that is present but all-zero is as inert as an absent one, and the
     // consumers skip the whole (expensive) feature computation on a false flag.
-    let route_active = route_me
-        .iter()
-        .chain(&route_opp)
-        .chain(&route_near_me)
-        .chain(&route_near_opp)
-        .chain(&route_contested)
-        .any(|&w| w != 0.0);
     let cat_active = cat_raw_me
         .iter()
         .chain(&cat_raw_opp)
@@ -192,18 +175,6 @@ fn assemble(
             dist_diff_canon[turn][sq] = dist_diff[canon];
         }
     }
-    let mut route_bybit = Box::new([[[0.0f64; 128]; 5]; 2]);
-    for turn in 0..2usize {
-        for sq in 0..FIELD_PLANE_LEN {
-            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
-            let bit = crate::util::grid::FLOOD_BIT_BY_SQ[sq].trailing_zeros() as usize;
-            route_bybit[turn][0][bit] = route_me[canon];
-            route_bybit[turn][1][bit] = route_opp[canon];
-            route_bybit[turn][2][bit] = route_near_me[canon];
-            route_bybit[turn][3][bit] = route_near_opp[canon];
-            route_bybit[turn][4][bit] = route_contested[canon];
-        }
-    }
     let mut b1 = [0.0f64; MAX_NET_H];
     let mut w2 = [0.0f64; MAX_NET_H];
     b1[..h].copy_from_slice(&b1_v);
@@ -216,13 +187,6 @@ fn assemble(
         w1c,
         po,
         px,
-        route_me,
-        route_opp,
-        route_near_me,
-        route_near_opp,
-        route_contested,
-        route_active,
-        route_bybit,
         cat_raw_me,
         cat_raw_opp,
         cat_propagated_me,
@@ -343,14 +307,13 @@ fn load_net_tlv(bytes: &[u8]) -> Net {
     let px = need(tag::PX__, 81 * h, "PX__");
     let to5 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 5] { v.try_into().unwrap() };
     let to3 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 3] { v.try_into().unwrap() };
-    let route = to5(opt(tag::ROUT, 5));
     // CAT is stored already-rescaled in this format. The legacy loader applies
     // historic x4 / x400/256 factors while reading; carrying those into a new
     // format would preserve an accident of the old one.
     let cat = to5(opt(tag::CATV, 5));
     let dist = to3(opt(tag::DIST, 3));
 
-    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, route, cat, dist)
+    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, cat, dist)
 }
 
 /// Serialize a net in the section-table format.
@@ -363,16 +326,6 @@ pub fn net_to_tlv(n: &Net) -> Vec<u8> {
     sections.push((tag::W1C_, n.w1c.clone()));
     sections.push((tag::PO__, n.po.clone()));
     sections.push((tag::PX__, n.px.clone()));
-    sections.push((
-        tag::ROUT,
-        flat([
-            &n.route_me,
-            &n.route_opp,
-            &n.route_near_me,
-            &n.route_near_opp,
-            &n.route_contested,
-        ]),
-    ));
     sections.push((
         tag::CATV,
         flat([
@@ -453,11 +406,11 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
     let w1c = read_f64s(bytes, &mut offset, 9 * 128 * h);
     let po = read_f64s(bytes, &mut offset, 81 * h);
     let px = read_f64s(bytes, &mut offset, 81 * h);
-    let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
+    // The five retired route planes sit at a FIXED offset here, between `px` and
+    // the CAT tail. They are no longer read into the net, but the bytes must
+    // still be stepped over or every section after them decodes from the wrong
+    // place. Skipping is not the same as deleting in a positional format.
+    offset += FIELD_PLANE_LEN * FIELD_PLANE_SETS * 8;
     let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
         if has_cat_v5_normalized || has_cat_v5_normalized_dist {
             (
@@ -530,13 +483,6 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
         w1c,
         po,
         px,
-        [
-            route_me,
-            route_opp,
-            route_near_me,
-            route_near_opp,
-            route_contested,
-        ],
         [
             cat_raw_me,
             cat_raw_opp,
@@ -683,11 +629,6 @@ mod tlv_tests {
         assert_eq!(a.w1c, b.w1c, "{name}: w1c");
         assert_eq!(a.po, b.po, "{name}: po");
         assert_eq!(a.px, b.px, "{name}: px");
-        assert_eq!(a.route_me, b.route_me, "{name}: route_me");
-        assert_eq!(a.route_opp, b.route_opp, "{name}: route_opp");
-        assert_eq!(a.route_near_me, b.route_near_me, "{name}: route_near_me");
-        assert_eq!(a.route_near_opp, b.route_near_opp, "{name}: route_near_opp");
-        assert_eq!(a.route_contested, b.route_contested, "{name}: route_contested");
         assert_eq!(a.cat_raw_me, b.cat_raw_me, "{name}: cat_raw_me");
         assert_eq!(a.cat_raw_opp, b.cat_raw_opp, "{name}: cat_raw_opp");
         assert_eq!(a.cat_propagated_me, b.cat_propagated_me, "{name}: cat_prop_me");
@@ -701,10 +642,8 @@ mod tlv_tests {
         assert_eq!(a.dist_diff, b.dist_diff, "{name}: dist_diff");
         // Derived tables and presence flags must agree too, or the hot path
         // would differ while the raw weights matched.
-        assert_eq!(a.route_active, b.route_active, "{name}: route_active");
         assert_eq!(a.cat_active, b.cat_active, "{name}: cat_active");
         assert_eq!(a.dist_field_active, b.dist_field_active, "{name}: dist_active");
-        assert_eq!(a.route_bybit, b.route_bybit, "{name}: route_bybit");
         assert_eq!(a.dist_me_canon, b.dist_me_canon, "{name}: dist_me_canon");
         assert_eq!(a.dist_opp_canon, b.dist_opp_canon, "{name}: dist_opp_canon");
         assert_eq!(a.dist_diff_canon, b.dist_diff_canon, "{name}: dist_diff_canon");
@@ -714,8 +653,8 @@ mod tlv_tests {
     /// bit-identical f64s, including the derived hot-path tables.
     ///
     /// This is the whole justification for the format change being callable a
-    /// no-op. Comparing raw weights alone would not do it: `route_bybit` and the
-    /// `*_canon` tables are what the hot path actually reads.
+    /// no-op. Comparing raw weights alone would not do it: the `*_canon` tables
+    /// are what the hot path actually reads.
     #[test]
     fn every_shipped_blob_roundtrips_through_tlv() {
         for (name, bytes) in shipped() {

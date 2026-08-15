@@ -5,8 +5,8 @@
 use crate::titanium::dist::{
     dist_in_layers, fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0,
     fill_ace_dist_layers_to_goal_p1, fill_choke_points, fill_contested, fill_corridor_delta,
-    fill_sparse_route_masks, materialize_distance_layers_inline, shortest_route_bits,
-    wall_incr_refresh_flags, width_in_layers,
+    fill_sparse_route_masks, materialize_distance_layers_inline, wall_incr_refresh_flags,
+    width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot, MOVE_HW_BASE,
@@ -24,7 +24,6 @@ use crate::movegen::{
     generate_legal_moves_slice_cached, GeometricWallCache, GeometricWallCacheStats, NodeWitness,
     MAX_LEGAL_MOVES,
 };
-use crate::pathfinding::bff::expand_frontier;
 use crate::pathfinding::bff::wall::path_witness_from_eval_layers;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
@@ -37,7 +36,7 @@ use crate::titanium::race::{
     race_outcome_with_dist, solve_race_config, PlyEstimate, RaceBound, RaceOutcomeStats,
     RaceScratch, RACE_MATE, RACE_STATES, RACE_WIN_FLOOR,
 };
-use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_PLAYABLE};
+use crate::util::grid::FLOOD_BIT_BY_SQ;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 use std::sync::Mutex;
@@ -2382,7 +2381,6 @@ pub struct EvalParityTrace {
     pub wd: f64,
     pub width_opp: f64,
     pub scalar_out: f64,
-    pub route_out: f64,
     pub cat_out: f64,
     pub width_contrib: f64,
     pub wall_acc: [f64; MAX_NET_H],
@@ -3642,7 +3640,7 @@ impl TitaniumSearch {
         };
         format!(
             "{{\"scalar_inputs\":{{\"d_me\":{dm},\"d_opp\":{do_},\"w_me\":{wm},\"w_opp\":{wo},\"pd\":{pd},\"wd\":{wd},\"width_opp\":{wo_}}},\
-             \"scalar_out\":{so},\"route_out\":{ro},\"cat_out\":{co},\"width_contrib\":{wc},\
+             \"scalar_out\":{so},\"cat_out\":{co},\"width_contrib\":{wc},\
              \"wall_acc\":[{wa}],\"hidden_pre\":[{hp}],\"hidden_clip\":[{hc}],\"neural_out\":{no},\"eval\":{ev}}}",
             dm = trace.d_me,
             do_ = trace.d_opp,
@@ -3652,7 +3650,6 @@ impl TitaniumSearch {
             wd = trace.wd,
             wo_ = trace.width_opp,
             so = trace.scalar_out,
-            ro = trace.route_out,
             co = trace.cat_out,
             wc = trace.width_contrib,
             wa = f64s(&trace.wall_acc),
@@ -3713,7 +3710,6 @@ impl TitaniumSearch {
             scalar_out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
         }
         scalar_out += ws[13] * pd * w_opp / 10.0;
-        let (route_out, _, _) = self.route_feature_score(nw);
         let mut cat_out = 0.0;
         if nw.cat_active {
             if let Some(bridge) = self.bridge.as_ref() {
@@ -3786,7 +3782,7 @@ impl TitaniumSearch {
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
             }
         }
-        let total = scalar_out + route_out + cat_out + width_contrib + neural_out;
+        let total = scalar_out + cat_out + width_contrib + neural_out;
         EvalParityTrace {
             d_me,
             d_opp,
@@ -3796,7 +3792,6 @@ impl TitaniumSearch {
             wd,
             width_opp,
             scalar_out,
-            route_out,
             cat_out,
             width_contrib,
             wall_acc,
@@ -4014,57 +4009,6 @@ impl TitaniumSearch {
         let projected = last_ms.max(prev_ms).max(20.0);
         let elapsed = t0.elapsed().as_millis() as f64;
         elapsed + projected > time_ms as f64
-    }
-
-    /// Returns (score, route0_bits, route1_bits) so callers can reuse the route bitsets.
-    fn route_feature_score(&mut self, nw: &Net) -> (f64, u128, u128) {
-        crate::bench_instr::record(
-            |b| &mut b.eval_route_features,
-            || self.route_feature_score_inner(nw),
-        )
-    }
-
-    fn route_feature_score_inner(&mut self, nw: &Net) -> (f64, u128, u128) {
-        if !nw.route_active {
-            return (0.0, 0, 0);
-        }
-        let masks = self.current_dir_masks();
-        let route0 = shortest_route_bits(
-            self.g.pawn[0],
-            self.d0_sq(self.g.pawn[0] as u8),
-            &self.d0_layers[self.dist0_idx],
-            masks,
-        );
-        let route1 = shortest_route_bits(
-            self.g.pawn[1],
-            self.d1_sq(self.g.pawn[1] as u8),
-            &self.d1_layers[self.dist1_idx],
-            masks,
-        );
-        let near0 = expand_frontier(route0, masks) & !route0 & FLOOD_PLAYABLE;
-        let near1 = expand_frontier(route1, masks) & !route1 & FLOOD_PLAYABLE;
-        let (me_route, opp_route, me_near, opp_near) = if self.g.turn == 0 {
-            (route0, route1, near0, near1)
-        } else {
-            (route1, route0, near1, near0)
-        };
-        let contested = (me_route | me_near) & (opp_route | opp_near);
-        let bybit = &nw.route_bybit[self.g.turn];
-        let sum_bits = |mut bits: u128, tbl: &[f64; 128]| {
-            let mut sum = 0.0;
-            while bits != 0 {
-                let bit = bits.trailing_zeros();
-                bits &= bits - 1;
-                sum += tbl[bit as usize];
-            }
-            sum
-        };
-        let score = sum_bits(me_route, &bybit[0])
-            + sum_bits(opp_route, &bybit[1])
-            + sum_bits(me_near, &bybit[2])
-            + sum_bits(opp_near, &bybit[3])
-            + sum_bits(contested, &bybit[4]);
-        (score, route0, route1)
     }
 
     /// Distance-field plane score: exact per-cell BFS distances weighted by
@@ -5118,11 +5062,6 @@ impl TitaniumSearch {
     /// Static/quiescence eval. `depth <= 0` = leaf (cert oracle eligible when gated).
     fn evaluate(&mut self, depth: i32) -> i32 {
         let _eval_timer = crate::bench_instr::OpTimer::start(|b| &mut b.evaluate);
-        if self.net.route_active {
-            crate::bench_instr::bump(|b| &mut b.route_active_eval);
-        } else {
-            crate::bench_instr::bump(|b| &mut b.route_inactive_eval);
-        }
         let me = self.g.turn;
         let opp = 1 - me;
         let mut d_me_i = if me == 0 {
@@ -5244,8 +5183,6 @@ impl TitaniumSearch {
                 out
             },
         );
-        let (route_score, _, _) = self.route_feature_score(nw);
-        out += route_score;
         // Distance-field extension: exact per-cell BFS distances as net input.
         // Zero-padded in legacy weights → dist_field_active false → not computed,
         // so existing blobs are byte-for-byte unaffected. A retrained blob with

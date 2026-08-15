@@ -42,3 +42,10 @@ baseline/
 
 # Gate binaries: 53MB of built .exe, never versioned
 gates/
+
+# Browser-automation scratch output (console/page dumps from MCP sessions)
+.playwright-mcp/
+
+# Site SPA source pulled in for auditing; engine/ is strength-only, the
+# canonical renderer lives in site/web.
+claustrophobia_app.js
