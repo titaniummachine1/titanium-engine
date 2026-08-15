@@ -1,7 +1,7 @@
 # Pre-retrain input cleanup — handoff
 
-Branch `net/pre-retrain-inputs`, based on `main` at `3e3d6a9`. Three commits, all
-node-identical against `main`, none pushed yet.
+Branch `net/pre-retrain-inputs`, based on `main` at `3e3d6a9`. Six commits, four
+of them functional and every one node-identical against `main`. Not pushed yet.
 
 Everything below is measured. Where an earlier document was wrong, the correction
 is recorded rather than quietly replaced.
