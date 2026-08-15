@@ -34,6 +34,25 @@ const FIELD_PLANE_LEN: usize = 81;
 const FIELD_PLANE_SETS: usize = 5;
 const H_HEADER_LEN: usize = 8;
 
+/// Distinct (walls_me, walls_opp) pairs: each hand holds 0..=10, so 11 x 11.
+/// Every pair is reachable -- walls are conserved at `board + both hands == 20`,
+/// so any hand pair just implies a board count, never an illegal state.
+pub const WH_PAIRS: usize = 121;
+
+/// Row index of a hand pair in the walls-in-hand embedding.
+///
+/// Ordered, not symmetric: the mover's own hand is the major term, so `(10, 0)`
+/// and `(0, 10)` are different rows. A symmetric encoding (sum, or difference)
+/// would collapse exactly the distinction the input was added to make.
+///
+/// Hands are clamped rather than asserted. A hand above ten means the caller
+/// already has a corrupt position, and bending the eval beats panicking in
+/// search; the invariant is enforced where walls are placed, not here.
+#[inline]
+pub fn wh_index(walls_me: usize, walls_opp: usize) -> usize {
+    walls_me.min(10) * 11 + walls_opp.min(10)
+}
+
 static NET_BYTES: &[u8] = include_bytes!("../../weights/net_weights.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("../../weights/net_weights_frozen.bin");
 static NET_MEDIUM_BYTES: &[u8] = include_bytes!("../../weights/net_weights_medium.bin");
@@ -50,6 +69,18 @@ pub struct Net {
     pub w1c: Vec<f64>,
     pub po: Vec<f64>,
     pub px: Vec<f64>,
+    /// Walls-in-hand embedding, `[pair][hidden]` flattened, `WH_PAIRS * h`.
+    ///
+    /// Indexed `(walls_me * 11 + walls_opp) * h`, side-to-move canonical. Until
+    /// this existed the net could not tell `(10,0)` from `(0,10)`: the two are
+    /// byte-identical on every other input, yet one is a won endgame and the
+    /// other a lost one. A joint embedding rather than two scalars because the
+    /// value of holding a wall depends entirely on how many the opponent holds.
+    ///
+    /// Zero-filled when the blob omits the section, and adding 0.0 is exact, so
+    /// an old net evaluates bit-identically through this path.
+    pub wh: Vec<f64>,
+    pub wh_active: bool,
     /// Combined CAT impact heatmap as a direct input plane (81, side-to-move
     /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
     /// not even computed, so the live net is unaffected. A retrained blob carries
@@ -122,6 +153,7 @@ mod tag {
     pub const W1C_: u32 = u32::from_le_bytes(*b"W1C_");
     pub const PO__: u32 = u32::from_le_bytes(*b"PO__");
     pub const PX__: u32 = u32::from_le_bytes(*b"PX__");
+    pub const WH__: u32 = u32::from_le_bytes(*b"WH__");
     pub const CATV: u32 = u32::from_le_bytes(*b"CATV");
     pub const DIST: u32 = u32::from_le_bytes(*b"DIST");
 }
@@ -140,6 +172,7 @@ fn assemble(
     w1c: Vec<f64>,
     po: Vec<f64>,
     px: Vec<f64>,
+    wh: Vec<f64>,
     cat: [Vec<f64>; 5],
     dist: [Vec<f64>; 3],
 ) -> Net {
@@ -150,6 +183,7 @@ fn assemble(
     // Presence is derived from the weights, not from the blob length: a section
     // that is present but all-zero is as inert as an absent one, and the
     // consumers skip the whole (expensive) feature computation on a false flag.
+    let wh_active = wh.iter().any(|&w| w != 0.0);
     let cat_active = cat_raw_me
         .iter()
         .chain(&cat_raw_opp)
@@ -187,6 +221,8 @@ fn assemble(
         w1c,
         po,
         px,
+        wh,
+        wh_active,
         cat_raw_me,
         cat_raw_opp,
         cat_propagated_me,
@@ -305,6 +341,20 @@ fn load_net_tlv(bytes: &[u8]) -> Net {
     let w1c = need(tag::W1C_, 9 * 128 * h, "W1C_");
     let po = need(tag::PO__, 81 * h, "PO__");
     let px = need(tag::PX__, 81 * h, "PX__");
+    // Optional and h-dependent, so it cannot go through `opt` (which is fixed
+    // at one 81-cell plane per entry). Absent -> zeros -> `wh_active` false.
+    let wh = match found.iter().find(|(tt, _)| *tt == tag::WH__) {
+        Some(&(_, sl)) if sl.len() == WH_PAIRS * h * 8 => sl
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+        Some(&(_, sl)) => bad(format!(
+            "section WH__: {} bytes, expected {} for NET_H={h}",
+            sl.len(),
+            WH_PAIRS * h * 8
+        )),
+        None => vec![0.0; WH_PAIRS * h],
+    };
     let to5 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 5] { v.try_into().unwrap() };
     let to3 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 3] { v.try_into().unwrap() };
     // CAT is stored already-rescaled in this format. The legacy loader applies
@@ -313,7 +363,7 @@ fn load_net_tlv(bytes: &[u8]) -> Net {
     let cat = to5(opt(tag::CATV, 5));
     let dist = to3(opt(tag::DIST, 3));
 
-    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, cat, dist)
+    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, wh, cat, dist)
 }
 
 /// Serialize a net in the section-table format.
@@ -326,6 +376,7 @@ pub fn net_to_tlv(n: &Net) -> Vec<u8> {
     sections.push((tag::W1C_, n.w1c.clone()));
     sections.push((tag::PO__, n.po.clone()));
     sections.push((tag::PX__, n.px.clone()));
+    sections.push((tag::WH__, n.wh.clone()));
     sections.push((
         tag::CATV,
         flat([
@@ -483,6 +534,9 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
         w1c,
         po,
         px,
+        // The positional format predates this input and has nowhere to put it.
+        // Zeros keep every shipped blob evaluating exactly as before.
+        vec![0.0; WH_PAIRS * h],
         [
             cat_raw_me,
             cat_raw_opp,
@@ -612,7 +666,7 @@ pub static NET_BKT: [usize; 81] = build_bkt();
 mod tlv_tests {
     use super::*;
 
-    fn shipped() -> Vec<(&'static str, &'static [u8])> {
+    pub(super) fn shipped() -> Vec<(&'static str, &'static [u8])> {
         vec![
             ("net_weights.bin", NET_BYTES),
             ("net_weights_frozen.bin", NET_FROZEN_BYTES),
@@ -629,6 +683,8 @@ mod tlv_tests {
         assert_eq!(a.w1c, b.w1c, "{name}: w1c");
         assert_eq!(a.po, b.po, "{name}: po");
         assert_eq!(a.px, b.px, "{name}: px");
+        assert_eq!(a.wh, b.wh, "{name}: wh");
+        assert_eq!(a.wh_active, b.wh_active, "{name}: wh_active");
         assert_eq!(a.cat_raw_me, b.cat_raw_me, "{name}: cat_raw_me");
         assert_eq!(a.cat_raw_opp, b.cat_raw_opp, "{name}: cat_raw_opp");
         assert_eq!(a.cat_propagated_me, b.cat_propagated_me, "{name}: cat_prop_me");
@@ -734,5 +790,76 @@ mod tlv_tests {
             "absent DIST must be inert, not merely zero"
         );
         assert_eq!(without_dist.w1c, base.w1c, "dropping DIST disturbed w1c");
+    }
+}
+
+#[cfg(test)]
+mod walls_in_hand_tests {
+    use super::tlv_tests::shipped;
+    use super::*;
+
+    /// The input exists to separate hand pairs that every other input encodes
+    /// identically. If the encoding is not injective it has bought nothing.
+    #[test]
+    fn every_hand_pair_gets_its_own_row() {
+        let mut seen = vec![usize::MAX; WH_PAIRS];
+        for me in 0..=10 {
+            for opp in 0..=10 {
+                let i = wh_index(me, opp);
+                assert!(i < WH_PAIRS, "({me},{opp}) -> {i} out of range");
+                assert_eq!(
+                    seen[i],
+                    usize::MAX,
+                    "({me},{opp}) collides with pair #{}",
+                    seen[i]
+                );
+                seen[i] = me * 11 + opp;
+            }
+        }
+        assert!(seen.iter().all(|&v| v != usize::MAX), "left rows unused");
+    }
+
+    /// The specific failure that motivated the input: ten walls to nil is a very
+    /// different position from nil to ten, and the old net saw one thing.
+    #[test]
+    fn ten_to_nil_differs_from_nil_to_ten() {
+        assert_ne!(
+            wh_index(10, 0),
+            wh_index(0, 10),
+            "swapped hands must not share a row"
+        );
+    }
+
+    /// Out-of-range hands clamp instead of indexing past the embedding.
+    #[test]
+    fn oversized_hands_stay_in_bounds() {
+        assert!(wh_index(99, 99) < WH_PAIRS);
+        assert_eq!(wh_index(99, 99), wh_index(10, 10));
+    }
+
+    /// Shipped blobs predate the section, so they must load with it inert --
+    /// otherwise this change is not the no-op the node-identity run claims.
+    #[test]
+    fn shipped_blobs_carry_no_walls_in_hand_weights() {
+        for (name, bytes) in shipped() {
+            let n = load_net_from_bytes(bytes);
+            assert_eq!(n.wh.len(), WH_PAIRS * n.h, "{name}: wh wrong length");
+            assert!(!n.wh_active, "{name}: legacy blob must be inert here");
+            assert!(n.wh.iter().all(|&w| w == 0.0), "{name}: wh not zeroed");
+        }
+    }
+
+    /// A blob that does carry the section must survive the round trip with the
+    /// weights intact and the presence flag flipped.
+    #[test]
+    fn walls_in_hand_survives_the_tlv_round_trip() {
+        let mut n = load_net_from_bytes(NET_BYTES);
+        for (i, w) in n.wh.iter_mut().enumerate() {
+            *w = (i as f64) * 1e-4 - 0.5;
+        }
+        n.wh_active = true;
+        let round = load_net_tlv(&net_to_tlv(&n));
+        assert_eq!(round.wh, n.wh, "wh weights did not round-trip");
+        assert!(round.wh_active, "wh_active lost in the round trip");
     }
 }

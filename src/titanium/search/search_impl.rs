@@ -3761,12 +3761,17 @@ impl TitaniumSearch {
         let mut hidden_pre = [0.0f64; MAX_NET_H];
         let mut hidden_clip = [0.0f64; MAX_NET_H];
         let mut neural_out = 0.0f64;
+        let wh = self.wh_offset(me, nw.h);
         if me == 0 {
             wall_acc = self.np_acc0;
             let po = self.g.pawn[0] * nw.h;
             let px = self.g.pawn[1] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                let h = nw.b1[j]
+                    + self.np_acc0[j]
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -3776,7 +3781,11 @@ impl TitaniumSearch {
             let po = NET_MIRC[self.g.pawn[1]] * nw.h;
             let px = NET_MIRC[self.g.pawn[0]] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                let h = nw.b1[j]
+                    + self.np_acc1[j]
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -4009,6 +4018,20 @@ impl TitaniumSearch {
         let projected = last_ms.max(prev_ms).max(20.0);
         let elapsed = t0.elapsed().as_millis() as f64;
         elapsed + projected > time_ms as f64
+    }
+
+    /// Flat offset of the walls-in-hand embedding row for the side to move.
+    ///
+    /// Side-to-move canonical: the mover's own hand is always the major index,
+    /// so `(10,0)` and `(0,10)` land on different rows -- which is the entire
+    /// point of the input. Hands are clamped defensively; a position with more
+    /// than ten in a hand is already corrupt, but the eval should bend rather
+    /// than index out of bounds.
+    #[inline]
+    fn wh_offset(&self, me: usize, h: usize) -> usize {
+        let w_me = self.g.wl[me].max(0) as usize;
+        let w_opp = self.g.wl[1 - me].max(0) as usize;
+        crate::titanium::net::wh_index(w_me, w_opp) * h
     }
 
     /// Distance-field plane score: exact per-cell BFS distances weighted by
@@ -5247,18 +5270,30 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.eval_nnue_infer,
                 || {
+                    // `wh` is zero-filled when the loaded blob carries no
+                    // walls-in-hand section, and `x + 0.0` is exact, so an old
+                    // net still evaluates bit-identically through this add.
+                    let wh = self.wh_offset(me, nw.h);
                     if me == 0 {
                         let po = self.g.pawn[0] * nw.h;
                         let px = self.g.pawn[1] * nw.h;
                         for j in 0..nw.h {
-                            let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                            let h = nw.b1[j]
+                                + self.np_acc0[j]
+                                + nw.po[po + j]
+                                + nw.px[px + j]
+                                + nw.wh[wh + j];
                             out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                         }
                     } else {
                         let po = NET_MIRC[self.g.pawn[1]] * nw.h;
                         let px = NET_MIRC[self.g.pawn[0]] * nw.h;
                         for j in 0..nw.h {
-                            let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                            let h = nw.b1[j]
+                                + self.np_acc1[j]
+                                + nw.po[po + j]
+                                + nw.px[px + j]
+                                + nw.wh[wh + j];
                             out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
                         }
                     }
