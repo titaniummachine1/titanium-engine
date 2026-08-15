@@ -2489,8 +2489,11 @@ pub struct TitaniumSearch {
     dir_masks_key_hi: u32,
     dir_masks_cache: DirMasks,
     // HalfPW accumulator cache
-    np_acc0: [f64; MAX_NET_H],
-    np_acc1: [f64; MAX_NET_H],
+    /// Wall accumulators in Q(QA) fixed point. i16 rather than i32 on purpose:
+    /// the whole point of quantising is 16 lanes per AVX2 register, and
+    /// widening here gives them straight back to sign-extension.
+    np_acc0: [i16; MAX_NET_H],
+    np_acc1: [i16; MAX_NET_H],
     np_hbits: u64,
     np_vbits: u64,
     np_b0: i32,
@@ -2759,8 +2762,8 @@ impl TitaniumSearch {
             dir_masks_key_lo: u32::MAX,
             dir_masks_key_hi: u32::MAX,
             dir_masks_cache: DirMasks::default(),
-            np_acc0: [0.0; MAX_NET_H],
-            np_acc1: [0.0; MAX_NET_H],
+            np_acc0: [0; MAX_NET_H],
+            np_acc1: [0; MAX_NET_H],
             np_hbits: 0,
             np_vbits: 0,
             np_b0: -1,
@@ -3736,21 +3739,39 @@ impl TitaniumSearch {
         let mut neural_out = 0.0f64;
         let wh = self.wh_offset(me, nw.h);
         if me == 0 {
-            wall_acc = self.np_acc0;
+            wall_acc[..nw.h].copy_from_slice(
+                &self.np_acc0[..nw.h]
+                    .iter()
+                    .map(|&v| f64::from(v) / crate::titanium::net::QA)
+                    .collect::<Vec<_>>(),
+            );
             let po = self.g.pawn[0] * nw.h;
             let px = self.g.pawn[1] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j] + nw.wh[wh + j];
+                let h = nw.b1[j]
+                    + f64::from(self.np_acc0[j]) / crate::titanium::net::QA
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
             }
         } else {
-            wall_acc = self.np_acc1;
+            wall_acc[..nw.h].copy_from_slice(
+                &self.np_acc1[..nw.h]
+                    .iter()
+                    .map(|&v| f64::from(v) / crate::titanium::net::QA)
+                    .collect::<Vec<_>>(),
+            );
             let po = NET_MIRC[self.g.pawn[1]] * nw.h;
             let px = NET_MIRC[self.g.pawn[0]] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j] + nw.wh[wh + j];
+                let h = nw.b1[j]
+                    + f64::from(self.np_acc1[j]) / crate::titanium::net::QA
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -4844,8 +4865,8 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.nnue_full_refresh,
                 || {
-                    self.np_acc0.fill(0.0);
-                    self.np_acc1.fill(0.0);
+                    self.np_acc0.fill(0);
+                    self.np_acc1.fill(0);
                     let mut bits = cur_h;
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
@@ -4853,8 +4874,8 @@ impl TitaniumSearch {
                         let o0 = (b0 as usize * 128 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
                         for j in 0..nw.h {
-                            self.np_acc0[j] += nw.w1c[o0 + j];
-                            self.np_acc1[j] += nw.w1c[o1 + j];
+                            self.np_acc0[j] = self.np_acc0[j].saturating_add(nw.w1c_q[o0 + j]);
+                            self.np_acc1[j] = self.np_acc1[j].saturating_add(nw.w1c_q[o1 + j]);
                         }
                     }
                     let mut bits = cur_v;
@@ -4864,8 +4885,8 @@ impl TitaniumSearch {
                         let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
                         for j in 0..nw.h {
-                            self.np_acc0[j] += nw.w1c[o0 + j];
-                            self.np_acc1[j] += nw.w1c[o1 + j];
+                            self.np_acc0[j] = self.np_acc0[j].saturating_add(nw.w1c_q[o0 + j]);
+                            self.np_acc1[j] = self.np_acc1[j].saturating_add(nw.w1c_q[o1 + j]);
                         }
                     }
                     self.np_hbits = cur_h;
@@ -4882,24 +4903,42 @@ impl TitaniumSearch {
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let sg = if cur_h >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let add = cur_h >> s & 1 != 0;
                         let o0 = (b0 as usize * 128 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
+                        // Saturating both ways: a wall being retracted must undo
+                        // exactly what adding it did, and wrapping here would
+                        // desync the accumulator from the position.
                         for j in 0..nw.h {
-                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                            let (d0, d1) = (nw.w1c_q[o0 + j], nw.w1c_q[o1 + j]);
+                            if add {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_add(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_add(d1);
+                            } else {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_sub(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_sub(d1);
+                            }
                         }
                     }
                     let mut bits = cur_v ^ self.np_vbits;
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let sg = if cur_v >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let add = cur_v >> s & 1 != 0;
                         let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
+                        // Saturating both ways: a wall being retracted must undo
+                        // exactly what adding it did, and wrapping here would
+                        // desync the accumulator from the position.
                         for j in 0..nw.h {
-                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                            let (d0, d1) = (nw.w1c_q[o0 + j], nw.w1c_q[o1 + j]);
+                            if add {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_add(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_add(d1);
+                            } else {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_sub(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_sub(d1);
+                            }
                         }
                     }
                     self.np_hbits = cur_h;
@@ -5234,33 +5273,38 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.eval_nnue_infer,
                 || {
-                    // `wh` is zero-filled when the loaded blob carries no
-                    // walls-in-hand section, and `x + 0.0` is exact, so an old
-                    // net still evaluates bit-identically through this add.
+                    // Fixed point throughout. Every term entering the hidden
+                    // sum shares scale QA so they add directly; the clamp is the
+                    // same clipped ReLU, expressed as [0, QA]. Only the dot
+                    // product widens to i32, and it is the sole place it needs
+                    // to -- an i32 accumulator above would cost more in
+                    // sign-extension than the extra lanes buy.
                     let wh = self.wh_offset(me, nw.h);
-                    if me == 0 {
-                        let po = self.g.pawn[0] * nw.h;
-                        let px = self.g.pawn[1] * nw.h;
-                        for j in 0..nw.h {
-                            let h = nw.b1[j]
-                                + self.np_acc0[j]
-                                + nw.po[po + j]
-                                + nw.px[px + j]
-                                + nw.wh[wh + j];
-                            out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
-                        }
+                    let acc = if me == 0 {
+                        &self.np_acc0
                     } else {
-                        let po = NET_MIRC[self.g.pawn[1]] * nw.h;
-                        let px = NET_MIRC[self.g.pawn[0]] * nw.h;
-                        for j in 0..nw.h {
-                            let h = nw.b1[j]
-                                + self.np_acc1[j]
-                                + nw.po[po + j]
-                                + nw.px[px + j]
-                                + nw.wh[wh + j];
-                            out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
-                        }
+                        &self.np_acc1
+                    };
+                    let (po, px) = if me == 0 {
+                        (self.g.pawn[0] * nw.h, self.g.pawn[1] * nw.h)
+                    } else {
+                        (
+                            NET_MIRC[self.g.pawn[1]] * nw.h,
+                            NET_MIRC[self.g.pawn[0]] * nw.h,
+                        )
+                    };
+                    let qa = crate::titanium::net::QA as i32;
+                    let mut dot: i32 = 0;
+                    for j in 0..nw.h {
+                        let hv = nw.b1_q[j] as i32
+                            + acc[j] as i32
+                            + nw.po_q[po + j] as i32
+                            + nw.px_q[px + j] as i32
+                            + nw.wh_q[wh + j] as i32;
+                        dot += nw.w2_q[j] as i32 * hv.clamp(0, qa);
                     }
+                    out += f64::from(dot) / (crate::titanium::net::QA * crate::titanium::net::QB)
+                        * 200.0;
                 },
             );
         }

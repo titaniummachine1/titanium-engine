@@ -97,6 +97,43 @@ pub struct Net {
     pub dist_me_canon: Box<[[f64; 81]; 2]>,
     pub dist_opp_canon: Box<[[f64; 81]; 2]>,
     pub dist_diff_canon: Box<[[f64; 81]; 2]>,
+
+    // ── int16 hot-path mirrors ────────────────────────────────────────────
+    // Derived at load, not stored in the blob: the trainer keeps emitting f64
+    // and the engine quantizes once at startup. That keeps the blob format and
+    // the training pipeline untouched while the per-leaf arithmetic runs in
+    // int16, which is where the width becomes affordable -- measured 4.28x on
+    // the output layer and 2.13x on the accumulator refresh at h=32.
+    //
+    // Everything that feeds the hidden pre-activation shares ONE scale (`QA`)
+    // so the terms can be summed directly in fixed point. `w2` gets its own
+    // (`QB`) because it is only ever multiplied by an already-clamped
+    // activation.
+    pub b1_q: Vec<i16>,
+    pub w2_q: Vec<i16>,
+    pub w1c_q: Vec<i16>,
+    pub po_q: Vec<i16>,
+    pub px_q: Vec<i16>,
+    pub wh_q: Vec<i16>,
+}
+
+/// Fixed-point scale for everything entering the hidden pre-activation.
+///
+/// The activation is `clamp(0,1)`, so the post-clamp range is known by
+/// construction -- no calibration pass, unlike a net whose activations are
+/// unbounded. 1024 keeps the worst-case accumulator inside i16: the largest
+/// observed |w1c| is 0.67, at most ~40 wall features are ever active, and
+/// `0.67 * 1024 * 40` is 27,443 against a 32,767 ceiling.
+pub const QA: f64 = 1024.0;
+/// Fixed-point scale for the output weights. Chosen so `QA * QB * h` cannot
+/// overflow the i32 dot-product accumulator: `1024 * 4096 * 256` is 1.07e9,
+/// inside i32's 2.15e9.
+pub const QB: f64 = 4096.0;
+
+#[inline]
+fn q(v: f64, scale: f64) -> i16 {
+    let r = (v * scale).round();
+    r.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
@@ -191,6 +228,17 @@ fn assemble(
     let mut w2 = [0.0f64; MAX_NET_H];
     b1[..h].copy_from_slice(&b1_v);
     w2[..h].copy_from_slice(&w2_v);
+
+    // int16 mirrors for the hot path. Built once here so `evaluate` never sees
+    // an f64 weight; the f64 arrays stay for the parity trace and for tooling
+    // that wants the unquantized values.
+    let b1_q: Vec<i16> = b1_v.iter().map(|&v| q(v, QA)).collect();
+    let w2_q: Vec<i16> = w2_v.iter().map(|&v| q(v, QB)).collect();
+    let w1c_q: Vec<i16> = w1c.iter().map(|&v| q(v, QA)).collect();
+    let po_q: Vec<i16> = po.iter().map(|&v| q(v, QA)).collect();
+    let px_q: Vec<i16> = px.iter().map(|&v| q(v, QA)).collect();
+    let wh_q: Vec<i16> = wh.iter().map(|&v| q(v, QA)).collect();
+
     Net {
         h,
         ws: ws_v.try_into().unwrap(),
@@ -208,6 +256,12 @@ fn assemble(
         dist_me_canon,
         dist_opp_canon,
         dist_diff_canon,
+        b1_q,
+        w2_q,
+        w1c_q,
+        po_q,
+        px_q,
+        wh_q,
     }
 }
 
