@@ -199,3 +199,30 @@ is worth little when you hold 9." Our 121-row joint embedding can.
 (~300 Elo above Titanium, the current label source)? The file contains no strength
 claim — I checked. It is a match, not an argument. Retraining against the
 second-best teacher and discovering it afterwards is the expensive mistake.
+
+---
+
+## 8. BACKLOG (not done, deliberately parked)
+
+**Engine NPS gap — ~850k vs a peer engine's 1,200k.** Roughly 30% of search
+throughput unaccounted for. Not investigated; parked so training could start.
+Worth a profile pass, remembering that `bench_instr` percentages NEST — an outer
+op contains everything timed inside it, so they cannot be summed.
+
+**Featurization should not go through Python at all.** It currently shells out to
+`eval-packed-batch`. Batch size is now 25,000 (was 256), which removes ~1,562
+engine cold starts per 400k corpus, and results are cached per position in
+sqlite. But the right design is to emit features *during selfplay*, at the moment
+the engine already has the position — making the separate featurization pass
+disappear rather than merely become cheap.
+
+**Selfplay games do not reach the trainer.** `self_play_overnight` writes to
+`games_turso.db`; the trainer reads `teacher_dataset_good`, whose manifest is
+`immutable: true`. So the flywheel generates fresh games that currently bank for
+later rather than feeding the next cycle. Closing this needs a decision about
+what the canonical training corpus is — `extend_teacher_dataset.py` deliberately
+writes a *non-active* experimental dataset.
+
+**QAT/engine agreement unverified.** QAT trains and the engine runs int16, but
+the check that a QAT-trained net evaluated by the engine reproduces the trainer's
+QAT forward has not been run.
