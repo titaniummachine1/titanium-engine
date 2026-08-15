@@ -3627,6 +3627,7 @@ impl TitaniumSearch {
         self.position_changed();
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_PARITY);
         let trace = self.compute_net_eval_trace();
+        let h = self.net.h;
         let f64s = |arr: &[f64]| {
             let mut s = String::new();
             for (i, v) in arr.iter().enumerate() {
@@ -3650,9 +3651,13 @@ impl TitaniumSearch {
             wo_ = trace.width_opp,
             so = trace.scalar_out,
             wc = trace.width_contrib,
-            wa = f64s(&trace.wall_acc),
-            hp = f64s(&trace.hidden_pre),
-            hc = f64s(&trace.hidden_clip),
+            // Only 0..h is populated; the rest of the fixed MAX_NET_H array is
+            // padding. Exporting all 256 slots shipped 224 meaningless zeros and
+            // made the tri-path comparison ill-defined against an h-length
+            // Python trace, which compares by index.
+            wa = f64s(&trace.wall_acc[..h]),
+            hp = f64s(&trace.hidden_pre[..h]),
+            hc = f64s(&trace.hidden_clip[..h]),
             no = trace.neural_out,
             ev = trace.eval,
         )
