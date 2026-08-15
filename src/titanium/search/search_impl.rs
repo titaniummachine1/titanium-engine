@@ -2381,7 +2381,6 @@ pub struct EvalParityTrace {
     pub wd: f64,
     pub width_opp: f64,
     pub scalar_out: f64,
-    pub cat_out: f64,
     pub width_contrib: f64,
     pub wall_acc: [f64; MAX_NET_H],
     pub hidden_pre: [f64; MAX_NET_H],
@@ -3640,7 +3639,7 @@ impl TitaniumSearch {
         };
         format!(
             "{{\"scalar_inputs\":{{\"d_me\":{dm},\"d_opp\":{do_},\"w_me\":{wm},\"w_opp\":{wo},\"pd\":{pd},\"wd\":{wd},\"width_opp\":{wo_}}},\
-             \"scalar_out\":{so},\"cat_out\":{co},\"width_contrib\":{wc},\
+             \"scalar_out\":{so},\"width_contrib\":{wc},\
              \"wall_acc\":[{wa}],\"hidden_pre\":[{hp}],\"hidden_clip\":[{hc}],\"neural_out\":{no},\"eval\":{ev}}}",
             dm = trace.d_me,
             do_ = trace.d_opp,
@@ -3650,7 +3649,6 @@ impl TitaniumSearch {
             wd = trace.wd,
             wo_ = trace.width_opp,
             so = trace.scalar_out,
-            co = trace.cat_out,
             wc = trace.width_contrib,
             wa = f64s(&trace.wall_acc),
             hp = f64s(&trace.hidden_pre),
@@ -3710,36 +3708,6 @@ impl TitaniumSearch {
             scalar_out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
         }
         scalar_out += ws[13] * pd * w_opp / 10.0;
-        let mut cat_out = 0.0;
-        if nw.cat_active {
-            if let Some(bridge) = self.bridge.as_ref() {
-                let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
-                let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
-                    (
-                        &cat.witness_p0,
-                        &cat.witness_p1,
-                        &cat.propagated_p0,
-                        &cat.propagated_p1,
-                    )
-                } else {
-                    (
-                        &cat.witness_p1,
-                        &cat.witness_p0,
-                        &cat.propagated_p1,
-                        &cat.propagated_p0,
-                    )
-                };
-                for sq in 0..81usize {
-                    let canon = if me == 0 { sq } else { NET_MIRC[sq] };
-                    cat_out += nw.cat_raw_me[canon] * (f64::from(raw_me[sq]) / 4.0)
-                        + nw.cat_raw_opp[canon] * (f64::from(raw_opp[sq]) / 4.0)
-                        + nw.cat_propagated_me[canon] * (f64::from(prop_me[sq]) / 200.0)
-                        + nw.cat_propagated_opp[canon] * (f64::from(prop_opp[sq]) / 200.0)
-                        + nw.cat_propagated_combined[canon]
-                            * (f64::from(cat.propagated[sq]) / 400.0);
-                }
-            }
-        }
         let width_opp = if me == 0 {
             width_in_layers(
                 &self.d1_layers[self.dist1_idx],
@@ -3783,7 +3751,7 @@ impl TitaniumSearch {
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
             }
         }
-        let total = scalar_out + cat_out + width_contrib + neural_out;
+        let total = scalar_out + width_contrib + neural_out;
         EvalParityTrace {
             d_me,
             d_opp,
@@ -3793,7 +3761,6 @@ impl TitaniumSearch {
             wd,
             width_opp,
             scalar_out,
-            cat_out,
             width_contrib,
             wall_acc,
             hidden_pre,

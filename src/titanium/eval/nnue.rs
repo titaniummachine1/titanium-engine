@@ -81,16 +81,6 @@ pub struct Net {
     /// an old net evaluates bit-identically through this path.
     pub wh: Vec<f64>,
     pub wh_active: bool,
-    /// Combined CAT impact heatmap as a direct input plane (81, side-to-move
-    /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
-    /// not even computed, so the live net is unaffected. A retrained blob carries
-    /// learned weights → `cat_active` true → contributes.
-    pub cat_raw_me: Vec<f64>,
-    pub cat_raw_opp: Vec<f64>,
-    pub cat_propagated_me: Vec<f64>,
-    pub cat_propagated_opp: Vec<f64>,
-    pub cat_propagated_combined: Vec<f64>,
-    pub cat_active: bool,
     /// Distance-field plane weights (81 each, h-independent, side-to-move
     /// canonical). Added as scalar features to the eval output, like the route
     /// planes. These give the net exact per-cell BFS distances instead of the
@@ -142,10 +132,9 @@ const TLV_MAGIC: &[u8; 4] = b"TNW1";
 
 /// Section tags. Four ASCII bytes, matched exactly.
 ///
-/// `b"ROUT"` is retired and deliberately absent: the five route planes were
-/// learned in v13/v17 but zeroed in every net shipped since, and the eval that
-/// consumed them is gone. A blob that still carries the section loads fine --
-/// an unrecognised tag takes the ignore path, which is exactly the intent.
+/// `b"ROUT"` and `b"CATV"` are retired and deliberately absent. Both were real
+/// learned inputs that the eval stopped reading; a blob still carrying either
+/// loads fine, because an unrecognised tag takes the ignore path.
 mod tag {
     pub const WSKP: u32 = u32::from_le_bytes(*b"WSKP");
     pub const B1__: u32 = u32::from_le_bytes(*b"B1__");
@@ -154,7 +143,6 @@ mod tag {
     pub const PO__: u32 = u32::from_le_bytes(*b"PO__");
     pub const PX__: u32 = u32::from_le_bytes(*b"PX__");
     pub const WH__: u32 = u32::from_le_bytes(*b"WH__");
-    pub const CATV: u32 = u32::from_le_bytes(*b"CATV");
     pub const DIST: u32 = u32::from_le_bytes(*b"DIST");
 }
 
@@ -173,24 +161,14 @@ fn assemble(
     po: Vec<f64>,
     px: Vec<f64>,
     wh: Vec<f64>,
-    cat: [Vec<f64>; 5],
     dist: [Vec<f64>; 3],
 ) -> Net {
-    let [cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined] =
-        cat;
     let [dist_me, dist_opp, dist_diff] = dist;
 
     // Presence is derived from the weights, not from the blob length: a section
     // that is present but all-zero is as inert as an absent one, and the
     // consumers skip the whole (expensive) feature computation on a false flag.
     let wh_active = wh.iter().any(|&w| w != 0.0);
-    let cat_active = cat_raw_me
-        .iter()
-        .chain(&cat_raw_opp)
-        .chain(&cat_propagated_me)
-        .chain(&cat_propagated_opp)
-        .chain(&cat_propagated_combined)
-        .any(|&w| w != 0.0);
     let dist_field_active = dist_me
         .iter()
         .chain(&dist_opp)
@@ -223,12 +201,6 @@ fn assemble(
         px,
         wh,
         wh_active,
-        cat_raw_me,
-        cat_raw_opp,
-        cat_propagated_me,
-        cat_propagated_opp,
-        cat_propagated_combined,
-        cat_active,
         dist_me,
         dist_opp,
         dist_diff,
@@ -355,15 +327,10 @@ fn load_net_tlv(bytes: &[u8]) -> Net {
         )),
         None => vec![0.0; WH_PAIRS * h],
     };
-    let to5 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 5] { v.try_into().unwrap() };
     let to3 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 3] { v.try_into().unwrap() };
-    // CAT is stored already-rescaled in this format. The legacy loader applies
-    // historic x4 / x400/256 factors while reading; carrying those into a new
-    // format would preserve an accident of the old one.
-    let cat = to5(opt(tag::CATV, 5));
     let dist = to3(opt(tag::DIST, 3));
 
-    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, wh, cat, dist)
+    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, wh, dist)
 }
 
 /// Serialize a net in the section-table format.
@@ -378,16 +345,6 @@ pub fn net_to_tlv(n: &Net) -> Vec<u8> {
     sections.push((tag::PO__, n.po.clone()));
     sections.push((tag::PX__, n.px.clone()));
     sections.push((tag::WH__, n.wh.clone()));
-    sections.push((
-        tag::CATV,
-        flat([
-            &n.cat_raw_me,
-            &n.cat_raw_opp,
-            &n.cat_propagated_me,
-            &n.cat_propagated_opp,
-            &n.cat_propagated_combined,
-        ]),
-    ));
     sections.push((
         tag::DIST,
         n.dist_me
@@ -464,56 +421,20 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
     // still be stepped over or every section after them decodes from the wrong
     // place. Skipping is not the same as deleting in a positional format.
     offset += FIELD_PLANE_LEN * FIELD_PLANE_SETS * 8;
-    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
-        if has_cat_v5_normalized || has_cat_v5_normalized_dist {
-            (
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            )
-        } else if has_cat_v5_witness || has_cat_v5_witness_dist {
-            let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut raw_me {
-                *w *= 4.0;
-            }
-            for w in &mut raw_opp {
-                *w *= 4.0;
-            }
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                raw_me,
-                raw_opp,
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else if has_cat_v5 || has_cat_v5_dist {
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else {
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-            )
-        };
+    // The CAT tail is retired too, and unlike the route planes its LENGTH varies
+    // by blob variant: 1 plane (v5), 3 (witness) or 5 (normalized). Skip exactly
+    // what this variant carries, or `dist` below decodes from the wrong offset.
+    // The historic x4 and x400/256 rescales those reads applied die with them.
+    let cat_planes = if has_cat_v5_normalized || has_cat_v5_normalized_dist {
+        5
+    } else if has_cat_v5_witness || has_cat_v5_witness_dist {
+        3
+    } else if has_cat_v5 || has_cat_v5_dist {
+        1
+    } else {
+        0
+    };
+    offset += FIELD_PLANE_LEN * cat_planes * 8;
     // Distance-field extension weights (zero-padded if blob doesn't carry them)
     let (dist_me, dist_opp, dist_diff) = if has_dist {
         (
@@ -539,13 +460,6 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
         // The positional format predates this input and has nowhere to put it.
         // Zeros keep every shipped blob evaluating exactly as before.
         vec![0.0; WH_PAIRS * h],
-        [
-            cat_raw_me,
-            cat_raw_opp,
-            cat_propagated_me,
-            cat_propagated_opp,
-            cat_propagated_combined,
-        ],
         [dist_me, dist_opp, dist_diff],
     )
 }
@@ -687,26 +601,11 @@ mod tlv_tests {
         assert_eq!(a.px, b.px, "{name}: px");
         assert_eq!(a.wh, b.wh, "{name}: wh");
         assert_eq!(a.wh_active, b.wh_active, "{name}: wh_active");
-        assert_eq!(a.cat_raw_me, b.cat_raw_me, "{name}: cat_raw_me");
-        assert_eq!(a.cat_raw_opp, b.cat_raw_opp, "{name}: cat_raw_opp");
-        assert_eq!(
-            a.cat_propagated_me, b.cat_propagated_me,
-            "{name}: cat_prop_me"
-        );
-        assert_eq!(
-            a.cat_propagated_opp, b.cat_propagated_opp,
-            "{name}: cat_prop_opp"
-        );
-        assert_eq!(
-            a.cat_propagated_combined, b.cat_propagated_combined,
-            "{name}: cat_prop_combined"
-        );
         assert_eq!(a.dist_me, b.dist_me, "{name}: dist_me");
         assert_eq!(a.dist_opp, b.dist_opp, "{name}: dist_opp");
         assert_eq!(a.dist_diff, b.dist_diff, "{name}: dist_diff");
         // Derived tables and presence flags must agree too, or the hot path
         // would differ while the raw weights matched.
-        assert_eq!(a.cat_active, b.cat_active, "{name}: cat_active");
         assert_eq!(
             a.dist_field_active, b.dist_field_active,
             "{name}: dist_active"
