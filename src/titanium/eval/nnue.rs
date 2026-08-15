@@ -369,7 +369,8 @@ fn load_net_tlv(bytes: &[u8]) -> Net {
 /// Serialize a net in the section-table format.
 pub fn net_to_tlv(n: &Net) -> Vec<u8> {
     let mut sections: Vec<(u32, Vec<f64>)> = Vec::new();
-    let flat = |ps: [&Vec<f64>; 5]| -> Vec<f64> { ps.iter().flat_map(|p| p.iter().copied()).collect() };
+    let flat =
+        |ps: [&Vec<f64>; 5]| -> Vec<f64> { ps.iter().flat_map(|p| p.iter().copied()).collect() };
     sections.push((tag::WSKP, n.ws.to_vec()));
     sections.push((tag::B1__, n.b1[..n.h].to_vec()));
     sections.push((tag::W2__, n.w2[..n.h].to_vec()));
@@ -440,7 +441,8 @@ fn load_net_legacy(bytes: &[u8]) -> Net {
     let has_cat_v5_dist = bytes.len() == expected_cat_v5_dist;
     let has_cat_v5_witness_dist = bytes.len() == expected_cat_v5_witness_dist;
     let has_cat_v5_normalized_dist = bytes.len() == expected_cat_v5_normalized_dist;
-    let has_dist = has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
+    let has_dist =
+        has_dist_only || has_cat_v5_dist || has_cat_v5_witness_dist || has_cat_v5_normalized_dist;
 
     assert!(
         bytes.len() == expected_no_cat || has_cat_v5 || has_cat_v5_witness || has_cat_v5_normalized
@@ -687,8 +689,14 @@ mod tlv_tests {
         assert_eq!(a.wh_active, b.wh_active, "{name}: wh_active");
         assert_eq!(a.cat_raw_me, b.cat_raw_me, "{name}: cat_raw_me");
         assert_eq!(a.cat_raw_opp, b.cat_raw_opp, "{name}: cat_raw_opp");
-        assert_eq!(a.cat_propagated_me, b.cat_propagated_me, "{name}: cat_prop_me");
-        assert_eq!(a.cat_propagated_opp, b.cat_propagated_opp, "{name}: cat_prop_opp");
+        assert_eq!(
+            a.cat_propagated_me, b.cat_propagated_me,
+            "{name}: cat_prop_me"
+        );
+        assert_eq!(
+            a.cat_propagated_opp, b.cat_propagated_opp,
+            "{name}: cat_prop_opp"
+        );
         assert_eq!(
             a.cat_propagated_combined, b.cat_propagated_combined,
             "{name}: cat_prop_combined"
@@ -699,10 +707,16 @@ mod tlv_tests {
         // Derived tables and presence flags must agree too, or the hot path
         // would differ while the raw weights matched.
         assert_eq!(a.cat_active, b.cat_active, "{name}: cat_active");
-        assert_eq!(a.dist_field_active, b.dist_field_active, "{name}: dist_active");
+        assert_eq!(
+            a.dist_field_active, b.dist_field_active,
+            "{name}: dist_active"
+        );
         assert_eq!(a.dist_me_canon, b.dist_me_canon, "{name}: dist_me_canon");
         assert_eq!(a.dist_opp_canon, b.dist_opp_canon, "{name}: dist_opp_canon");
-        assert_eq!(a.dist_diff_canon, b.dist_diff_canon, "{name}: dist_diff_canon");
+        assert_eq!(
+            a.dist_diff_canon, b.dist_diff_canon,
+            "{name}: dist_diff_canon"
+        );
     }
 
     /// Every shipped blob must survive legacy -> TLV -> legacy-equivalent with

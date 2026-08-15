@@ -3767,11 +3767,7 @@ impl TitaniumSearch {
             let po = self.g.pawn[0] * nw.h;
             let px = self.g.pawn[1] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j]
-                    + self.np_acc0[j]
-                    + nw.po[po + j]
-                    + nw.px[px + j]
-                    + nw.wh[wh + j];
+                let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j] + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
@@ -3781,11 +3777,7 @@ impl TitaniumSearch {
             let po = NET_MIRC[self.g.pawn[1]] * nw.h;
             let px = NET_MIRC[self.g.pawn[0]] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j]
-                    + self.np_acc1[j]
-                    + nw.po[po + j]
-                    + nw.px[px + j]
-                    + nw.wh[wh + j];
+                let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j] + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
