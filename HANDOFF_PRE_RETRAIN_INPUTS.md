@@ -38,6 +38,7 @@ plane. Do not infer "the net improved" from a version bump.
 | `38f5c67` | Section-table (TLV) blob format, cherry-picked from the experiment branch | node-identical on 5 positions, 359 tests |
 | `92e1ff8` | v19.4.9 — delete the 5 route planes and the eval that read them | node-identical on 6 positions, 359 tests |
 | `9a2a445` | v19.5.0 — walls-in-hand 121-row embedding | node-identical on 6 positions, ~0.8% NPS, 364 tests |
+| `839c9b1` | v19.5.1 — delete the CAT input planes | node-identical on 6 positions, 364 tests |
 
 Node identity throughout is fixed depth 8, single thread, on `startpos`,
 `wall-maze`, `dense-maze`, `c3h-midgame`, `endgame-c5`, `low-wall`, comparing
@@ -85,7 +86,13 @@ weights; zeroing all of them changes nothing across five positions at depth 8 �
 not one node, move, or score. The CAT eval block was already removed from
 `evaluate()`; only diagnostics still touch the planes.
 
-They are the *same class of dead weight the route planes were*. Delete them.
+They are the *same class of dead weight the route planes were*. **Deleted in
+`839c9b1`.** The legacy reader skips the tail, and unlike the route planes the
+skip LENGTH varies by variant — 1 plane (v5), 3 (witness), 5 (normalized) — so the
+count is derived from the same length flags that detect the variant. Getting that
+wrong would have silently misaligned the dist tail behind it.
+
+**The net now carries no input the engine does not read.**
 
 **Do not confuse the two CATs.** These are the five CAT *net-input* planes.
 CAT-the-heatmap used for LMR move ordering is well calibrated and must stay.
@@ -143,7 +150,7 @@ quantization of an f64-trained net is where this normally fails.
    - The trainer must emit `WH__` and stop emitting route and CAT planes.
    - **Retraining without this recreates exactly the bug we just deleted**: a net
      that spends capacity on inputs the engine never reads.
-2. **Delete the CAT input planes** (§3).
+2. **Decide the teacher before spending the retrain** (§7).
 3. **Quantize and widen** (§4) — QAT from step one, i16 accumulator, `h=128`.
 4. **Leave the distance input alone.** The plain wall-only flood is 0.034 plies
    from truth on average; the adversarial version is the better *bound* and the
@@ -157,3 +164,38 @@ quantization of an f64-trained net is where this normally fails.
 - `.playwright-mcp/` and `claustrophobia_app.js` are gitignored. The JS file is
   8,710 lines and is **not** a duplicate of any sibling copy (the nearest,
   `.local/claustrophobia-dev/app.js`, is 7,482), so it was not deleted.
+
+
+---
+
+## 7. THE TEACHER QUESTION (opened 2026-08-15)
+
+`~/Downloads/ace_full_v3.html` (14 MB) embeds two complete nets:
+
+- **`ace1-weights`** — AZ-style trunk, 18 layers, 128 filters, self-attention,
+  **1,427,945 params**, `epoch15000.ckpt`, input NHWC `[N,9,9,15]`, 137 actions.
+- **`ace1-fast-weights`** — a distillation with the *same shape as ours*: single
+  hidden layer, **H=192**, ~260k params, value **+ 137-way policy**, ReLU. `ka-br`
+  runs it as a real AB leaf with NNUE-style sparse accumulation.
+
+**Neither is a drop-in eval.** From `ka-encoder`: the 15 channels are mostly dense
+(five constant broadcast planes at 81 nonzeros each, ~288 passability entries) —
+~825 active of 1215, roughly 158k MACs/eval against Titanium's ~1.2 µs budget at
+850k NPS. Worse, **ch13/ch14 encode legal wall placements**, and
+`wallPlacableUngated` runs `hasPath(0) && hasPath(1)` per slot: **128 path floods
+per position encoded**. `ka-br` calls itself a "leaf-cost regime" port. ACE and
+Titanium sit at opposite ends of the nodes-vs-eval-quality tradeoff.
+
+**What it is worth:** a candidate teacher, and independent evidence that a
+192-wide single-hidden-layer net works as an AB leaf for this game.
+
+**One design point it settles in our favour.** ACE encodes walls-in-hand as two
+scalar constant planes (ch2/ch3). Fine for an 18-layer trunk where depth builds
+the interaction — but `ace1-fast` is single-hidden-layer and inherited it anyway,
+so it can only represent the two hands *linearly*. It cannot express "my 8th wall
+is worth little when you hold 9." Our 121-row joint embedding can.
+
+**Open, and worth settling BEFORE the retrain:** is this stronger than zero.ink
+(~300 Elo above Titanium, the current label source)? The file contains no strength
+claim — I checked. It is a match, not an argument. Retraining against the
+second-best teacher and discovering it afterwards is the expensive mistake.
