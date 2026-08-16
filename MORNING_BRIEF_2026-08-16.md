@@ -71,7 +71,23 @@ After: 20/20 accepted, 20 distinct lines; against the live DB, **44% acceptance*
 ## 4. RUNNING NOW
 
 Selfplay generation, 8 threads, 10 ms/move, batches of 1000.
-Measured rate: **~3,700 games/hr, ~95,000 positions/hr.**
+
+**Sustained rate, measured over a 2-minute window (not the opening burst):
+31 games/min, 1,430 positions/min** — about 1,860 games/hr. An earlier note in
+this file said ~3,700 games/hr; that was the first-minutes rate and was roughly
+double the truth.
+
+Projected to 08:00: **+8,127 games, +369,069 positions**, taking the corpus from
+1.49M to ~1.86M positions (+25%) and density from 16.2 to ~20.3 samples/param.
+
+Acceptance is the limiter, and it decays as the line-hash store grows:
+  - pawn-only openings: 44% -> **7.1%**
+  - pawn + random walls, replay-validated: **19.1%** (2.7x better, still 81% lost)
+
+The rejects are games whose lines already exist. If generation is continued for
+longer, raising diversity further is the lever that matters -- longer prefixes, or
+enabling the engine's own opening temperature (`OpeningExplorationConfig`, which
+is `enabled=False` by default and wants the DAG prefix index wired).
 
 Started from games=81,337 / positions=1,448,816.
 
