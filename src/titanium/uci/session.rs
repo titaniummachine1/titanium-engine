@@ -53,7 +53,15 @@ enum Cmd {
     /// Replace the engine position (no I/O reply needed — I/O thread handles "ready").
     SetGame(GameState),
     /// Timed search: think for `time_ms` and reply BestMove.
-    GoTimed(u64),
+    ///
+    /// `fixed_movetime` distinguishes the two callers, which want opposite
+    /// things. `go TIME_SEC` states how long this move gets, so the search
+    /// should spend it. `go rem` hands over a REMAINING CLOCK; the allocator
+    /// picks a nominal budget from it, and the stability heuristics are then
+    /// meant to hand time back on easy moves so it can be spent later in the
+    /// game. Collapsing the two either caps fixed-movetime search at depth 1
+    /// or silently removes clock-banking from real games.
+    GoTimed { time_ms: u64, fixed_movetime: bool },
     /// Start pondering on the current position (pre-apply `ponder_mv` if given).
     GoInfinite(i16),
     /// Stop pondering; reply with the last best move from the ponder search.
@@ -148,21 +156,44 @@ fn position_is_exactly(live: &GameState, g: &GameState) -> bool {
 /// The search that produces the move we play. Pondering deliberately does not
 /// use this: it stays single-threaded so the abort flag has one search to stop.
 #[inline]
+/// `full = fixed_movetime`: spend a stated move time, budget a game clock.
+///
+/// `full = false` enables two clock-allocation heuristics —
+/// `soft_over_time_budget` (stop once a stability-scaled fraction of the budget
+/// is gone) and `predicted_over_time_budget` (don't start an iteration
+/// projected not to fit). Under `go rem` those are wanted: the allocator picks
+/// a nominal budget and the heuristics hand time back on easy moves so it can
+/// be spent later in the game.
+///
+/// Under `go TIME_SEC` they are wrong, and not merely wasteful — they capped
+/// the search at depth 1 for any budget of 20 ms or less.
+/// `predicted_over_time_budget` floors its projection at 20 ms
+/// (`last_ms.max(prev_ms).max(20.0)`) and compares against `soft_ms`, itself a
+/// fraction of the budget, so after depth 1 the test is `0 + 20 > 10` —
+/// unconditionally true. Measured at 10 ms: depth 1.0 / 127 nodes before,
+/// depth 7.4 / 8,448 nodes after; 1000 games against the unfixed binary scored
+/// 0.814 (Wilson lb 0.789), about +256 Elo.
+///
+/// Both callers previously arrived here as one `Cmd::GoTimed(u64)`, so the
+/// first version of this fix passed `full = true` unconditionally and silently
+/// removed clock-banking from real games while fixing the harness. The flag
+/// keeps the two apart.
 fn timed_search(
     search: &mut TitaniumSearch,
     time_ms: u64,
+    fixed_movetime: bool,
     label: &str,
     threads: usize,
 ) -> ThinkResult {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        search.think_with_threads(time_ms, 128, false, true, label, threads)
+        search.think_with_threads(time_ms, 128, fixed_movetime, true, label, threads)
     }
     #[cfg(target_arch = "wasm32")]
     {
         // No Lazy SMP in the browser: same search, single-threaded.
         let _ = threads;
-        search.think(time_ms, 128, false, true, label)
+        search.think(time_ms, 128, fixed_movetime, true, label)
     }
 }
 
@@ -208,8 +239,11 @@ fn search_daemon(
                 cur_g = g.clone();
                 search.set_position(g);
             }
-            Cmd::GoTimed(time_ms) => {
-                let r = timed_search(&mut search, time_ms, label, threads);
+            Cmd::GoTimed {
+                time_ms,
+                fixed_movetime,
+            } => {
+                let r = timed_search(&mut search, time_ms, fixed_movetime, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
                 let _ = tx.send(Reply::BestMove(
@@ -305,7 +339,10 @@ fn search_daemon(
                     }
 
                     match rx.try_recv() {
-                        Ok(Cmd::GoTimed(time_ms)) => {
+                        Ok(Cmd::GoTimed {
+                            time_ms,
+                            fixed_movetime,
+                        }) => {
                             search.set_pondering(false);
                             abort.store(false, Ordering::Relaxed);
                             // On a confirmed hit the search is already rooted at
@@ -317,7 +354,8 @@ fn search_daemon(
                                 search.set_position(cur_g.clone());
                             }
                             hit_continue = false;
-                            let r2 = timed_search(&mut search, time_ms, label, threads);
+                            let r2 =
+                                timed_search(&mut search, time_ms, fixed_movetime, label, threads);
                             last_score = r2.score;
                             let mv = r2.mv;
                             let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r2)), tel));
@@ -335,7 +373,8 @@ fn search_daemon(
                             // tt_gen advance + history halving and then runs.
                             search.set_pondering(false);
                             tel.hit = tel.predicted != TITANIUM_NO_MOVE;
-                            let r2 = timed_search(&mut search, time_ms, label, threads);
+                            let r2 =
+                                timed_search(&mut search, time_ms, true, label, threads);
                             last_score = r2.score;
                             let mv = r2.mv;
                             let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r2)), tel));
@@ -347,7 +386,8 @@ fn search_daemon(
                             cur_g = new_game.clone();
                             search.set_position(new_game);
                             search.decay_history_by_surprise(last_score);
-                            let r2 = timed_search(&mut search, time_ms, label, threads);
+                            let r2 =
+                                timed_search(&mut search, time_ms, true, label, threads);
                             last_score = r2.score;
                             let mv = r2.mv;
                             let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r2)), tel));
@@ -396,7 +436,7 @@ fn search_daemon(
                 ));
             }
             Cmd::PonderHit(time_ms) => {
-                let r = timed_search(&mut search, time_ms, label, threads);
+                let r = timed_search(&mut search, time_ms, true, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
                 let _ = tx.send(Reply::BestMove(
@@ -408,7 +448,7 @@ fn search_daemon(
             Cmd::MoveMiss { new_game, time_ms } => {
                 cur_g = new_game.clone();
                 search.set_position(new_game);
-                let r = timed_search(&mut search, time_ms, label, threads);
+                let r = timed_search(&mut search, time_ms, true, label, threads);
                 last_score = r.score;
                 let mv = r.mv;
                 let _ = tx.send(Reply::BestMove(
@@ -731,7 +771,10 @@ pub fn run_titanium_session_stdio(threads: usize) {
                         (time_sec * 1000.0).max(1.0) as u64
                     };
                     let _ = {
-                        let r = cmd_tx.send(Cmd::GoTimed(time_ms));
+                        let r = cmd_tx.send(Cmd::GoTimed {
+                            time_ms,
+                            fixed_movetime: arg1 != "rem",
+                        });
                         abort_io.store(true, Ordering::Relaxed);
                         r
                     };
