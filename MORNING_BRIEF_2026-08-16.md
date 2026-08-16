@@ -100,7 +100,19 @@ rather than illegal play.
 Lesson for the next person: acceptance collapsing toward zero in a generator is a
 determinism smell first, a diversity problem second.
 
-Started from games=81,337 / positions=1,448,816.
+### Result as of ~07:30
+
+| | start of night | now | delta |
+|---|---|---|---|
+| games | 81,337 | **91,246** | +9,909 |
+| positions | 1,448,816 | **1,837,076** | +388,260 (**+26.8%**) |
+
+Data density 16.2 -> **20.0 samples/param** (91,988 params at h=64).
+
+Post-fix throughput is ~2,540 positions/min and steady across four intervals.
+Pre-fix it was ~470/min and falling. **The hour after the seed fix produced more
+usable data than the five hours before it**, which is the clearest possible
+statement of how much that bug cost.
 
 ### Data-quality landmine found while spot-checking
 
