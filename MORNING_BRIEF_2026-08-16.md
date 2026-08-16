@@ -126,7 +126,17 @@ Nothing is being trained or promoted. `main` is untouched at `3e3d6a9`.
    Until both are settled, generated games bank but never train.
 2. **Then retrain on the enlarged corpus** — this is the first time there will be
    genuinely new data to learn from.
-3. Backlog in `HANDOFF_PRE_RETRAIN_INPUTS.md` §8: NPS gap (~850k vs a peer's
+3. **A truly independent int16-vs-f64 check.** What I ran is weaker than it
+   looks: quantizing the hot path also made the parity trace read back the i16
+   accumulator, so it compares int16 against *mostly*-int16. Results were
+   shipped/widened nets 0.00 cp (12/12 exact), QAT net 0.17 cp mean / 1 cp max —
+   which validates the OUTPUT layer and the QA/QB scaling, not total quantization
+   cost. Total cost, measured properly by building both ways: 5/6 fixed-depth
+   positions identical, `low-wall` move changed e6 -> e3v. To do this right, keep
+   an f64 accumulator path available purely as a reference.
+   Also counterintuitive: the QAT net deviates MORE than non-QAT ones, because its
+   weights sit near grid boundaries where the two paths round differently.
+4. Backlog in `HANDOFF_PRE_RETRAIN_INPUTS.md` §8: NPS gap (~850k vs a peer's
    1,200k), `eval-packed-batch` allocating a full search object per position,
    featurizing during selfplay instead of as a separate pass, QAT/engine
    agreement unverified.
