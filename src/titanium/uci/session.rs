@@ -148,6 +148,27 @@ fn position_is_exactly(live: &GameState, g: &GameState) -> bool {
 /// The search that produces the move we play. Pondering deliberately does not
 /// use this: it stays single-threaded so the abort flag has one search to stop.
 #[inline]
+/// `go TIME_SEC` — a FIXED move-time budget, so `full = true`.
+///
+/// `full = false` enables two clock-allocation heuristics that only make sense
+/// when the engine is dividing a GAME clock and may rationally spend less than
+/// the maximum: `soft_over_time_budget` (stop once a stability-scaled fraction
+/// of the budget is gone) and `predicted_over_time_budget` (don't start an
+/// iteration projected not to fit). Neither belongs on a caller-specified move
+/// time — the caller already decided how long this move gets.
+///
+/// Applying them here did not merely waste a little time, it capped the search
+/// at depth 1 for any budget of 20 ms or less. `predicted_over_time_budget`
+/// floors its projection at 20 ms (`last_ms.max(prev_ms).max(20.0)`), and
+/// compares against `soft_ms`, a fraction of the budget. So after depth 1:
+/// `0 + 20 > 10` — always true, always stop. Measured at 10 ms before this
+/// change: depth 1.0, 127 nodes, `predicted_over_time_budget_before_depth`,
+/// against depth 8.6 at 50 ms. Every gate ever run at "10 ms/move" was
+/// comparing nets at depth 1, where the evaluator barely participates.
+///
+/// `go rem` keeps the allocator: there, spending less than the remaining clock
+/// is the entire point, and it computes its own move budget before reaching
+/// this function.
 fn timed_search(
     search: &mut TitaniumSearch,
     time_ms: u64,
@@ -156,13 +177,13 @@ fn timed_search(
 ) -> ThinkResult {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        search.think_with_threads(time_ms, 128, false, true, label, threads)
+        search.think_with_threads(time_ms, 128, true, true, label, threads)
     }
     #[cfg(target_arch = "wasm32")]
     {
         // No Lazy SMP in the browser: same search, single-threaded.
         let _ = threads;
-        search.think(time_ms, 128, false, true, label)
+        search.think(time_ms, 128, true, true, label)
     }
 }
 
