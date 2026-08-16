@@ -209,6 +209,14 @@ throughput unaccounted for. Not investigated; parked so training could start.
 Worth a profile pass, remembering that `bench_instr` percentages NEST — an outer
 op contains everything timed inside it, so they cannot be summed.
 
+**`eval-packed-batch` builds a full search object PER POSITION.** In
+`run_eval_packed_batch`, each row does `TitaniumSearch::production(g, None)` —
+allocating a transposition table, eval cache and friends — to produce one
+featurization record. That is ~6 ms/position when the featurization itself is
+microseconds, and it is why a 400k corpus takes ~40 minutes. Raising the Python
+batch size to 25,000 removed ~1,562 process spawns but not this; the allocation
+dominates. Fix: hoist one reusable search object (or none) across the batch.
+
 **Featurization should not go through Python at all.** It currently shells out to
 `eval-packed-batch`. Batch size is now 25,000 (was 256), which removes ~1,562
 engine cold starts per 400k corpus, and results are cached per position in
