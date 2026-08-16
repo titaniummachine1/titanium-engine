@@ -59,7 +59,7 @@ fn main() {
         "perft-race" => run_perft_race(&args),
         "perft-id" => run_perft_id(&args),
         "thread-bench" => run_thread_bench(&args),
-        "moves" => run_moves(),
+        "moves" => run_moves(&args),
         "cat" => run_cat(&args),
         "eval" => run_eval(&args),
         "eval-batch" => run_eval_batch(),
@@ -104,7 +104,7 @@ fn print_usage() {
     println!("  titanium thread-bench [depth] [--threads N] — 1 vs N threads, same nodes");
     println!("  titanium perft-race <sec>              — max depth within time budget");
     println!("  titanium perft-id [depth]              — iterative deepening perft 0..depth");
-    println!("  titanium moves                         — list legal moves at startpos");
+    println!("  titanium moves [moves...]              — list legal moves after the given line");
     println!("  titanium genmove [moves...] [--engine mcts|minimax|greedy] [--cat]");
     println!("              [--time SEC] [--sims N] [--uct F] [--nodes N] [--log]");
     println!("              — default: Gorisanson-style MCTS in Rust");
@@ -516,10 +516,30 @@ fn run_perft_race(args: &[String]) {
     );
 }
 
-fn run_moves() {
-    let board = Board::new();
+fn run_moves(args: &[String]) {
+    let mut board = Board::new();
+    let mut plies = 0usize;
+    for text in args.iter().skip(2) {
+        if text.starts_with("--") {
+            break;
+        }
+        // Fail closed: applying an illegal move would leave the caller listing
+        // moves for a position it did not ask about, with no way to tell.
+        // Silently ignoring the arguments entirely is what this used to do.
+        let legal = generate_legal_moves(&board);
+        if !legal.iter().any(|m| titanium::format_move(*m) == *text) {
+            eprintln!("illegal move '{text}' at ply {plies}");
+            std::process::exit(2);
+        }
+        board.apply_algebraic(text);
+        plies += 1;
+    }
     let moves = generate_legal_moves(&board);
-    println!("{} legal moves at startpos", moves.len());
+    if plies == 0 {
+        println!("{} legal moves at startpos", moves.len());
+    } else {
+        println!("{} legal moves after {} plies", moves.len(), plies);
+    }
     for mv in moves {
         println!("{}", titanium::format_move(mv));
     }
