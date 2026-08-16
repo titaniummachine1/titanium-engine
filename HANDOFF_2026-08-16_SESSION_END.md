@@ -128,6 +128,41 @@ The cache excludes `oracle_mixed_outcome`, `oracle_selfplay_*`, `claustro_nn`,
 
 **Nothing auto-promotes.** `main` is untouched at `3e3d6a9`.
 
+### Status at handoff: TRAINING IS RUNNING
+
+Cache built: **1,740,442 positions** (1,653,420 train / 87,022 val), 6.2 GB,
+**0 featurization failures**. Training started 12:53, 3 epochs at ~14 min each.
+The gate fires automatically afterwards into `training/runs/clean_v1/gate.log`.
+
+Four pre-existing blockers were cleared to get there:
+
+1. `build_cache_from_labels_db` OOM'd silently — four full copies of a 14 GB
+   join in memory. Rewritten to stream: **4.3 GB -> 0.05 GB peak**.
+2. It then crashed AFTER featurizing all 1.74M positions:
+   `make_fingerprint() got an unexpected keyword argument 'manifest_hash'`. That
+   function takes four positional args and sets the field itself. `meta.json`
+   was reconstructed from surviving artefacts rather than redoing ~40 minutes.
+3. `check_fingerprint` **hardcodes** the expected manifest hash to `31a422f2...`,
+   so a labels-db cache could never validate — the whole isolated-cache path was
+   unusable. Now accepts a cache declaring `labels-db:` origin. (That constant is
+   also stale; teacher_dataset_good hashes to `810fe8c5...`.)
+4. `--exclude-solved` needs `row_packed_states.bin`, which this cache type does
+   not write. Dropped; it is an optimisation, not a correctness requirement.
+
+### The working tree may not be on this branch
+
+`engine/` was checked out at **`fix/moves-cli-args`** (`bd0505c v19.7.0 —
+titanium moves reads its arguments`) — another session fixing the CLI bug in §3.
+**Check out `net/pre-retrain-inputs` before building or gating this work.**
+
+The engine binary on disk (Aug 15 23:29) is this branch's build, and the cache is
+engine-independent (`record_to_fv` reads stored records, never calls the engine),
+so the in-flight run is consistent.
+
+WARNING for whoever works here next: `git add -A` on a branch that lacks this
+branch's `.gitignore` entries will sweep in `.playwright-mcp/` and
+`claustrophobia_app.js` (~8,989 lines). I did exactly that and had to reset it.
+
 ---
 
 ## 5. CORPUS
