@@ -80,14 +80,25 @@ double the truth.
 Projected to 08:00: **+8,127 games, +369,069 positions**, taking the corpus from
 1.49M to ~1.86M positions (+25%) and density from 16.2 to ~20.3 samples/param.
 
-Acceptance is the limiter, and it decays as the line-hash store grows:
-  - pawn-only openings: 44% -> **7.1%**
-  - pawn + random walls, replay-validated: **19.1%** (2.7x better, still 81% lost)
+### Acceptance: a deterministic-seed bug, NOT collision decay
 
-The rejects are games whose lines already exist. If generation is continued for
-longer, raising diversity further is the lever that matters -- longer prefixes, or
-enabling the engine's own opening temperature (`OpeningExplorationConfig`, which
-is `enabled=False` by default and wants the DAG prefix index wired).
+I spent hours reading falling acceptance as "the line-hash store is filling up".
+That was wrong. `run_batch_streaming(seed: int = 0)` and `main()` never passes a
+seed, so every batch built `random.Random(0 + game_idx)` — **game i drew the
+identical opening in every batch.** Batch 1 stored ~1000 unique games; every
+batch after it regenerated the same 1000 openings and was deduped away.
+
+  - pawn-only openings: 44% -> 7.1%
+  - pawn + random walls, replay-validated: 19.1%
+  - **after seeding the RNG with per-run entropy: 100%** (37 accepted, 0 rejected)
+
+The diversity work was real but secondary; the seed was the whole story. Isolation
+that settled it: 12/12 games accepted into a VIRGIN database while the live DB was
+rejecting 99.2% — same code, same engine, so the rejects had to be duplicates
+rather than illegal play.
+
+Lesson for the next person: acceptance collapsing toward zero in a generator is a
+determinism smell first, a diversity problem second.
 
 Started from games=81,337 / positions=1,448,816.
 
