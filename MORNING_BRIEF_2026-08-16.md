@@ -91,6 +91,27 @@ is `enabled=False` by default and wants the DAG prefix index wired).
 
 Started from games=81,337 / positions=1,448,816.
 
+### Data-quality landmine found while spot-checking
+
+Outcome balance by source (decisive games only):
+
+| source | P0 | P1 | n |
+|---|---|---|---|
+| tonight, random openings | 45.0% | 55.0% | 4,895 |
+| pre-existing corpus | 49.4% | 50.6% | 79,498 |
+| **`oracle_selfplay`** | **99.7%** | **0.3%** | **14,069** |
+| `pool_selfplay` | 48.5% | 51.5% | 12,608 |
+
+**`oracle_selfplay` is 99.7% P0 wins across 14,069 games** — 17% of the game
+store. Quoridor's first-player edge is a few percent, not 99.7%, so this is a
+systematic defect in that source, not a property of the game. It is NOT in
+`teacher_dataset_good` (which is 99.5% friend_selfplay), but **any corpus rebuild
+from `games_turso.db` would pull it in and teach the net a huge first-player
+prior.** Filter or fix it before rebuilding.
+
+Tonight's own 45/55 skew is milder and is probably the random wall openings
+occasionally trapping the first player; worth watching, not alarming.
+
 Nothing is being trained or promoted. `main` is untouched at `3e3d6a9`.
 
 ---
