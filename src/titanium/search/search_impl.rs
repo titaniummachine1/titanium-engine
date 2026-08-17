@@ -2528,6 +2528,19 @@ pub struct TitaniumSearch {
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     pub nodes: u64,
     deadline: Instant,
+    /// Optional node ceiling. `None` means "no node limit"; the deadline alone
+    /// ends the search.
+    ///
+    /// Limits COMPOSE rather than override: the deadline and this cap are both
+    /// tested in `check_time`, and whichever is reached first stops the search.
+    /// Setting a node cap does not disable the clock, and setting a clock does
+    /// not disable the cap, so the caller never has to reason about flag order
+    /// or precedence.
+    pub node_limit: Option<u64>,
+    /// True when the node ceiling, not the clock, is what stopped the search.
+    /// Reported as `stoppedBy: "node_limit"` so a budget that did not do what
+    /// was asked is visible instead of being filed under "time_up".
+    pub stopped_on_nodes: bool,
     root_best: i16,
     root_score: i32,
     /// Pure-JS-port mode: disables all Rust-side state-retention extras
@@ -2711,6 +2724,10 @@ impl TitaniumSearch {
     pub fn new(g: GameState) -> Box<Self> {
         let mut search = Box::new(Self {
             g,
+            // No node ceiling unless a caller sets one; the clock alone ends
+            // the search, which is the historical behaviour.
+            node_limit: None,
+            stopped_on_nodes: false,
             tt_key_hi: vec![0; TT_SIZE],
             tt_key_lo: vec![0; TT_SIZE],
             tt_meta: vec![0; TT_SIZE],
@@ -3470,6 +3487,19 @@ impl TitaniumSearch {
         )
     }
 
+    /// Static eval only, side-to-move relative — what `eval_dump_json` reports
+    /// as its `eval` field, without building any of the diagnostics.
+    ///
+    /// `eval_dump_json` also computes CATv5 heatmaps and ~30 per-cell fields and
+    /// serialises ~8 KB. Self-play's temperature sampling wants one integer per
+    /// candidate and throws the rest away, so paying for the dump once per
+    /// candidate is most of the cost of scoring a move.
+    pub fn static_eval(&mut self) -> i32 {
+        self.position_changed();
+        self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
+        self.evaluate(0)
+    }
+
     pub fn eval_dump_json(&mut self) -> String {
         self.position_changed();
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
@@ -3879,6 +3909,22 @@ impl TitaniumSearch {
         // could overrun by however long that whole batch takes before the
         // next check. Checking every 63 nodes instead keeps the worst-case
         // overrun small regardless of per-node cost.
+        // The node ceiling is checked BEFORE the 63-node sampling gate, not
+        // inside it. The gate exists because reading the wall clock is
+        // expensive; comparing two u64s is not, and gating it would let the
+        // search overshoot the requested budget by up to 63 nodes for no
+        // reason. Whichever limit is reached first ends the search.
+        if let Some(cap) = self.node_limit {
+            if self.nodes >= cap {
+                self.stopped_on_nodes = true;
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+                if let Some(runtime) = self.lazy_runtime.as_ref() {
+                    runtime.stop.store(true, Ordering::Relaxed);
+                }
+                self.emit_stream_progress(true);
+                return Err(TimeUp);
+            }
+        }
         if (self.nodes & 63) == 0 {
             // Another thread asked us to stop. Sampled here rather than per
             // node so it costs nothing measurable, and still aborts within
@@ -7053,6 +7099,9 @@ impl TitaniumSearch {
         engine_label: &str,
     ) -> ThinkResult {
         let mut stop_reason: &'static str = "unknown";
+        // Cleared per search: a node-capped search followed by a timed one must
+        // not inherit the previous verdict.
+        self.stopped_on_nodes = false;
         if let Some(direct_mv) = self.prepare_opening_book_at_root() {
             let t0 = Instant::now();
             self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_OPENING);
@@ -7195,14 +7244,24 @@ impl TitaniumSearch {
                 }
             }
         }
-        self.think_search(
+        let mut result = self.think_search(
             time_ms,
             max_depth,
             full,
             log,
             engine_label,
             &mut stop_reason,
-        )
+        );
+        // The inner loop files every abort as "time_up" because that is the
+        // only way it could previously end. Correct the verdict here so a
+        // node-capped search is not reported as having run out of clock --
+        // otherwise a budget that behaved correctly is indistinguishable from
+        // one that was ignored, which is the bug this whole change exists to
+        // make impossible.
+        if self.stopped_on_nodes && result.stop_reason == "time_up" {
+            result.stop_reason = "node_limit";
+        }
+        result
     }
 
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]

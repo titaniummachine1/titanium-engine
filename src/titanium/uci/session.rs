@@ -61,7 +61,13 @@ enum Cmd {
     /// meant to hand time back on easy moves so it can be spent later in the
     /// game. Collapsing the two either caps fixed-movetime search at depth 1
     /// or silently removes clock-banking from real games.
-    GoTimed { time_ms: u64, fixed_movetime: bool },
+    /// `node_limit` composes with `time_ms` rather than replacing it: both are
+    /// live, and whichever is reached first ends the search.
+    GoTimed {
+        time_ms: u64,
+        fixed_movetime: bool,
+        node_limit: Option<u64>,
+    },
     /// Start pondering on the current position (pre-apply `ponder_mv` if given).
     GoInfinite(i16),
     /// Stop pondering; reply with the last best move from the ponder search.
@@ -242,8 +248,14 @@ fn search_daemon(
             Cmd::GoTimed {
                 time_ms,
                 fixed_movetime,
+                node_limit,
             } => {
+                // Both limits are live for this search; whichever is reached
+                // first ends it. Cleared afterwards so a later timed search
+                // does not inherit a stale cap.
+                search.node_limit = node_limit;
                 let r = timed_search(&mut search, time_ms, fixed_movetime, label, threads);
+                search.node_limit = None;
                 last_score = r.score;
                 let mv = r.mv;
                 let _ = tx.send(Reply::BestMove(
@@ -342,6 +354,7 @@ fn search_daemon(
                         Ok(Cmd::GoTimed {
                             time_ms,
                             fixed_movetime,
+                            node_limit,
                         }) => {
                             search.set_pondering(false);
                             abort.store(false, Ordering::Relaxed);
@@ -708,6 +721,63 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 let _ = writeln!(stdout, "ready {}", applied.len());
                 let _ = stdout.flush();
             }
+            // Legal moves for the current position, over the live session.
+            //
+            // Self-play used to shell out to `titanium moves ...` for this, once
+            // per temperature-sampled move. Together with `scorechildren` below
+            // that was ~9 cold engine starts per game, each loading the net into
+            // a 119 MB process that then exited -- measured: 12 workers could not
+            // lift a 4-core box above ~10%, because they were waiting on process
+            // startup rather than on the 10 ms of thinking they asked for.
+            "legalmoves" => {
+                let mut g = current_g.clone();
+                let mut buf = [0i16; 160];
+                let n = g.gen_legal_moves(&mut buf);
+                let list: Vec<String> = buf[..n]
+                    .iter()
+                    .map(|m| move_id_to_algebraic(*m))
+                    .collect();
+                let _ = writeln!(stdout, "moves {}", list.join(" "));
+                let _ = stdout.flush();
+            }
+            // Static eval of each candidate child of the current position.
+            //
+            // One line per candidate, same shape `eval-batch` emits, so the
+            // caller's parser is unchanged: the eval is from the CHILD's
+            // side-to-move, and the caller negates it to score the mover.
+            // Order matches the request exactly -- callers zip the two lists,
+            // so a dropped line would silently pair a score with the wrong move.
+            "scorechildren" => {
+                let rest = trimmed["scorechildren".len()..].trim();
+                if rest.is_empty() {
+                    err!("scorechildren requires at least one move");
+                    continue;
+                }
+                let mut out = String::new();
+                for tok in rest.split_whitespace() {
+                    let mut g = current_g.clone();
+                    let mut buf = [0i16; 160];
+                    let n = g.gen_legal_moves(&mut buf);
+                    let mv = algebraic_to_move_id(tok);
+                    if !buf[..n].iter().any(|m| *m == mv) {
+                        // Fail the whole request rather than skip a line: a
+                        // short reply would misalign every later candidate.
+                        out.clear();
+                        err!(format!("illegal candidate '{tok}'"));
+                        break;
+                    }
+                    g.make_move(mv);
+                    let mut s = TitaniumSearch::production(g, None);
+                    // Minimal JSON: the caller reads only ["eval"], and the full
+                    // dump is ~8 KB of diagnostics per candidate.
+                    out.push_str(&format!("{{\"eval\":{}}}\n", s.static_eval()));
+                }
+                if !out.is_empty() {
+                    let _ = write!(stdout, "{out}");
+                    let _ = writeln!(stdout, "endscores");
+                    let _ = stdout.flush();
+                }
+            }
             "makemove" => {
                 let Some(mv_str) = parts.get(1) else {
                     err!("makemove requires a move");
@@ -733,10 +803,28 @@ pub fn run_titanium_session_stdio(threads: usize) {
                     err!("terminal position");
                     continue;
                 }
-                let arg1 = parts.get(1).copied().unwrap_or("4.0");
+                // Keyword parse, ORDER INDEPENDENT, and every limit composes.
+                //
+                //   go                       -> 4s default
+                //   go 0.01                  -> 10ms
+                //   go nodes 1000            -> 1000 nodes, no practical clock
+                //   go 0.01 nodes 2000000    -> whichever is hit FIRST
+                //   go nodes 2000000 0.01    -> identical to the line above
+                //   go rem 30                -> allocate from a remaining clock
+                //
+                // Anything unrecognised is an ERROR, never a silent default.
+                // `go nodes 1000` used to parse "nodes" as a float, fail, and
+                // fall through to `.unwrap_or(4.0)` -- a 4-SECOND search, which
+                // is how `--fixed-nodes` gates measured 2.5M nodes while asking
+                // for 1,000 and reported `stoppedBy: time_up`. Failing loudly on
+                // an unknown argument is the only thing that would have caught
+                // it, and it is the same failure as an unknown engine flag
+                // falling through to a weaker search.
+                let toks: Vec<&str> = trimmed.split_whitespace().skip(1).collect();
+                let arg1 = toks.first().copied().unwrap_or("4.0");
                 if arg1 == "infinite" {
                     // go infinite [PONDER_MOVE]
-                    let pm_str = parts.get(2).copied().unwrap_or("");
+                    let pm_str = toks.get(1).copied().unwrap_or("");
                     ponder_mv = if pm_str.is_empty() {
                         TITANIUM_NO_MOVE
                     } else {
@@ -749,8 +837,50 @@ pub fn run_titanium_session_stdio(threads: usize) {
                     };
                     // No reply expected — daemon starts pondering.
                 } else {
-                    let time_ms = if arg1 == "rem" {
-                        let rem_sec: f64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(4.0);
+                    let mut time_sec: Option<f64> = None;
+                    let mut rem_arg: Option<f64> = None;
+                    let mut node_limit: Option<u64> = None;
+                    let mut bad: Option<String> = None;
+                    let mut i = 0usize;
+                    while i < toks.len() {
+                        match toks[i] {
+                            "nodes" | "rem" | "time" => {
+                                let key = toks[i];
+                                let Some(val) = toks.get(i + 1) else {
+                                    bad = Some(format!("{key} needs a value"));
+                                    break;
+                                };
+                                let ok = match key {
+                                    "nodes" => val.parse::<u64>().map(|v| node_limit = Some(v)).is_ok(),
+                                    "rem" => val.parse::<f64>().map(|v| rem_arg = Some(v)).is_ok(),
+                                    _ => val.parse::<f64>().map(|v| time_sec = Some(v)).is_ok(),
+                                };
+                                if !ok {
+                                    bad = Some(format!("{key} value '{val}' is not a number"));
+                                    break;
+                                }
+                                i += 2;
+                            }
+                            // A bare number is a move time in seconds, which is
+                            // what every existing caller sends.
+                            t => match t.parse::<f64>() {
+                                Ok(v) => {
+                                    time_sec = Some(v);
+                                    i += 1;
+                                }
+                                Err(_) => {
+                                    bad = Some(format!("unrecognised go argument '{t}'"));
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                    if let Some(msg) = bad {
+                        err!(msg);
+                        continue;
+                    }
+                    let use_rem = rem_arg.is_some();
+                    let time_ms = if let Some(rem_sec) = rem_arg {
                         let remaining_ms = (rem_sec * 1000.0).max(0.0) as u64;
                         let ja = crate::titanium::race::jump_aware_goal_distances(&mut current_g);
                         let d0 = (ja.d0 != u8::MAX).then_some(u32::from(ja.d0));
@@ -766,14 +896,22 @@ pub fn run_titanium_session_stdio(threads: usize) {
                         )
                         .move_ms
                         .max(1)
+                    } else if let Some(secs) = time_sec {
+                        (secs * 1000.0).max(1.0) as u64
+                    } else if node_limit.is_some() {
+                        // A node budget with no clock: the cap is the limit, so
+                        // the clock must not quietly become one. An hour is
+                        // effectively infinite for any real node budget while
+                        // still bounding a wedged search.
+                        3_600_000
                     } else {
-                        let time_sec: f64 = arg1.parse().unwrap_or(4.0);
-                        (time_sec * 1000.0).max(1.0) as u64
+                        4_000
                     };
                     let _ = {
                         let r = cmd_tx.send(Cmd::GoTimed {
                             time_ms,
-                            fixed_movetime: arg1 != "rem",
+                            fixed_movetime: !use_rem,
+                            node_limit,
                         });
                         abort_io.store(true, Ordering::Relaxed);
                         r
