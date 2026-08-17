@@ -49,3 +49,38 @@ gates/
 # Site SPA source pulled in for auditing; engine/ is strength-only, the
 # canonical renderer lives in site/web.
 claustrophobia_app.js
+
+# ---------------------------------------------------------------------------
+# Strength-only boundary. This repo holds the engine and what builds, tests and
+# benchmarks it. Everything below belongs to the workspace ABOVE this repo:
+#   session notes / handoffs / briefs -> ../archive/engine-handoffs/<yyyy-mm>/
+#   training pipeline and run output  -> ../training/
+#   bench dumps and match results     -> ../results/
+# `tests/repo_hygiene.rs` fails the build if any of it is tracked anyway.
+# ---------------------------------------------------------------------------
+
+# Session notes: they describe a moment, the engine repo describes a program.
+*HANDOFF*
+*handoff*
+MORNING_BRIEF*
+SESSION_*
+BRIEF_*
+progress.txt
+
+# Training scaffolding and its output.
+/training/
+/data/
+*.jsonl
+*.db
+*.pt
+*.pth
+*.onnx
+*.npz
+
+# Bench and match dumps: numbers belong in ../results/ and in LEDGER.md.
+baseline_v*.txt
+*_bench_results.txt
+
+# Built binaries are never versioned.
+*.exe
+*.dll
