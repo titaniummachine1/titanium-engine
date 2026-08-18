@@ -34,6 +34,25 @@ const FIELD_PLANE_LEN: usize = 81;
 const FIELD_PLANE_SETS: usize = 5;
 const H_HEADER_LEN: usize = 8;
 
+/// Distinct (walls_me, walls_opp) pairs: each hand holds 0..=10, so 11 x 11.
+/// Every pair is reachable -- walls are conserved at `board + both hands == 20`,
+/// so any hand pair just implies a board count, never an illegal state.
+pub const WH_PAIRS: usize = 121;
+
+/// Row index of a hand pair in the walls-in-hand embedding.
+///
+/// Ordered, not symmetric: the mover's own hand is the major term, so `(10, 0)`
+/// and `(0, 10)` are different rows. A symmetric encoding (sum, or difference)
+/// would collapse exactly the distinction the input was added to make.
+///
+/// Hands are clamped rather than asserted. A hand above ten means the caller
+/// already has a corrupt position, and bending the eval beats panicking in
+/// search; the invariant is enforced where walls are placed, not here.
+#[inline]
+pub fn wh_index(walls_me: usize, walls_opp: usize) -> usize {
+    walls_me.min(10) * 11 + walls_opp.min(10)
+}
+
 static NET_BYTES: &[u8] = include_bytes!("../../weights/net_weights.bin");
 static NET_FROZEN_BYTES: &[u8] = include_bytes!("../../weights/net_weights_frozen.bin");
 static NET_MEDIUM_BYTES: &[u8] = include_bytes!("../../weights/net_weights_medium.bin");
@@ -50,28 +69,18 @@ pub struct Net {
     pub w1c: Vec<f64>,
     pub po: Vec<f64>,
     pub px: Vec<f64>,
-    /// Sparse route embeddings, canonicalized to side-to-move coordinates.
-    pub route_me: Vec<f64>,
-    pub route_opp: Vec<f64>,
-    pub route_near_me: Vec<f64>,
-    pub route_near_opp: Vec<f64>,
-    pub route_contested: Vec<f64>,
-    pub route_active: bool,
-    /// Route plane weights re-indexed by centered flood bit, per side to move
-    /// (`[turn][plane][flood_bit]`, planes: me/opp/near_me/near_opp/contested;
-    /// turn 1 pre-applies NET_MIRC). Leaf route scoring then reads `tbl[bit]`
-    /// per set bit instead of bit→square→canonical translation each time.
-    pub route_bybit: Box<[[[f64; 128]; 5]; 2]>,
-    /// Combined CAT impact heatmap as a direct input plane (81, side-to-move
-    /// canonical). Zero in legacy blobs (loader zero-pads) → `cat_active` false →
-    /// not even computed, so the live net is unaffected. A retrained blob carries
-    /// learned weights → `cat_active` true → contributes.
-    pub cat_raw_me: Vec<f64>,
-    pub cat_raw_opp: Vec<f64>,
-    pub cat_propagated_me: Vec<f64>,
-    pub cat_propagated_opp: Vec<f64>,
-    pub cat_propagated_combined: Vec<f64>,
-    pub cat_active: bool,
+    /// Walls-in-hand embedding, `[pair][hidden]` flattened, `WH_PAIRS * h`.
+    ///
+    /// Indexed `(walls_me * 11 + walls_opp) * h`, side-to-move canonical. Until
+    /// this existed the net could not tell `(10,0)` from `(0,10)`: the two are
+    /// byte-identical on every other input, yet one is a won endgame and the
+    /// other a lost one. A joint embedding rather than two scalars because the
+    /// value of holding a wall depends entirely on how many the opponent holds.
+    ///
+    /// Zero-filled when the blob omits the section, and adding 0.0 is exact, so
+    /// an old net evaluates bit-identically through this path.
+    pub wh: Vec<f64>,
+    pub wh_active: bool,
     /// Distance-field plane weights (81 each, h-independent, side-to-move
     /// canonical). Added as scalar features to the eval output, like the route
     /// planes. These give the net exact per-cell BFS distances instead of the
@@ -88,6 +97,43 @@ pub struct Net {
     pub dist_me_canon: Box<[[f64; 81]; 2]>,
     pub dist_opp_canon: Box<[[f64; 81]; 2]>,
     pub dist_diff_canon: Box<[[f64; 81]; 2]>,
+
+    // ── int16 hot-path mirrors ────────────────────────────────────────────
+    // Derived at load, not stored in the blob: the trainer keeps emitting f64
+    // and the engine quantizes once at startup. That keeps the blob format and
+    // the training pipeline untouched while the per-leaf arithmetic runs in
+    // int16, which is where the width becomes affordable -- measured 4.28x on
+    // the output layer and 2.13x on the accumulator refresh at h=32.
+    //
+    // Everything that feeds the hidden pre-activation shares ONE scale (`QA`)
+    // so the terms can be summed directly in fixed point. `w2` gets its own
+    // (`QB`) because it is only ever multiplied by an already-clamped
+    // activation.
+    pub b1_q: Vec<i16>,
+    pub w2_q: Vec<i16>,
+    pub w1c_q: Vec<i16>,
+    pub po_q: Vec<i16>,
+    pub px_q: Vec<i16>,
+    pub wh_q: Vec<i16>,
+}
+
+/// Fixed-point scale for everything entering the hidden pre-activation.
+///
+/// The activation is `clamp(0,1)`, so the post-clamp range is known by
+/// construction -- no calibration pass, unlike a net whose activations are
+/// unbounded. 1024 keeps the worst-case accumulator inside i16: the largest
+/// observed |w1c| is 0.67, at most ~40 wall features are ever active, and
+/// `0.67 * 1024 * 40` is 27,443 against a 32,767 ceiling.
+pub const QA: f64 = 1024.0;
+/// Fixed-point scale for the output weights. Chosen so `QA * QB * h` cannot
+/// overflow the i32 dot-product accumulator: `1024 * 4096 * 256` is 1.07e9,
+/// inside i32's 2.15e9.
+pub const QB: f64 = 4096.0;
+
+#[inline]
+fn q(v: f64, scale: f64) -> i16 {
+    let r = (v * scale).round();
+    r.clamp(i16::MIN as f64, i16::MAX as f64) as i16
 }
 
 fn read_f64s(bytes: &[u8], offset: &mut usize, count: usize) -> Vec<f64> {
@@ -115,7 +161,271 @@ fn read_h_header(bytes: &[u8]) -> usize {
     h
 }
 
+/// Marker for the section-table blob format, at bytes 4..8.
+///
+/// Safe as a discriminator because the legacy header is a u64 LE holding `h`,
+/// and `h <= MAX_NET_H = 256`, so bytes 1..8 are zero in every legacy blob.
+const TLV_MAGIC: &[u8; 4] = b"TNW1";
+
+/// Section tags. Four ASCII bytes, matched exactly.
+///
+/// `b"ROUT"` and `b"CATV"` are retired and deliberately absent. Both were real
+/// learned inputs that the eval stopped reading; a blob still carrying either
+/// loads fine, because an unrecognised tag takes the ignore path.
+mod tag {
+    pub const WSKP: u32 = u32::from_le_bytes(*b"WSKP");
+    pub const B1__: u32 = u32::from_le_bytes(*b"B1__");
+    pub const W2__: u32 = u32::from_le_bytes(*b"W2__");
+    pub const W1C_: u32 = u32::from_le_bytes(*b"W1C_");
+    pub const PO__: u32 = u32::from_le_bytes(*b"PO__");
+    pub const PX__: u32 = u32::from_le_bytes(*b"PX__");
+    pub const WH__: u32 = u32::from_le_bytes(*b"WH__");
+    pub const DIST: u32 = u32::from_le_bytes(*b"DIST");
+}
+
+/// Build the hot-path derived tables and assemble a `Net`.
+///
+/// Shared by both blob formats on purpose: the section-table reader and the
+/// legacy length-matcher must produce byte-identical nets, and the only way to
+/// guarantee that is for them to converge before anything is derived.
+#[allow(clippy::too_many_arguments)]
+fn assemble(
+    h: usize,
+    ws_v: Vec<f64>,
+    b1_v: Vec<f64>,
+    w2_v: Vec<f64>,
+    w1c: Vec<f64>,
+    po: Vec<f64>,
+    px: Vec<f64>,
+    wh: Vec<f64>,
+    dist: [Vec<f64>; 3],
+) -> Net {
+    let [dist_me, dist_opp, dist_diff] = dist;
+
+    // Presence is derived from the weights, not from the blob length: a section
+    // that is present but all-zero is as inert as an absent one, and the
+    // consumers skip the whole (expensive) feature computation on a false flag.
+    let wh_active = wh.iter().any(|&w| w != 0.0);
+    let dist_field_active = dist_me
+        .iter()
+        .chain(&dist_opp)
+        .chain(&dist_diff)
+        .any(|&w| w != 0.0);
+
+    // Pre-compute side-to-move canonicalized weight tables for the hot path.
+    let mut dist_me_canon = Box::new([[0.0f64; 81]; 2]);
+    let mut dist_opp_canon = Box::new([[0.0f64; 81]; 2]);
+    let mut dist_diff_canon = Box::new([[0.0f64; 81]; 2]);
+    for turn in 0..2usize {
+        for sq in 0..FIELD_PLANE_LEN {
+            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
+            dist_me_canon[turn][sq] = dist_me[canon];
+            dist_opp_canon[turn][sq] = dist_opp[canon];
+            dist_diff_canon[turn][sq] = dist_diff[canon];
+        }
+    }
+    let mut b1 = [0.0f64; MAX_NET_H];
+    let mut w2 = [0.0f64; MAX_NET_H];
+    b1[..h].copy_from_slice(&b1_v);
+    w2[..h].copy_from_slice(&w2_v);
+
+    // int16 mirrors for the hot path. Built once here so `evaluate` never sees
+    // an f64 weight; the f64 arrays stay for the parity trace and for tooling
+    // that wants the unquantized values.
+    let b1_q: Vec<i16> = b1_v.iter().map(|&v| q(v, QA)).collect();
+    let w2_q: Vec<i16> = w2_v.iter().map(|&v| q(v, QB)).collect();
+    let w1c_q: Vec<i16> = w1c.iter().map(|&v| q(v, QA)).collect();
+    let po_q: Vec<i16> = po.iter().map(|&v| q(v, QA)).collect();
+    let px_q: Vec<i16> = px.iter().map(|&v| q(v, QA)).collect();
+    let wh_q: Vec<i16> = wh.iter().map(|&v| q(v, QA)).collect();
+
+    Net {
+        h,
+        ws: ws_v.try_into().unwrap(),
+        b1,
+        w2,
+        w1c,
+        po,
+        px,
+        wh,
+        wh_active,
+        dist_me,
+        dist_opp,
+        dist_diff,
+        dist_field_active,
+        dist_me_canon,
+        dist_opp_canon,
+        dist_diff_canon,
+        b1_q,
+        w2_q,
+        w1c_q,
+        po_q,
+        px_q,
+        wh_q,
+    }
+}
+
 fn load_net_from_bytes(bytes: &[u8]) -> Net {
+    if bytes.len() >= H_HEADER_LEN && &bytes[4..8] == TLV_MAGIC {
+        return load_net_tlv(bytes);
+    }
+    load_net_legacy(bytes)
+}
+
+/// Section-table format.
+///
+///   0..4    u32 LE  NET_H
+///   4..8    magic   b"TNW1"
+///   8..12   u32 LE  section count
+///   12..    directory of {u32 tag, u64 byte_len}, payloads follow in order
+///
+/// Missing sections are zero-filled and unknown tags are ignored, so a blob
+/// written by a newer trainer still loads and an older blob still works. That
+/// replaces a length enumeration that had grown to eight accepted sizes -- of
+/// which only two were ever shipped -- duplicated across three files and
+/// already out of sync between the Rust and Python sides.
+fn load_net_tlv(bytes: &[u8]) -> Net {
+    let bad = |m: String| -> ! { panic!("net_weights TLV blob: {m}") };
+    if bytes.len() < 12 {
+        bad("shorter than its header".into());
+    }
+    let h = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if h == 0 || h > MAX_NET_H {
+        bad(format!("NET_H = {h}, out of range (1..={MAX_NET_H})"));
+    }
+    let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let dir_len = count
+        .checked_mul(12)
+        .unwrap_or_else(|| bad("section count overflows".into()));
+    let body = 12usize
+        .checked_add(dir_len)
+        .unwrap_or_else(|| bad("directory overflows".into()));
+    if bytes.len() < body {
+        bad(format!("truncated directory ({count} sections)"));
+    }
+
+    // tag -> payload slice
+    let mut found: Vec<(u32, &[u8])> = Vec::with_capacity(count);
+    let mut off = body;
+    for i in 0..count {
+        let e = 12 + i * 12;
+        let t = u32::from_le_bytes(bytes[e..e + 4].try_into().unwrap());
+        let len = u64::from_le_bytes(bytes[e + 4..e + 12].try_into().unwrap()) as usize;
+        let end = off
+            .checked_add(len)
+            .unwrap_or_else(|| bad(format!("section {i} length overflows")));
+        if end > bytes.len() {
+            bad(format!("section {i} runs past end of blob"));
+        }
+        found.push((t, &bytes[off..end]));
+        off = end;
+    }
+
+    // Required sections error rather than zero-fill: a net with no `w1c` is not
+    // a net with an inert feature, it is a corrupt file.
+    let need = |t: u32, n: usize, name: &str| -> Vec<f64> {
+        let Some(&(_, sl)) = found.iter().find(|(tt, _)| *tt == t) else {
+            bad(format!("missing required section {name}"));
+        };
+        if sl.len() != n * 8 {
+            bad(format!(
+                "section {name}: {} bytes, expected {} for NET_H={h}",
+                sl.len(),
+                n * 8
+            ));
+        }
+        let mut v = Vec::with_capacity(n);
+        for c in sl.chunks_exact(8) {
+            v.push(f64::from_le_bytes(c.try_into().unwrap()));
+        }
+        v
+    };
+    // Optional: absent -> zeros, which the `*_active` flags then read as inert.
+    let opt = |t: u32, planes: usize| -> Vec<Vec<f64>> {
+        let n = FIELD_PLANE_LEN;
+        match found.iter().find(|(tt, _)| *tt == t) {
+            Some(&(_, sl)) if sl.len() == planes * n * 8 => sl
+                .chunks_exact(n * 8)
+                .map(|p| {
+                    p.chunks_exact(8)
+                        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                        .collect()
+                })
+                .collect(),
+            Some(&(_, sl)) => bad(format!(
+                "optional section has {} bytes, expected {}",
+                sl.len(),
+                planes * n * 8
+            )),
+            None => (0..planes).map(|_| vec![0.0; n]).collect(),
+        }
+    };
+
+    let ws_v = need(tag::WSKP, WSKIP_LEN, "WSKP");
+    let b1_v = need(tag::B1__, h, "B1__");
+    let w2_v = need(tag::W2__, h, "W2__");
+    let w1c = need(tag::W1C_, 9 * 128 * h, "W1C_");
+    let po = need(tag::PO__, 81 * h, "PO__");
+    let px = need(tag::PX__, 81 * h, "PX__");
+    // Optional and h-dependent, so it cannot go through `opt` (which is fixed
+    // at one 81-cell plane per entry). Absent -> zeros -> `wh_active` false.
+    let wh = match found.iter().find(|(tt, _)| *tt == tag::WH__) {
+        Some(&(_, sl)) if sl.len() == WH_PAIRS * h * 8 => sl
+            .chunks_exact(8)
+            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .collect(),
+        Some(&(_, sl)) => bad(format!(
+            "section WH__: {} bytes, expected {} for NET_H={h}",
+            sl.len(),
+            WH_PAIRS * h * 8
+        )),
+        None => vec![0.0; WH_PAIRS * h],
+    };
+    let to3 = |v: Vec<Vec<f64>>| -> [Vec<f64>; 3] { v.try_into().unwrap() };
+    let dist = to3(opt(tag::DIST, 3));
+
+    assemble(h, ws_v, b1_v, w2_v, w1c, po, px, wh, dist)
+}
+
+/// Serialize a net in the section-table format.
+pub fn net_to_tlv(n: &Net) -> Vec<u8> {
+    let mut sections: Vec<(u32, Vec<f64>)> = Vec::new();
+    let flat =
+        |ps: [&Vec<f64>; 5]| -> Vec<f64> { ps.iter().flat_map(|p| p.iter().copied()).collect() };
+    sections.push((tag::WSKP, n.ws.to_vec()));
+    sections.push((tag::B1__, n.b1[..n.h].to_vec()));
+    sections.push((tag::W2__, n.w2[..n.h].to_vec()));
+    sections.push((tag::W1C_, n.w1c.clone()));
+    sections.push((tag::PO__, n.po.clone()));
+    sections.push((tag::PX__, n.px.clone()));
+    sections.push((tag::WH__, n.wh.clone()));
+    sections.push((
+        tag::DIST,
+        n.dist_me
+            .iter()
+            .chain(&n.dist_opp)
+            .chain(&n.dist_diff)
+            .copied()
+            .collect(),
+    ));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&(n.h as u32).to_le_bytes());
+    out.extend_from_slice(TLV_MAGIC);
+    out.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+    for (t, v) in &sections {
+        out.extend_from_slice(&t.to_le_bytes());
+        out.extend_from_slice(&((v.len() * 8) as u64).to_le_bytes());
+    }
+    for (_, v) in &sections {
+        for x in v {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn load_net_legacy(bytes: &[u8]) -> Net {
     let h = read_h_header(bytes);
     let mut offset = H_HEADER_LEN;
 
@@ -160,76 +470,25 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
     let w1c = read_f64s(bytes, &mut offset, 9 * 128 * h);
     let po = read_f64s(bytes, &mut offset, 81 * h);
     let px = read_f64s(bytes, &mut offset, 81 * h);
-    let route_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_near_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_contested = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-    let route_active = route_me
-        .iter()
-        .chain(&route_opp)
-        .chain(&route_near_me)
-        .chain(&route_near_opp)
-        .chain(&route_contested)
-        .any(|&w| w != 0.0);
-    let (cat_raw_me, cat_raw_opp, cat_propagated_me, cat_propagated_opp, cat_propagated_combined) =
-        if has_cat_v5_normalized || has_cat_v5_normalized_dist {
-            (
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-                read_f64s(bytes, &mut offset, FIELD_PLANE_LEN),
-            )
-        } else if has_cat_v5_witness || has_cat_v5_witness_dist {
-            let mut raw_me = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut raw_opp = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut raw_me {
-                *w *= 4.0;
-            }
-            for w in &mut raw_opp {
-                *w *= 4.0;
-            }
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                raw_me,
-                raw_opp,
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else if has_cat_v5 || has_cat_v5_dist {
-            let mut combined = read_f64s(bytes, &mut offset, FIELD_PLANE_LEN);
-            for w in &mut combined {
-                *w *= 400.0 / 256.0;
-            }
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                combined,
-            )
-        } else {
-            (
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-                vec![0.0; FIELD_PLANE_LEN],
-            )
-        };
-    let cat_active = cat_raw_me
-        .iter()
-        .chain(&cat_raw_opp)
-        .chain(&cat_propagated_me)
-        .chain(&cat_propagated_opp)
-        .chain(&cat_propagated_combined)
-        .any(|&w| w != 0.0);
-
+    // The five retired route planes sit at a FIXED offset here, between `px` and
+    // the CAT tail. They are no longer read into the net, but the bytes must
+    // still be stepped over or every section after them decodes from the wrong
+    // place. Skipping is not the same as deleting in a positional format.
+    offset += FIELD_PLANE_LEN * FIELD_PLANE_SETS * 8;
+    // The CAT tail is retired too, and unlike the route planes its LENGTH varies
+    // by blob variant: 1 plane (v5), 3 (witness) or 5 (normalized). Skip exactly
+    // what this variant carries, or `dist` below decodes from the wrong offset.
+    // The historic x4 and x400/256 rescales those reads applied die with them.
+    let cat_planes = if has_cat_v5_normalized || has_cat_v5_normalized_dist {
+        5
+    } else if has_cat_v5_witness || has_cat_v5_witness_dist {
+        3
+    } else if has_cat_v5 || has_cat_v5_dist {
+        1
+    } else {
+        0
+    };
+    offset += FIELD_PLANE_LEN * cat_planes * 8;
     // Distance-field extension weights (zero-padded if blob doesn't carry them)
     let (dist_me, dist_opp, dist_diff) = if has_dist {
         (
@@ -244,69 +503,19 @@ fn load_net_from_bytes(bytes: &[u8]) -> Net {
             vec![0.0; FIELD_PLANE_LEN],
         )
     };
-    let dist_field_active = dist_me
-        .iter()
-        .chain(&dist_opp)
-        .chain(&dist_diff)
-        .any(|&w| w != 0.0);
-
-    // Pre-compute side-to-move canonicalized weight tables for the hot path.
-    let mut dist_me_canon = Box::new([[0.0f64; 81]; 2]);
-    let mut dist_opp_canon = Box::new([[0.0f64; 81]; 2]);
-    let mut dist_diff_canon = Box::new([[0.0f64; 81]; 2]);
-    for turn in 0..2usize {
-        for sq in 0..FIELD_PLANE_LEN {
-            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
-            dist_me_canon[turn][sq] = dist_me[canon];
-            dist_opp_canon[turn][sq] = dist_opp[canon];
-            dist_diff_canon[turn][sq] = dist_diff[canon];
-        }
-    }
-    let mut route_bybit = Box::new([[[0.0f64; 128]; 5]; 2]);
-    for turn in 0..2usize {
-        for sq in 0..FIELD_PLANE_LEN {
-            let canon = if turn == 0 { sq } else { NET_MIRC[sq] };
-            let bit = crate::util::grid::FLOOD_BIT_BY_SQ[sq].trailing_zeros() as usize;
-            route_bybit[turn][0][bit] = route_me[canon];
-            route_bybit[turn][1][bit] = route_opp[canon];
-            route_bybit[turn][2][bit] = route_near_me[canon];
-            route_bybit[turn][3][bit] = route_near_opp[canon];
-            route_bybit[turn][4][bit] = route_contested[canon];
-        }
-    }
-    let mut b1 = [0.0f64; MAX_NET_H];
-    let mut w2 = [0.0f64; MAX_NET_H];
-    b1[..h].copy_from_slice(&b1_v);
-    w2[..h].copy_from_slice(&w2_v);
-    Net {
+    assemble(
         h,
-        ws: ws_v.try_into().unwrap(),
-        b1,
-        w2,
+        ws_v,
+        b1_v,
+        w2_v,
         w1c,
         po,
         px,
-        route_me,
-        route_opp,
-        route_near_me,
-        route_near_opp,
-        route_contested,
-        route_active,
-        route_bybit,
-        cat_raw_me,
-        cat_raw_opp,
-        cat_propagated_me,
-        cat_propagated_opp,
-        cat_propagated_combined,
-        cat_active,
-        dist_me,
-        dist_opp,
-        dist_diff,
-        dist_field_active,
-        dist_me_canon,
-        dist_opp_canon,
-        dist_diff_canon,
-    }
+        // The positional format predates this input and has nowhere to put it.
+        // Zeros keep every shipped blob evaluating exactly as before.
+        vec![0.0; WH_PAIRS * h],
+        [dist_me, dist_opp, dist_diff],
+    )
 }
 
 /// Training / deployed weights (`net_weights.bin`, overridable via `TITANIUM_NET_WEIGHTS_PATH`).
@@ -422,3 +631,202 @@ const fn build_bkt() -> [usize; 81] {
 pub static NET_MIRC: [usize; 81] = build_mirc();
 pub static NET_MIRS: [usize; 64] = build_mirs();
 pub static NET_BKT: [usize; 81] = build_bkt();
+
+#[cfg(test)]
+mod tlv_tests {
+    use super::*;
+
+    pub(super) fn shipped() -> Vec<(&'static str, &'static [u8])> {
+        vec![
+            ("net_weights.bin", NET_BYTES),
+            ("net_weights_frozen.bin", NET_FROZEN_BYTES),
+            ("net_weights_medium.bin", NET_MEDIUM_BYTES),
+            ("net_weights_v17.bin", NET_V17_BYTES),
+        ]
+    }
+
+    fn assert_same(name: &str, a: &Net, b: &Net) {
+        assert_eq!(a.h, b.h, "{name}: h");
+        assert_eq!(a.ws, b.ws, "{name}: ws");
+        assert_eq!(a.b1, b.b1, "{name}: b1");
+        assert_eq!(a.w2, b.w2, "{name}: w2");
+        assert_eq!(a.w1c, b.w1c, "{name}: w1c");
+        assert_eq!(a.po, b.po, "{name}: po");
+        assert_eq!(a.px, b.px, "{name}: px");
+        assert_eq!(a.wh, b.wh, "{name}: wh");
+        assert_eq!(a.wh_active, b.wh_active, "{name}: wh_active");
+        assert_eq!(a.dist_me, b.dist_me, "{name}: dist_me");
+        assert_eq!(a.dist_opp, b.dist_opp, "{name}: dist_opp");
+        assert_eq!(a.dist_diff, b.dist_diff, "{name}: dist_diff");
+        // Derived tables and presence flags must agree too, or the hot path
+        // would differ while the raw weights matched.
+        assert_eq!(
+            a.dist_field_active, b.dist_field_active,
+            "{name}: dist_active"
+        );
+        assert_eq!(a.dist_me_canon, b.dist_me_canon, "{name}: dist_me_canon");
+        assert_eq!(a.dist_opp_canon, b.dist_opp_canon, "{name}: dist_opp_canon");
+        assert_eq!(
+            a.dist_diff_canon, b.dist_diff_canon,
+            "{name}: dist_diff_canon"
+        );
+    }
+
+    /// Every shipped blob must survive legacy -> TLV -> legacy-equivalent with
+    /// bit-identical f64s, including the derived hot-path tables.
+    ///
+    /// This is the whole justification for the format change being callable a
+    /// no-op. Comparing raw weights alone would not do it: the `*_canon` tables
+    /// are what the hot path actually reads.
+    #[test]
+    fn every_shipped_blob_roundtrips_through_tlv() {
+        for (name, bytes) in shipped() {
+            let legacy = load_net_from_bytes(bytes);
+            let tlv_bytes = net_to_tlv(&legacy);
+            assert_eq!(
+                &tlv_bytes[4..8],
+                TLV_MAGIC,
+                "{name}: written blob must carry the TLV magic"
+            );
+            let back = load_net_from_bytes(&tlv_bytes);
+            assert_same(name, &legacy, &back);
+        }
+    }
+
+    /// The dispatcher must still route legacy blobs to the legacy reader. A
+    /// magic check that accidentally matched would silently reinterpret every
+    /// shipped net.
+    #[test]
+    fn shipped_blobs_are_not_mistaken_for_tlv() {
+        for (name, bytes) in shipped() {
+            assert_ne!(&bytes[4..8], TLV_MAGIC, "{name} must not look like TLV");
+        }
+    }
+
+    /// Unknown sections are ignored and absent optional sections zero-fill.
+    /// Together these are what let a newer trainer add a tail without a Rust
+    /// change, and an older blob keep loading after one.
+    #[test]
+    fn tlv_tolerates_unknown_and_missing_sections() {
+        let base = load_net_from_bytes(NET_BYTES);
+        let mut bytes = net_to_tlv(&base);
+
+        // Append an unknown section: bump the count, add a directory entry, and
+        // put its payload at the very end.
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let payload_start = 12 + count as usize * 12;
+        let junk: Vec<u8> = (0..64u8).collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(&bytes[0..8]);
+        out.extend_from_slice(&(count + 1).to_le_bytes());
+        out.extend_from_slice(&bytes[12..payload_start]);
+        out.extend_from_slice(&u32::from_le_bytes(*b"ZZZZ").to_le_bytes());
+        out.extend_from_slice(&(junk.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bytes[payload_start..]);
+        out.extend_from_slice(&junk);
+        let with_junk = load_net_from_bytes(&out);
+        assert_same("unknown-section", &base, &with_junk);
+
+        // Drop the optional DIST section entirely -> zero-filled, inert.
+        bytes = net_to_tlv(&base);
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let mut keep: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut off = 12 + count * 12;
+        for i in 0..count {
+            let e = 12 + i * 12;
+            let t = u32::from_le_bytes(bytes[e..e + 4].try_into().unwrap());
+            let len = u64::from_le_bytes(bytes[e + 4..e + 12].try_into().unwrap()) as usize;
+            if t != tag::DIST {
+                keep.push((t, bytes[off..off + len].to_vec()));
+            }
+            off += len;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&bytes[0..8]);
+        out.extend_from_slice(&(keep.len() as u32).to_le_bytes());
+        for (t, p) in &keep {
+            out.extend_from_slice(&t.to_le_bytes());
+            out.extend_from_slice(&((p.len()) as u64).to_le_bytes());
+        }
+        for (_, p) in &keep {
+            out.extend_from_slice(p);
+        }
+        let without_dist = load_net_from_bytes(&out);
+        assert!(
+            !without_dist.dist_field_active,
+            "absent DIST must be inert, not merely zero"
+        );
+        assert_eq!(without_dist.w1c, base.w1c, "dropping DIST disturbed w1c");
+    }
+}
+
+#[cfg(test)]
+mod walls_in_hand_tests {
+    use super::tlv_tests::shipped;
+    use super::*;
+
+    /// The input exists to separate hand pairs that every other input encodes
+    /// identically. If the encoding is not injective it has bought nothing.
+    #[test]
+    fn every_hand_pair_gets_its_own_row() {
+        let mut seen = vec![usize::MAX; WH_PAIRS];
+        for me in 0..=10 {
+            for opp in 0..=10 {
+                let i = wh_index(me, opp);
+                assert!(i < WH_PAIRS, "({me},{opp}) -> {i} out of range");
+                assert_eq!(
+                    seen[i],
+                    usize::MAX,
+                    "({me},{opp}) collides with pair #{}",
+                    seen[i]
+                );
+                seen[i] = me * 11 + opp;
+            }
+        }
+        assert!(seen.iter().all(|&v| v != usize::MAX), "left rows unused");
+    }
+
+    /// The specific failure that motivated the input: ten walls to nil is a very
+    /// different position from nil to ten, and the old net saw one thing.
+    #[test]
+    fn ten_to_nil_differs_from_nil_to_ten() {
+        assert_ne!(
+            wh_index(10, 0),
+            wh_index(0, 10),
+            "swapped hands must not share a row"
+        );
+    }
+
+    /// Out-of-range hands clamp instead of indexing past the embedding.
+    #[test]
+    fn oversized_hands_stay_in_bounds() {
+        assert!(wh_index(99, 99) < WH_PAIRS);
+        assert_eq!(wh_index(99, 99), wh_index(10, 10));
+    }
+
+    /// Shipped blobs predate the section, so they must load with it inert --
+    /// otherwise this change is not the no-op the node-identity run claims.
+    #[test]
+    fn shipped_blobs_carry_no_walls_in_hand_weights() {
+        for (name, bytes) in shipped() {
+            let n = load_net_from_bytes(bytes);
+            assert_eq!(n.wh.len(), WH_PAIRS * n.h, "{name}: wh wrong length");
+            assert!(!n.wh_active, "{name}: legacy blob must be inert here");
+            assert!(n.wh.iter().all(|&w| w == 0.0), "{name}: wh not zeroed");
+        }
+    }
+
+    /// A blob that does carry the section must survive the round trip with the
+    /// weights intact and the presence flag flipped.
+    #[test]
+    fn walls_in_hand_survives_the_tlv_round_trip() {
+        let mut n = load_net_from_bytes(NET_BYTES);
+        for (i, w) in n.wh.iter_mut().enumerate() {
+            *w = (i as f64) * 1e-4 - 0.5;
+        }
+        n.wh_active = true;
+        let round = load_net_tlv(&net_to_tlv(&n));
+        assert_eq!(round.wh, n.wh, "wh weights did not round-trip");
+        assert!(round.wh_active, "wh_active lost in the round trip");
+    }
+}

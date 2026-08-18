@@ -5,8 +5,8 @@
 use crate::titanium::dist::{
     dist_in_layers, fill_ace_dist_from_pawn, fill_ace_dist_layers_to_goal_p0,
     fill_ace_dist_layers_to_goal_p1, fill_choke_points, fill_contested, fill_corridor_delta,
-    fill_sparse_route_masks, materialize_distance_layers_inline, shortest_route_bits,
-    wall_incr_refresh_flags, width_in_layers,
+    fill_sparse_route_masks, materialize_distance_layers_inline, wall_incr_refresh_flags,
+    width_in_layers,
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot, MOVE_HW_BASE,
@@ -24,7 +24,6 @@ use crate::movegen::{
     generate_legal_moves_slice_cached, GeometricWallCache, GeometricWallCacheStats, NodeWitness,
     MAX_LEGAL_MOVES,
 };
-use crate::pathfinding::bff::expand_frontier;
 use crate::pathfinding::bff::wall::path_witness_from_eval_layers;
 use crate::pathfinding::masks::DirMasks;
 use crate::pathfinding::BfsScratch;
@@ -37,7 +36,7 @@ use crate::titanium::race::{
     race_outcome_with_dist, solve_race_config, PlyEstimate, RaceBound, RaceOutcomeStats,
     RaceScratch, RACE_MATE, RACE_STATES, RACE_WIN_FLOOR,
 };
-use crate::util::grid::{FLOOD_BIT_BY_SQ, FLOOD_PLAYABLE};
+use crate::util::grid::FLOOD_BIT_BY_SQ;
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 use std::sync::Mutex;
@@ -2382,8 +2381,6 @@ pub struct EvalParityTrace {
     pub wd: f64,
     pub width_opp: f64,
     pub scalar_out: f64,
-    pub route_out: f64,
-    pub cat_out: f64,
     pub width_contrib: f64,
     pub wall_acc: [f64; MAX_NET_H],
     pub hidden_pre: [f64; MAX_NET_H],
@@ -2492,8 +2489,11 @@ pub struct TitaniumSearch {
     dir_masks_key_hi: u32,
     dir_masks_cache: DirMasks,
     // HalfPW accumulator cache
-    np_acc0: [f64; MAX_NET_H],
-    np_acc1: [f64; MAX_NET_H],
+    /// Wall accumulators in Q(QA) fixed point. i16 rather than i32 on purpose:
+    /// the whole point of quantising is 16 lanes per AVX2 register, and
+    /// widening here gives them straight back to sign-extension.
+    np_acc0: [i16; MAX_NET_H],
+    np_acc1: [i16; MAX_NET_H],
     np_hbits: u64,
     np_vbits: u64,
     np_b0: i32,
@@ -2528,6 +2528,19 @@ pub struct TitaniumSearch {
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     pub nodes: u64,
     deadline: Instant,
+    /// Optional node ceiling. `None` means "no node limit"; the deadline alone
+    /// ends the search.
+    ///
+    /// Limits COMPOSE rather than override: the deadline and this cap are both
+    /// tested in `check_time`, and whichever is reached first stops the search.
+    /// Setting a node cap does not disable the clock, and setting a clock does
+    /// not disable the cap, so the caller never has to reason about flag order
+    /// or precedence.
+    pub node_limit: Option<u64>,
+    /// True when the node ceiling, not the clock, is what stopped the search.
+    /// Reported as `stoppedBy: "node_limit"` so a budget that did not do what
+    /// was asked is visible instead of being filed under "time_up".
+    pub stopped_on_nodes: bool,
     root_best: i16,
     root_score: i32,
     /// Pure-JS-port mode: disables all Rust-side state-retention extras
@@ -2711,6 +2724,10 @@ impl TitaniumSearch {
     pub fn new(g: GameState) -> Box<Self> {
         let mut search = Box::new(Self {
             g,
+            // No node ceiling unless a caller sets one; the clock alone ends
+            // the search, which is the historical behaviour.
+            node_limit: None,
+            stopped_on_nodes: false,
             tt_key_hi: vec![0; TT_SIZE],
             tt_key_lo: vec![0; TT_SIZE],
             tt_meta: vec![0; TT_SIZE],
@@ -2762,8 +2779,8 @@ impl TitaniumSearch {
             dir_masks_key_lo: u32::MAX,
             dir_masks_key_hi: u32::MAX,
             dir_masks_cache: DirMasks::default(),
-            np_acc0: [0.0; MAX_NET_H],
-            np_acc1: [0.0; MAX_NET_H],
+            np_acc0: [0; MAX_NET_H],
+            np_acc1: [0; MAX_NET_H],
             np_hbits: 0,
             np_vbits: 0,
             np_b0: -1,
@@ -3470,6 +3487,19 @@ impl TitaniumSearch {
         )
     }
 
+    /// Static eval only, side-to-move relative — what `eval_dump_json` reports
+    /// as its `eval` field, without building any of the diagnostics.
+    ///
+    /// `eval_dump_json` also computes CATv5 heatmaps and ~30 per-cell fields and
+    /// serialises ~8 KB. Self-play's temperature sampling wants one integer per
+    /// candidate and throws the rest away, so paying for the dump once per
+    /// candidate is most of the cost of scoring a move.
+    pub fn static_eval(&mut self) -> i32 {
+        self.position_changed();
+        self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
+        self.evaluate(0)
+    }
+
     pub fn eval_dump_json(&mut self) -> String {
         self.position_changed();
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
@@ -3630,6 +3660,7 @@ impl TitaniumSearch {
         self.position_changed();
         self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_PARITY);
         let trace = self.compute_net_eval_trace();
+        let h = self.net.h;
         let f64s = |arr: &[f64]| {
             let mut s = String::new();
             for (i, v) in arr.iter().enumerate() {
@@ -3642,7 +3673,7 @@ impl TitaniumSearch {
         };
         format!(
             "{{\"scalar_inputs\":{{\"d_me\":{dm},\"d_opp\":{do_},\"w_me\":{wm},\"w_opp\":{wo},\"pd\":{pd},\"wd\":{wd},\"width_opp\":{wo_}}},\
-             \"scalar_out\":{so},\"route_out\":{ro},\"cat_out\":{co},\"width_contrib\":{wc},\
+             \"scalar_out\":{so},\"width_contrib\":{wc},\
              \"wall_acc\":[{wa}],\"hidden_pre\":[{hp}],\"hidden_clip\":[{hc}],\"neural_out\":{no},\"eval\":{ev}}}",
             dm = trace.d_me,
             do_ = trace.d_opp,
@@ -3652,12 +3683,14 @@ impl TitaniumSearch {
             wd = trace.wd,
             wo_ = trace.width_opp,
             so = trace.scalar_out,
-            ro = trace.route_out,
-            co = trace.cat_out,
             wc = trace.width_contrib,
-            wa = f64s(&trace.wall_acc),
-            hp = f64s(&trace.hidden_pre),
-            hc = f64s(&trace.hidden_clip),
+            // Only 0..h is populated; the rest of the fixed MAX_NET_H array is
+            // padding. Exporting all 256 slots shipped 224 meaningless zeros and
+            // made the tri-path comparison ill-defined against an h-length
+            // Python trace, which compares by index.
+            wa = f64s(&trace.wall_acc[..h]),
+            hp = f64s(&trace.hidden_pre[..h]),
+            hc = f64s(&trace.hidden_clip[..h]),
             no = trace.neural_out,
             ev = trace.eval,
         )
@@ -3713,37 +3746,6 @@ impl TitaniumSearch {
             scalar_out += ws[12] * if w_opp < 3.0 { w_opp } else { 3.0 };
         }
         scalar_out += ws[13] * pd * w_opp / 10.0;
-        let (route_out, _, _) = self.route_feature_score(nw);
-        let mut cat_out = 0.0;
-        if nw.cat_active {
-            if let Some(bridge) = self.bridge.as_ref() {
-                let cat = crate::cat::build::build_catv5_heatmaps(&bridge.board);
-                let (raw_me, raw_opp, prop_me, prop_opp) = if me == 0 {
-                    (
-                        &cat.witness_p0,
-                        &cat.witness_p1,
-                        &cat.propagated_p0,
-                        &cat.propagated_p1,
-                    )
-                } else {
-                    (
-                        &cat.witness_p1,
-                        &cat.witness_p0,
-                        &cat.propagated_p1,
-                        &cat.propagated_p0,
-                    )
-                };
-                for sq in 0..81usize {
-                    let canon = if me == 0 { sq } else { NET_MIRC[sq] };
-                    cat_out += nw.cat_raw_me[canon] * (f64::from(raw_me[sq]) / 4.0)
-                        + nw.cat_raw_opp[canon] * (f64::from(raw_opp[sq]) / 4.0)
-                        + nw.cat_propagated_me[canon] * (f64::from(prop_me[sq]) / 200.0)
-                        + nw.cat_propagated_opp[canon] * (f64::from(prop_opp[sq]) / 200.0)
-                        + nw.cat_propagated_combined[canon]
-                            * (f64::from(cat.propagated[sq]) / 400.0);
-                }
-            }
-        }
         let width_opp = if me == 0 {
             width_in_layers(
                 &self.d1_layers[self.dist1_idx],
@@ -3765,28 +3767,47 @@ impl TitaniumSearch {
         let mut hidden_pre = [0.0f64; MAX_NET_H];
         let mut hidden_clip = [0.0f64; MAX_NET_H];
         let mut neural_out = 0.0f64;
+        let wh = self.wh_offset(me, nw.h);
         if me == 0 {
-            wall_acc = self.np_acc0;
+            wall_acc[..nw.h].copy_from_slice(
+                &self.np_acc0[..nw.h]
+                    .iter()
+                    .map(|&v| f64::from(v) / crate::titanium::net::QA)
+                    .collect::<Vec<_>>(),
+            );
             let po = self.g.pawn[0] * nw.h;
             let px = self.g.pawn[1] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
+                let h = nw.b1[j]
+                    + f64::from(self.np_acc0[j]) / crate::titanium::net::QA
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
             }
         } else {
-            wall_acc = self.np_acc1;
+            wall_acc[..nw.h].copy_from_slice(
+                &self.np_acc1[..nw.h]
+                    .iter()
+                    .map(|&v| f64::from(v) / crate::titanium::net::QA)
+                    .collect::<Vec<_>>(),
+            );
             let po = NET_MIRC[self.g.pawn[1]] * nw.h;
             let px = NET_MIRC[self.g.pawn[0]] * nw.h;
             for j in 0..nw.h {
-                let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
+                let h = nw.b1[j]
+                    + f64::from(self.np_acc1[j]) / crate::titanium::net::QA
+                    + nw.po[po + j]
+                    + nw.px[px + j]
+                    + nw.wh[wh + j];
                 hidden_pre[j] = h;
                 hidden_clip[j] = h.clamp(0.0, 1.0);
                 neural_out += nw.w2[j] * hidden_clip[j] * 200.0;
             }
         }
-        let total = scalar_out + route_out + cat_out + width_contrib + neural_out;
+        let total = scalar_out + width_contrib + neural_out;
         EvalParityTrace {
             d_me,
             d_opp,
@@ -3796,8 +3817,6 @@ impl TitaniumSearch {
             wd,
             width_opp,
             scalar_out,
-            route_out,
-            cat_out,
             width_contrib,
             wall_acc,
             hidden_pre,
@@ -3890,6 +3909,22 @@ impl TitaniumSearch {
         // could overrun by however long that whole batch takes before the
         // next check. Checking every 63 nodes instead keeps the worst-case
         // overrun small regardless of per-node cost.
+        // The node ceiling is checked BEFORE the 63-node sampling gate, not
+        // inside it. The gate exists because reading the wall clock is
+        // expensive; comparing two u64s is not, and gating it would let the
+        // search overshoot the requested budget by up to 63 nodes for no
+        // reason. Whichever limit is reached first ends the search.
+        if let Some(cap) = self.node_limit {
+            if self.nodes >= cap {
+                self.stopped_on_nodes = true;
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+                if let Some(runtime) = self.lazy_runtime.as_ref() {
+                    runtime.stop.store(true, Ordering::Relaxed);
+                }
+                self.emit_stream_progress(true);
+                return Err(TimeUp);
+            }
+        }
         if (self.nodes & 63) == 0 {
             // Another thread asked us to stop. Sampled here rather than per
             // node so it costs nothing measurable, and still aborts within
@@ -4016,55 +4051,18 @@ impl TitaniumSearch {
         elapsed + projected > time_ms as f64
     }
 
-    /// Returns (score, route0_bits, route1_bits) so callers can reuse the route bitsets.
-    fn route_feature_score(&mut self, nw: &Net) -> (f64, u128, u128) {
-        crate::bench_instr::record(
-            |b| &mut b.eval_route_features,
-            || self.route_feature_score_inner(nw),
-        )
-    }
-
-    fn route_feature_score_inner(&mut self, nw: &Net) -> (f64, u128, u128) {
-        if !nw.route_active {
-            return (0.0, 0, 0);
-        }
-        let masks = self.current_dir_masks();
-        let route0 = shortest_route_bits(
-            self.g.pawn[0],
-            self.d0_sq(self.g.pawn[0] as u8),
-            &self.d0_layers[self.dist0_idx],
-            masks,
-        );
-        let route1 = shortest_route_bits(
-            self.g.pawn[1],
-            self.d1_sq(self.g.pawn[1] as u8),
-            &self.d1_layers[self.dist1_idx],
-            masks,
-        );
-        let near0 = expand_frontier(route0, masks) & !route0 & FLOOD_PLAYABLE;
-        let near1 = expand_frontier(route1, masks) & !route1 & FLOOD_PLAYABLE;
-        let (me_route, opp_route, me_near, opp_near) = if self.g.turn == 0 {
-            (route0, route1, near0, near1)
-        } else {
-            (route1, route0, near1, near0)
-        };
-        let contested = (me_route | me_near) & (opp_route | opp_near);
-        let bybit = &nw.route_bybit[self.g.turn];
-        let sum_bits = |mut bits: u128, tbl: &[f64; 128]| {
-            let mut sum = 0.0;
-            while bits != 0 {
-                let bit = bits.trailing_zeros();
-                bits &= bits - 1;
-                sum += tbl[bit as usize];
-            }
-            sum
-        };
-        let score = sum_bits(me_route, &bybit[0])
-            + sum_bits(opp_route, &bybit[1])
-            + sum_bits(me_near, &bybit[2])
-            + sum_bits(opp_near, &bybit[3])
-            + sum_bits(contested, &bybit[4]);
-        (score, route0, route1)
+    /// Flat offset of the walls-in-hand embedding row for the side to move.
+    ///
+    /// Side-to-move canonical: the mover's own hand is always the major index,
+    /// so `(10,0)` and `(0,10)` land on different rows -- which is the entire
+    /// point of the input. Hands are clamped defensively; a position with more
+    /// than ten in a hand is already corrupt, but the eval should bend rather
+    /// than index out of bounds.
+    #[inline]
+    fn wh_offset(&self, me: usize, h: usize) -> usize {
+        let w_me = self.g.wl[me].max(0) as usize;
+        let w_opp = self.g.wl[1 - me].max(0) as usize;
+        crate::titanium::net::wh_index(w_me, w_opp) * h
     }
 
     /// Distance-field plane score: exact per-cell BFS distances weighted by
@@ -4913,8 +4911,8 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.nnue_full_refresh,
                 || {
-                    self.np_acc0.fill(0.0);
-                    self.np_acc1.fill(0.0);
+                    self.np_acc0.fill(0);
+                    self.np_acc1.fill(0);
                     let mut bits = cur_h;
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
@@ -4922,8 +4920,8 @@ impl TitaniumSearch {
                         let o0 = (b0 as usize * 128 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
                         for j in 0..nw.h {
-                            self.np_acc0[j] += nw.w1c[o0 + j];
-                            self.np_acc1[j] += nw.w1c[o1 + j];
+                            self.np_acc0[j] = self.np_acc0[j].saturating_add(nw.w1c_q[o0 + j]);
+                            self.np_acc1[j] = self.np_acc1[j].saturating_add(nw.w1c_q[o1 + j]);
                         }
                     }
                     let mut bits = cur_v;
@@ -4933,8 +4931,8 @@ impl TitaniumSearch {
                         let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
                         for j in 0..nw.h {
-                            self.np_acc0[j] += nw.w1c[o0 + j];
-                            self.np_acc1[j] += nw.w1c[o1 + j];
+                            self.np_acc0[j] = self.np_acc0[j].saturating_add(nw.w1c_q[o0 + j]);
+                            self.np_acc1[j] = self.np_acc1[j].saturating_add(nw.w1c_q[o1 + j]);
                         }
                     }
                     self.np_hbits = cur_h;
@@ -4951,24 +4949,42 @@ impl TitaniumSearch {
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let sg = if cur_h >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let add = cur_h >> s & 1 != 0;
                         let o0 = (b0 as usize * 128 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + NET_MIRS[s]) * nw.h;
+                        // Saturating both ways: a wall being retracted must undo
+                        // exactly what adding it did, and wrapping here would
+                        // desync the accumulator from the position.
                         for j in 0..nw.h {
-                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                            let (d0, d1) = (nw.w1c_q[o0 + j], nw.w1c_q[o1 + j]);
+                            if add {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_add(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_add(d1);
+                            } else {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_sub(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_sub(d1);
+                            }
                         }
                     }
                     let mut bits = cur_v ^ self.np_vbits;
                     while bits != 0 {
                         let s = bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        let sg = if cur_v >> s & 1 != 0 { 1.0 } else { -1.0 };
+                        let add = cur_v >> s & 1 != 0;
                         let o0 = (b0 as usize * 128 + 64 + s) * nw.h;
                         let o1 = (b1 as usize * 128 + 64 + NET_MIRS[s]) * nw.h;
+                        // Saturating both ways: a wall being retracted must undo
+                        // exactly what adding it did, and wrapping here would
+                        // desync the accumulator from the position.
                         for j in 0..nw.h {
-                            self.np_acc0[j] += sg * nw.w1c[o0 + j];
-                            self.np_acc1[j] += sg * nw.w1c[o1 + j];
+                            let (d0, d1) = (nw.w1c_q[o0 + j], nw.w1c_q[o1 + j]);
+                            if add {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_add(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_add(d1);
+                            } else {
+                                self.np_acc0[j] = self.np_acc0[j].saturating_sub(d0);
+                                self.np_acc1[j] = self.np_acc1[j].saturating_sub(d1);
+                            }
                         }
                     }
                     self.np_hbits = cur_h;
@@ -5118,11 +5134,6 @@ impl TitaniumSearch {
     /// Static/quiescence eval. `depth <= 0` = leaf (cert oracle eligible when gated).
     fn evaluate(&mut self, depth: i32) -> i32 {
         let _eval_timer = crate::bench_instr::OpTimer::start(|b| &mut b.evaluate);
-        if self.net.route_active {
-            crate::bench_instr::bump(|b| &mut b.route_active_eval);
-        } else {
-            crate::bench_instr::bump(|b| &mut b.route_inactive_eval);
-        }
         let me = self.g.turn;
         let opp = 1 - me;
         let mut d_me_i = if me == 0 {
@@ -5244,8 +5255,6 @@ impl TitaniumSearch {
                 out
             },
         );
-        let (route_score, _, _) = self.route_feature_score(nw);
-        out += route_score;
         // Distance-field extension: exact per-cell BFS distances as net input.
         // Zero-padded in legacy weights → dist_field_active false → not computed,
         // so existing blobs are byte-for-byte unaffected. A retrained blob with
@@ -5310,21 +5319,38 @@ impl TitaniumSearch {
             crate::bench_instr::record(
                 |b| &mut b.eval_nnue_infer,
                 || {
-                    if me == 0 {
-                        let po = self.g.pawn[0] * nw.h;
-                        let px = self.g.pawn[1] * nw.h;
-                        for j in 0..nw.h {
-                            let h = nw.b1[j] + self.np_acc0[j] + nw.po[po + j] + nw.px[px + j];
-                            out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
-                        }
+                    // Fixed point throughout. Every term entering the hidden
+                    // sum shares scale QA so they add directly; the clamp is the
+                    // same clipped ReLU, expressed as [0, QA]. Only the dot
+                    // product widens to i32, and it is the sole place it needs
+                    // to -- an i32 accumulator above would cost more in
+                    // sign-extension than the extra lanes buy.
+                    let wh = self.wh_offset(me, nw.h);
+                    let acc = if me == 0 {
+                        &self.np_acc0
                     } else {
-                        let po = NET_MIRC[self.g.pawn[1]] * nw.h;
-                        let px = NET_MIRC[self.g.pawn[0]] * nw.h;
-                        for j in 0..nw.h {
-                            let h = nw.b1[j] + self.np_acc1[j] + nw.po[po + j] + nw.px[px + j];
-                            out += nw.w2[j] * h.clamp(0.0, 1.0) * 200.0;
-                        }
+                        &self.np_acc1
+                    };
+                    let (po, px) = if me == 0 {
+                        (self.g.pawn[0] * nw.h, self.g.pawn[1] * nw.h)
+                    } else {
+                        (
+                            NET_MIRC[self.g.pawn[1]] * nw.h,
+                            NET_MIRC[self.g.pawn[0]] * nw.h,
+                        )
+                    };
+                    let qa = crate::titanium::net::QA as i32;
+                    let mut dot: i32 = 0;
+                    for j in 0..nw.h {
+                        let hv = nw.b1_q[j] as i32
+                            + acc[j] as i32
+                            + nw.po_q[po + j] as i32
+                            + nw.px_q[px + j] as i32
+                            + nw.wh_q[wh + j] as i32;
+                        dot += nw.w2_q[j] as i32 * hv.clamp(0, qa);
                     }
+                    out += f64::from(dot) / (crate::titanium::net::QA * crate::titanium::net::QB)
+                        * 200.0;
                 },
             );
         }
@@ -7073,6 +7099,9 @@ impl TitaniumSearch {
         engine_label: &str,
     ) -> ThinkResult {
         let mut stop_reason: &'static str = "unknown";
+        // Cleared per search: a node-capped search followed by a timed one must
+        // not inherit the previous verdict.
+        self.stopped_on_nodes = false;
         if let Some(direct_mv) = self.prepare_opening_book_at_root() {
             let t0 = Instant::now();
             self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_OPENING);
@@ -7215,14 +7244,24 @@ impl TitaniumSearch {
                 }
             }
         }
-        self.think_search(
+        let mut result = self.think_search(
             time_ms,
             max_depth,
             full,
             log,
             engine_label,
             &mut stop_reason,
-        )
+        );
+        // The inner loop files every abort as "time_up" because that is the
+        // only way it could previously end. Correct the verdict here so a
+        // node-capped search is not reported as having run out of clock --
+        // otherwise a budget that behaved correctly is indistinguishable from
+        // one that was ignored, which is the bug this whole change exists to
+        // make impossible.
+        if self.stopped_on_nodes && result.stop_reason == "time_up" {
+            result.stop_reason = "node_limit";
+        }
+        result
     }
 
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
