@@ -1608,6 +1608,105 @@ mod tests {
         assert!(!applies(&g), "a wall still in hand leaves the subgame");
     }
 
+    /// Completeness census: does the table ever DECIDE a hands-empty state the
+    /// analytic oracle DECLINES?
+    ///
+    /// This is the load-bearing evidence for taking the table out of live
+    /// search. `tb_agrees_with_hands_empty_race_oracle_on_all_states` proves the
+    /// two never CONTRADICT each other, but it `continue`s past every state the
+    /// oracle declines — exactly the states where the table would have been the
+    /// only answer. If that set is empty, removing the probe cannot change a
+    /// single search result; if it is not, the removal is a real change and owes
+    /// a strength gate.
+    ///
+    /// A 1000-game match cannot answer this. The sibling project gated the same
+    /// subgame (`race_exact`, both-hands-zero) over 4000 games at 50 ms and got
+    /// 50.8%, Elo +5.6 [-5.2, +16.3] — no decision at cap. Enumeration can.
+    #[test]
+    fn oracle_decides_every_state_the_table_decides() {
+        let mut declined_bare = 0usize;
+        let mut tb_decided_bare = 0usize;
+        let mut total_bare = 0usize;
+        for p0 in 9..81 {
+            for p1 in 0..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                for stm in 0..2 {
+                    let mut g = GameState::new();
+                    g.pawn[0] = p0;
+                    g.pawn[1] = p1;
+                    g.turn = stm;
+                    g.wl = [0, 0];
+                    total_bare += 1;
+                    if hands_empty_race_stm_wins_oracle(&mut g).is_none() {
+                        declined_bare += 1;
+                        if tb().probe_raw(p0, p1, stm).result != TbResult::Draw {
+                            tb_decided_bare += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The live case is not a bare board: hands are empty only once all
+        // twenty walls are down, so the oracle has to be complete on WALLED
+        // topologies too. Same layouts the agreement test uses, plus denser
+        // ones, every pawn pair enumerated.
+        let layouts: [&[&str]; 6] = [
+            &["e3h", "c5v", "f6h"],
+            &["b2h", "d4v", "g7h", "e5v"],
+            &["a1h", "c3h", "e5h", "g7h", "d2v", "f6v"],
+            &["e3h", "c5v", "f6h", "b2h", "d4v", "g7h", "e5v", "a1h"],
+            &["b2v", "d2v", "f2v", "h2v", "b6v", "d6v", "f6v", "h6v"],
+            &["a3h", "c3h", "e3h", "g3h", "a6h", "c6h", "e6h", "g6h"],
+        ];
+        let mut declined_walled = 0usize;
+        let mut tb_decided_walled = 0usize;
+        let mut total_walled = 0usize;
+        for walls in layouts {
+            let mut base = GameState::new();
+            for w in walls {
+                base.make_move(crate::titanium::algebraic_to_move_id(w));
+            }
+            base.wl = [0, 0];
+            let t = ZeroWallTb::build_for(&base);
+            for p0 in 9..81 {
+                for p1 in 0..72 {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for stm in 0..2 {
+                        let mut g = base.clone();
+                        g.pawn[0] = p0;
+                        g.pawn[1] = p1;
+                        g.turn = stm;
+                        total_walled += 1;
+                        if hands_empty_race_stm_wins_oracle(&mut g).is_none() {
+                            declined_walled += 1;
+                            if t.probe_raw(p0, p1, stm).result != TbResult::Draw {
+                                tb_decided_walled += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!(
+            "bare:   {total_bare} states, oracle declined {declined_bare},              table decided {tb_decided_bare} of those"
+        );
+        println!(
+            "walled: {total_walled} states over 6 topologies, oracle declined              {declined_walled}, table decided {tb_decided_walled} of those"
+        );
+        assert_eq!(
+            tb_decided_bare + tb_decided_walled,
+            0,
+            "the table answers {} hands-empty states the oracle declines —              removing the probe from live search DOES change search results              and owes a strength gate, not an equivalence argument",
+            tb_decided_bare + tb_decided_walled
+        );
+    }
+
     #[test]
     fn tb_agrees_with_hands_empty_race_oracle_on_all_states() {
         let t = tb();
