@@ -693,14 +693,42 @@ mod tlv_tests {
         }
     }
 
-    /// The dispatcher must still route legacy blobs to the legacy reader. A
-    /// magic check that accidentally matched would silently reinterpret every
-    /// shipped net.
+    /// Every shipped blob must be routed to the reader its bytes actually call
+    /// for, and BOTH readers must stay exercised.
+    ///
+    /// This used to assert no shipped blob looks like TLV -- true when every
+    /// shipped net predated the format, false since the champion shipped AS
+    /// TLV (that is how it carries its walls-in-hand section), and failing on
+    /// main ever since. Like its sibling in `walls_in_hand_tests`, it encoded
+    /// which nets happened to exist rather than an invariant.
+    ///
+    /// The invariant: a blob's magic decides its reader, TLV-only features
+    /// appear only in TLV blobs, and at least one blob of each kind is still
+    /// shipped -- otherwise a reader silently stops being tested.
     #[test]
-    fn shipped_blobs_are_not_mistaken_for_tlv() {
+    fn shipped_blobs_route_to_the_reader_their_magic_names() {
+        let mut tlv = 0usize;
+        let mut legacy = 0usize;
         for (name, bytes) in shipped() {
-            assert_ne!(&bytes[4..8], TLV_MAGIC, "{name} must not look like TLV");
+            let is_tlv = &bytes[4..8] == TLV_MAGIC;
+            let n = load_net_from_bytes(bytes);
+            if is_tlv {
+                tlv += 1;
+            } else {
+                legacy += 1;
+                assert!(
+                    !n.wh_active,
+                    "{name}: legacy blob cannot carry a TLV-only section"
+                );
+            }
+            assert!(n.h > 0, "{name}: loaded with no hidden width");
+            println!("{name}: tlv={is_tlv} h={} wh_active={}", n.h, n.wh_active);
         }
+        assert!(tlv > 0, "no TLV blob shipped -- the TLV reader is untested");
+        assert!(
+            legacy > 0,
+            "no legacy blob shipped -- the legacy reader is untested, and it is              still the path every older net on disk takes"
+        );
     }
 
     /// Unknown sections are ignored and absent optional sections zero-fill.
