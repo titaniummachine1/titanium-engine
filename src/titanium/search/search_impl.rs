@@ -71,7 +71,7 @@ fn tt_unpack_depth(meta: i32) -> i32 {
 
 #[inline]
 fn reverse_futility_margin(depth: i32, ace_rfp_max_depth: i32) -> Option<i32> {
-    (depth <= ace_rfp_max_depth).then_some(100 * depth)
+    (depth <= ace_rfp_max_depth).then_some(60 * depth)
 }
 
 #[inline]
@@ -612,9 +612,9 @@ mod route_touch_tests {
 
     #[test]
     fn rfp_margin_uses_the_production_schedule() {
-        assert_eq!(reverse_futility_margin(3, 3), Some(300));
+        assert_eq!(reverse_futility_margin(3, 3), Some(180));
         assert_eq!(reverse_futility_margin(4, 3), None);
-        assert_eq!(reverse_futility_margin(4, 4), Some(400));
+        assert_eq!(reverse_futility_margin(4, 4), Some(240));
         assert_eq!(rfp_depth_for_budget(true, 200), 4);
         assert_eq!(rfp_depth_for_budget(true, 201), 3);
         assert_eq!(rfp_depth_for_budget(false, 100), 3);
