@@ -68,5 +68,5 @@ pub use titanium::{
     algebraic_to_move_id, board_move_to_move_id, decode_packed_state, move_id_to_algebraic,
     move_id_to_board, pack_state, run_titanium_session_stdio, titanium_game_from_packed,
     titanium_genmove, GameState, TitaniumParams, TitaniumSearch, FEATURE_SCHEMA, PACKED_STATE_LEN,
-    POSITION_SCHEMA_VERSION, TITANIUM_NO_MOVE,
+    POSITION_SCHEMA_VERSION, TITANIUM_NO_MOVE, TRAINING_FEATURE_LEN,
 };

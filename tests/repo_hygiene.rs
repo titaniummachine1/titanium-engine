@@ -24,9 +24,9 @@ const FORBIDDEN_DIRS: &[&str] = &[
 /// Filename patterns that must never be tracked here. `*` matches any run of
 /// characters; matching is case-insensitive.
 const FORBIDDEN_FILES: &[&str] = &[
-    "*handoff*",       // session handoff notes
-    "morning_brief*",  // daily briefs
-    "session_*",       // session archives
+    "*handoff*",      // session handoff notes
+    "morning_brief*", // daily briefs
+    "session_*",      // session archives
     "brief_*",
     "progress.txt",
     "baseline_v*.txt", // bench dumps

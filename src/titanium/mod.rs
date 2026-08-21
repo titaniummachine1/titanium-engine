@@ -76,6 +76,8 @@ pub use session::run_titanium_session_stdio;
 
 /// Sentinel — pawn move id `0` is legal (cell a9); do not use `0` for "no move".
 pub const TITANIUM_NO_MOVE: i16 = -1;
+/// Length of [`TitaniumSearch::training_feature_vector`].
+pub const TRAINING_FEATURE_LEN: usize = 952;
 pub const MOVE_HW_BASE: i16 = 81;
 pub const MOVE_VW_BASE: i16 = 145;
 pub const MOVE_ID_MAX: i16 = 208;

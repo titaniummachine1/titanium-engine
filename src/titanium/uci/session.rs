@@ -386,8 +386,7 @@ fn search_daemon(
                             // tt_gen advance + history halving and then runs.
                             search.set_pondering(false);
                             tel.hit = tel.predicted != TITANIUM_NO_MOVE;
-                            let r2 =
-                                timed_search(&mut search, time_ms, true, label, threads);
+                            let r2 = timed_search(&mut search, time_ms, true, label, threads);
                             last_score = r2.score;
                             let mv = r2.mv;
                             let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r2)), tel));
@@ -399,8 +398,7 @@ fn search_daemon(
                             cur_g = new_game.clone();
                             search.set_position(new_game);
                             search.decay_history_by_surprise(last_score);
-                            let r2 =
-                                timed_search(&mut search, time_ms, true, label, threads);
+                            let r2 = timed_search(&mut search, time_ms, true, label, threads);
                             last_score = r2.score;
                             let mv = r2.mv;
                             let _ = tx.send(Reply::BestMove(mv, Some(Box::new(r2)), tel));
@@ -733,10 +731,7 @@ pub fn run_titanium_session_stdio(threads: usize) {
                 let mut g = current_g.clone();
                 let mut buf = [0i16; 160];
                 let n = g.gen_legal_moves(&mut buf);
-                let list: Vec<String> = buf[..n]
-                    .iter()
-                    .map(|m| move_id_to_algebraic(*m))
-                    .collect();
+                let list: Vec<String> = buf[..n].iter().map(|m| move_id_to_algebraic(*m)).collect();
                 let _ = writeln!(stdout, "moves {}", list.join(" "));
                 let _ = stdout.flush();
             }
@@ -851,7 +846,9 @@ pub fn run_titanium_session_stdio(threads: usize) {
                                     break;
                                 };
                                 let ok = match key {
-                                    "nodes" => val.parse::<u64>().map(|v| node_limit = Some(v)).is_ok(),
+                                    "nodes" => {
+                                        val.parse::<u64>().map(|v| node_limit = Some(v)).is_ok()
+                                    }
                                     "rem" => val.parse::<f64>().map(|v| rem_arg = Some(v)).is_ok(),
                                     _ => val.parse::<f64>().map(|v| time_sec = Some(v)).is_ok(),
                                 };

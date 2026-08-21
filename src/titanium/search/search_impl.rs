@@ -10,7 +10,7 @@ use crate::titanium::dist::{
 };
 use crate::titanium::{
     is_hwall_move, is_pawn_move, is_wall_move, move_id_to_board, wall_slot, MOVE_HW_BASE,
-    MOVE_VW_BASE,
+    MOVE_VW_BASE, TRAINING_FEATURE_LEN,
 };
 use crate::util::clock::{Duration, Instant};
 
@@ -3448,6 +3448,100 @@ impl TitaniumSearch {
     /// Wall-cache profiling counters (TiBridge path only).
     pub fn wall_cache_stats(&self) -> Option<GeometricWallCacheStats> {
         self.bridge.as_ref().map(|b| b.wall_cache_stats)
+    }
+
+    /// Build the native training vector consumed by `training/build_feature_cache.py`.
+    ///
+    /// This is exactly `record_to_fv(eval_dump_json(), target=0)` in the current
+    /// 952-slot schema. In particular, the diagnostic dump's legal-wall and path-cross
+    /// scalars are zero, slots 9-10 are reserved zeros, and the five CAT planes remain
+    /// zero without constructing CAT maps. This path performs no JSON work.
+    pub fn training_feature_vector(&mut self) -> [f32; TRAINING_FEATURE_LEN] {
+        const HW: usize = 11;
+        const VW: usize = 75;
+        const ROUTE_ME: usize = 139;
+        const ROUTE_OPP: usize = 220;
+        const NEAR_ME: usize = 301;
+        const NEAR_OPP: usize = 382;
+        const CONTESTED: usize = 463;
+
+        self.position_changed();
+        self.refresh_dist_site(0, crate::bench_instr::REFRESH_SITE_EVAL_DUMP);
+
+        let d0 = self.d0_sq(self.g.pawn[0] as u8);
+        let d1 = self.d1_sq(self.g.pawn[1] as u8);
+        let me = self.g.turn;
+        let opp = me ^ 1;
+        let mut fv = [0.0f32; TRAINING_FEATURE_LEN];
+        fv[1] = if me == 0 { d0 } else { d1 } as f32;
+        fv[2] = if me == 0 { d1 } else { d0 } as f32;
+        fv[3] = self.g.wl[me] as f32;
+        fv[4] = self.g.wl[opp] as f32;
+        fv[6] = if opp == 0 {
+            width_in_layers(
+                &self.d0_layers[self.dist0_idx],
+                self.d0_layer_depth[self.dist0_idx],
+                d0,
+            )
+        } else {
+            width_in_layers(
+                &self.d1_layers[self.dist1_idx],
+                self.d1_layer_depth[self.dist1_idx],
+                d1,
+            )
+        } as f32;
+
+        for slot in 0..64 {
+            let source = if me == 0 { slot } else { NET_MIRS[slot] };
+            fv[HW + slot] = f32::from(u8::from(self.g.hw[source] != 0));
+            fv[VW + slot] = f32::from(u8::from(self.g.vw[source] != 0));
+        }
+
+        let d0_field = materialize_distance_layers_inline(
+            &self.d0_layers[self.dist0_idx],
+            self.d0_layer_depth[self.dist0_idx],
+        );
+        let d1_field = materialize_distance_layers_inline(
+            &self.d1_layers[self.dist1_idx],
+            self.d1_layer_depth[self.dist1_idx],
+        );
+        let mut route0 = [0u8; 81];
+        let mut route1 = [0u8; 81];
+        let mut near0 = [0u8; 81];
+        let mut near1 = [0u8; 81];
+        fill_sparse_route_masks(&self.g, self.g.pawn[0], &d0_field, &mut route0, &mut near0);
+        fill_sparse_route_masks(&self.g, self.g.pawn[1], &d1_field, &mut route1, &mut near1);
+
+        for cell in 0..81 {
+            let source = if me == 0 { cell } else { NET_MIRC[cell] };
+            let (own_route, opp_route, own_near, opp_near) = if me == 0 {
+                (route0[source], route1[source], near0[source], near1[source])
+            } else {
+                (route1[source], route0[source], near1[source], near0[source])
+            };
+            fv[ROUTE_ME + cell] = f32::from(own_route);
+            fv[ROUTE_OPP + cell] = f32::from(opp_route);
+            fv[NEAR_ME + cell] = f32::from(own_near);
+            fv[NEAR_OPP + cell] = f32::from(opp_near);
+            fv[CONTESTED + cell] = f32::from(u8::from(
+                (own_route != 0 || own_near != 0) && (opp_route != 0 || opp_near != 0),
+            ));
+        }
+
+        let pawn_me = if me == 0 {
+            self.g.pawn[0]
+        } else {
+            NET_MIRC[self.g.pawn[1]]
+        };
+        let pawn_opp = if me == 0 {
+            self.g.pawn[1]
+        } else {
+            NET_MIRC[self.g.pawn[0]]
+        };
+        fv[949] = NET_BKT[pawn_me] as f32;
+        fv[950] = pawn_me as f32;
+        fv[951] = pawn_opp as f32;
+        fv
     }
 
     /// Dump the raw net inputs + the resulting eval as JSON. Lets the Python NNUE
@@ -8179,6 +8273,100 @@ impl TitaniumSearch {
             race: RaceResultInfo::from_score(last_score),
             timing,
         }
+    }
+}
+
+#[cfg(test)]
+mod training_feature_tests {
+    use super::*;
+
+    fn rotate_and_swap_players(g: &GameState) -> GameState {
+        let mut mirrored = GameState::new();
+        mirrored.pawn = [NET_MIRC[g.pawn[1]], NET_MIRC[g.pawn[0]]];
+        mirrored.wl = [g.wl[1], g.wl[0]];
+        mirrored.turn = g.turn ^ 1;
+        mirrored.hw.fill(0);
+        mirrored.vw.fill(0);
+        mirrored.hw_bits = 0;
+        mirrored.vw_bits = 0;
+        mirrored.blocked.fill(0);
+        for slot in 0..64 {
+            let source = NET_MIRS[slot];
+            if g.hw[source] != 0 {
+                mirrored.hw[slot] = 1;
+                mirrored.hw_bits |= 1u64 << slot;
+                mirrored.set_wall_bits(0, slot, true);
+            }
+            if g.vw[source] != 0 {
+                mirrored.vw[slot] = 1;
+                mirrored.vw_bits |= 1u64 << slot;
+                mirrored.set_wall_bits(1, slot, true);
+            }
+        }
+
+        mirrored.hash_lo =
+            ZOBRIST.pawn_lo[0][mirrored.pawn[0]] ^ ZOBRIST.pawn_lo[1][mirrored.pawn[1]];
+        mirrored.hash_hi =
+            ZOBRIST.pawn_hi[0][mirrored.pawn[0]] ^ ZOBRIST.pawn_hi[1][mirrored.pawn[1]];
+        if mirrored.turn != 0 {
+            mirrored.hash_lo ^= ZOBRIST.turn_lo;
+            mirrored.hash_hi ^= ZOBRIST.turn_hi;
+        }
+        for slot in 0..64 {
+            if mirrored.hw[slot] != 0 {
+                mirrored.hash_lo ^= ZOBRIST.hw_lo[slot];
+                mirrored.hash_hi ^= ZOBRIST.hw_hi[slot];
+            }
+            if mirrored.vw[slot] != 0 {
+                mirrored.hash_lo ^= ZOBRIST.vw_lo[slot];
+                mirrored.hash_hi ^= ZOBRIST.vw_hi[slot];
+            }
+        }
+        mirrored
+    }
+
+    #[test]
+    fn training_features_have_fixed_shape_finite_values_and_zero_only_slots() {
+        let mut search = TitaniumSearch::new(GameState::new());
+        let features: [f32; TRAINING_FEATURE_LEN] = search.training_feature_vector();
+
+        assert_eq!(features.len(), 952);
+        assert!(features.iter().all(|value| value.is_finite()));
+        assert_eq!(features[0], 0.0, "target slot must be zero");
+        assert!(features[9..11].iter().all(|&value| value == 0.0));
+        assert!(features[544..949].iter().all(|&value| value == 0.0));
+    }
+
+    #[test]
+    fn start_position_training_scalars_pawns_and_sparse_planes_match_schema() {
+        let mut search = TitaniumSearch::new(GameState::new());
+        let features = search.training_feature_vector();
+
+        assert_eq!(
+            &features[..11],
+            &[0.0, 8.0, 8.0, 10.0, 10.0, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(features[139..220].iter().sum::<f32>(), 9.0);
+        assert_eq!(features[220..301].iter().sum::<f32>(), 9.0);
+        assert_eq!(features[301..382].iter().sum::<f32>(), 18.0);
+        assert_eq!(features[382..463].iter().sum::<f32>(), 18.0);
+        assert_eq!(features[463..544].iter().sum::<f32>(), 27.0);
+        assert_eq!(&features[949..], &[7.0, 76.0, 4.0]);
+    }
+
+    #[test]
+    fn training_features_are_side_to_move_canonical_under_rotation() {
+        let mut game = GameState::new();
+        for movement in ["e2", "e8", "d4h", "f6v"] {
+            game.make_move(crate::titanium::algebraic_to_move_id(movement));
+        }
+        let mirrored = rotate_and_swap_players(&game);
+        let mut original_search = TitaniumSearch::new(game);
+        let mut mirrored_search = TitaniumSearch::new(mirrored);
+        let original = original_search.training_feature_vector();
+
+        assert_eq!(original[11..139].iter().sum::<f32>(), 2.0);
+        assert_eq!(original, mirrored_search.training_feature_vector());
     }
 }
 

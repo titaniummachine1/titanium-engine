@@ -64,6 +64,7 @@ fn main() {
         "eval" => run_eval(&args),
         "eval-batch" => run_eval_batch(),
         "eval-packed-batch" => run_eval_packed_batch(),
+        "score-packed-batch" => run_score_packed_batch(&args),
         "path-scan" => run_path_scan(),
         "cat-packed-batch" => run_cat_packed_batch(),
         "score-out" => run_score_out(&args),
@@ -123,6 +124,9 @@ fn print_usage() {
     println!("  titanium eval [moves...] [--json]     — HalfPW net eval dump (trainer parity)");
     println!(
         "  titanium eval-packed-batch            — stdin: u32 row + 24-byte packed state records"
+    );
+    println!(
+        "  titanium score-packed-batch --nodes N — stdin: u32 row + 24-byte packed state records"
     );
     println!(
         "  titanium path-scan                    — stdin lines: game_id move1 move2 ...; Titanium legal+path check"
@@ -743,6 +747,59 @@ fn run_eval_packed_batch() {
             Err(err) => format!(
                 "{{\"row\":{row},\"ok\":false,\"protocol\":\"eval-packed-v1\",\"error\":\"{}\"}}",
                 json_escape(&err)
+            ),
+        })
+        .collect();
+    for line in lines {
+        println!("{line}");
+    }
+}
+
+fn run_score_packed_batch(args: &[String]) {
+    use rayon::prelude::*;
+    use titanium::{titanium_game_from_packed, TitaniumSearch, TITANIUM_NO_MOVE};
+
+    let mut nodes = None::<u64>;
+    let mut i = 2usize;
+    while i < args.len() {
+        if args[i] == "--nodes" {
+            nodes = args.get(i + 1).and_then(|value| value.parse::<u64>().ok());
+            i += 2;
+        } else {
+            eprintln!("score-packed-batch: unknown argument {}", args[i]);
+            std::process::exit(2);
+        }
+    }
+    let budget = nodes.filter(|value| *value > 0).unwrap_or_else(|| {
+        eprintln!("score-packed-batch: --nodes requires a positive u64");
+        std::process::exit(2);
+    });
+    let rows = read_packed_batch("score-packed-batch");
+    let lines: Vec<String> = rows
+        .par_iter()
+        .map(|(row, packed)| match titanium_game_from_packed(packed) {
+            Ok(game) => {
+                let mut search = TitaniumSearch::production(game, None);
+                search.node_limit = Some(budget);
+                let result = search.think(60_000, 128, false, false, "score-packed-batch");
+                if result.mv == TITANIUM_NO_MOVE {
+                    format!(
+                        "{{\"row\":{row},\"ok\":false,\"error\":\"no legal moves\"}}"
+                    )
+                } else {
+                    format!(
+                        "{{\"row\":{row},\"ok\":true,\"root_score\":{},\"nodes\":{},\"depth\":{},\"elapsed_ms\":{},\"stopped_by\":\"{}\"}}",
+                        result.score,
+                        result.nodes,
+                        result.depth,
+                        result.ms,
+                        result.stop_reason
+                    )
+                }
+            }
+            Err(error) => format!(
+                "{{\"row\":{row},\"ok\":false,\"error\":\"{}\"}}",
+                json_escape(&error)
             ),
         })
         .collect();
