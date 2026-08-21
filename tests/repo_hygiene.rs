@@ -154,8 +154,15 @@ fn glob_match_works() {
 /// into search or the certificate would put a per-configuration retrograde
 /// solve on a hot path for answers the resolver already gives.
 ///
-/// This fails the build if any search or certificate module names `tb_zero`
-/// outside its own `#[cfg(test)]` block.
+/// The same applies to the wall-ignorance certificate. Measured 2026-08-21 with
+/// it switched on: `wall_ignore_calls` 1,059,979 against `wall_ignore_decisive`
+/// **4** -- it ran on ~44% of nodes to buy four cuts, cost 22.6% of search time
+/// at equal nodes, and lost the 10 ms gate 0.3820 (A/B nodes 0.4254). The idea
+/// is sound; the TRIGGER (every edge of the shortest path irreplaceable) is far
+/// too strict for an open 9x9. See backlog 6.19-6.22 for the loosened form.
+///
+/// This fails the build if any search or certificate module names `tb_zero` or
+/// `wall_ignore` outside its own `#[cfg(test)]` block.
 #[test]
 fn tablebase_is_not_reachable_from_live_search() {
     const RUNTIME_FILES: &[&str] = &[
@@ -185,7 +192,10 @@ fn tablebase_is_not_reachable_from_live_search() {
             if code.starts_with("//") {
                 continue;
             }
-            if code.contains("tb_zero") || code.contains("ZeroWallTb") {
+            if code.contains("tb_zero")
+                || code.contains("ZeroWallTb")
+                || code.contains("wall_ignore")
+            {
                 offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
             }
         }
