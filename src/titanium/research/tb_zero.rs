@@ -160,8 +160,8 @@ impl ZeroWallTb {
         // repetition draw: a confident exact label for a position no game can
         // reach. Roughly 7% of a walled board's states are this.
         let reach = [
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+            crate::titanium::research::tb_layers::goal_reachable(template, 0),
+            crate::titanium::research::tb_layers::goal_reachable(template, 1),
         ];
 
         let mut moves: Vec<Vec<i16>> = vec![Vec::new(); NSTATES];
@@ -773,8 +773,8 @@ impl TbSolver {
         let table = self.solve(template);
         let children = self.children_of(template);
         let reach = [
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+            crate::titanium::research::tb_layers::goal_reachable(template, 0),
+            crate::titanium::research::tb_layers::goal_reachable(template, 1),
         ];
         let mut g = template.clone();
 
@@ -1212,8 +1212,8 @@ mod tests {
             base.wl = [0, 0];
             let t = ZeroWallTb::build_for(&base);
             let reach = [
-                crate::titanium::endgame::tb_layers::goal_reachable(&base, 0),
-                crate::titanium::endgame::tb_layers::goal_reachable(&base, 1),
+                crate::titanium::research::tb_layers::goal_reachable(&base, 0),
+                crate::titanium::research::tb_layers::goal_reachable(&base, 1),
             ];
 
             let mut g = base.clone();
@@ -1286,7 +1286,7 @@ mod tests {
     /// with it.
     #[test]
     fn unreachable_pawn_squares_are_excluded() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let stranding = tb_layers::seed_boards(40, 4242)
             .into_iter()
             .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
@@ -1312,7 +1312,7 @@ mod tests {
     /// position is one a game could actually be in.
     #[test]
     fn tier_one_is_locally_consistent() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 20260811)[0];
         let layer1 = tb_layers::expand(&[seed], 1);
         // Whoever is owed the peeled wall is what makes (1,0) and (0,1)
@@ -1346,7 +1346,7 @@ mod tests {
     /// pair-keying exists to prevent.
     #[test]
     fn holding_a_wall_never_hurts() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 555)[0];
         let config =
             tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1 is empty");
@@ -1398,7 +1398,7 @@ mod tests {
     /// only a per-state comparison does.
     #[test]
     fn who_holds_the_wall_changes_the_answer() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 0x5eed)[0];
         let config =
             tb_layers::pick(&tb_layers::expand(&[seed], 2)[2], 0).expect("layer 2 is empty");
@@ -1445,7 +1445,7 @@ mod tests {
     /// states it does not cover. A bare board would not have caught it.
     #[test]
     fn pack_roundtrips_a_pruned_table() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let stranding = tb_layers::seed_boards(40, 4242)
             .into_iter()
             .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
@@ -1494,7 +1494,7 @@ mod tests {
     /// because an overflow would silently corrupt the label rather than fail.
     #[test]
     fn measure_max_distance_for_label_packing() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let mut worst = 0i16;
         let mut worst_where = (0u64, 0u64);
         let mut over_i8 = 0usize;
@@ -1542,7 +1542,7 @@ mod tests {
     /// saving did.
     #[test]
     fn merging_packs_deduplicates_without_losing_tables() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 909)[0];
         let config = tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1");
         let dir = std::env::temp_dir();
