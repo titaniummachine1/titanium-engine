@@ -34,7 +34,7 @@
 use crate::titanium::position::game::GameState;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// Result from the side-to-move's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,8 +160,8 @@ impl ZeroWallTb {
         // repetition draw: a confident exact label for a position no game can
         // reach. Roughly 7% of a walled board's states are this.
         let reach = [
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+            crate::titanium::research::tb_layers::goal_reachable(template, 0),
+            crate::titanium::research::tb_layers::goal_reachable(template, 1),
         ];
 
         let mut moves: Vec<Vec<i16>> = vec![Vec::new(); NSTATES];
@@ -773,8 +773,8 @@ impl TbSolver {
         let table = self.solve(template);
         let children = self.children_of(template);
         let reach = [
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 0),
-            crate::titanium::endgame::tb_layers::goal_reachable(template, 1),
+            crate::titanium::research::tb_layers::goal_reachable(template, 0),
+            crate::titanium::research::tb_layers::goal_reachable(template, 1),
         ];
         let mut g = template.clone();
 
@@ -1092,45 +1092,22 @@ impl TbSolver {
     }
 }
 
-static ZERO_WALL_TB: OnceLock<ZeroWallTb> = OnceLock::new();
-
-/// Solved tables by wall configuration `(hw_bits, vw_bits)`.
-///
-/// Once both hands are empty no wall can be placed, so a whole search sees a
-/// single configuration and this holds one entry in practice. The cap only
-/// guards pathological drivers that hop between unrelated positions.
-static TB_BY_WALLS: OnceLock<Mutex<HashMap<(u64, u64), Arc<ZeroWallTb>>>> = OnceLock::new();
-const TB_CACHE_CAP: usize = 8;
-
-/// Table for this position's wall configuration, building it on first use.
-pub fn table_for(g: &GameState) -> Arc<ZeroWallTb> {
-    let key = (g.hw_bits, g.vw_bits);
-    let cache = TB_BY_WALLS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(tb) = cache.lock().expect("tb cache poisoned").get(&key) {
-        return Arc::clone(tb);
-    }
-    // Built outside the lock: ~ms of work, and holding it would serialise every
-    // Lazy SMP worker behind the first one to ask.
-    let built = Arc::new(ZeroWallTb::build_for(g));
-    let mut guard = cache.lock().expect("tb cache poisoned");
-    if guard.len() >= TB_CACHE_CAP {
-        guard.clear();
-    }
-    Arc::clone(guard.entry(key).or_insert(built))
-}
-
-/// Probe the process-wide exact zero-wall tablebase, building it once on first use.
-#[inline]
-pub fn probe_global(g: &GameState) -> Option<TbEntry> {
-    if !applies(g) {
-        return None;
-    }
-    if g.hw_bits == 0 && g.vw_bits == 0 {
-        // Bare board: the shared table is already correct, skip the cache.
-        return ZERO_WALL_TB.get_or_init(ZeroWallTb::build).probe(g);
-    }
-    Some(table_for(g).probe_raw(g.pawn[0], g.pawn[1], g.turn))
-}
+// ── No runtime probe ─────────────────────────────────────────────────────────
+//
+// This table is a VALIDATION ORACLE, not a search component. Live search never
+// probes it: `cert_bridge::hands_empty_race_stm_wins` answers the hands-empty
+// subgame analytically, and the test suite proves the two agree on every state
+// (`tb_agrees_with_hands_empty_race_oracle_on_all_states`,
+// `walled_board_table_agrees_with_oracle`).
+//
+// The process-wide `probe_global` / `table_for` cache that used to serve the
+// search is GONE rather than merely unused, so re-wiring the table into a hot
+// path takes writing it back, not flipping a flag. Tests and the offline
+// `tb-*` CLI commands construct a table directly with `ZeroWallTb::build` /
+// `build_for` and call `probe` / `probe_raw` on it.
+//
+// `tests/repo_hygiene.rs::tablebase_is_not_reachable_from_live_search` fails
+// the build if any search or certificate module names this module again.
 
 #[cfg(test)]
 mod tests {
@@ -1235,8 +1212,8 @@ mod tests {
             base.wl = [0, 0];
             let t = ZeroWallTb::build_for(&base);
             let reach = [
-                crate::titanium::endgame::tb_layers::goal_reachable(&base, 0),
-                crate::titanium::endgame::tb_layers::goal_reachable(&base, 1),
+                crate::titanium::research::tb_layers::goal_reachable(&base, 0),
+                crate::titanium::research::tb_layers::goal_reachable(&base, 1),
             ];
 
             let mut g = base.clone();
@@ -1309,7 +1286,7 @@ mod tests {
     /// with it.
     #[test]
     fn unreachable_pawn_squares_are_excluded() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let stranding = tb_layers::seed_boards(40, 4242)
             .into_iter()
             .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
@@ -1335,7 +1312,7 @@ mod tests {
     /// position is one a game could actually be in.
     #[test]
     fn tier_one_is_locally_consistent() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 20260811)[0];
         let layer1 = tb_layers::expand(&[seed], 1);
         // Whoever is owed the peeled wall is what makes (1,0) and (0,1)
@@ -1369,7 +1346,7 @@ mod tests {
     /// pair-keying exists to prevent.
     #[test]
     fn holding_a_wall_never_hurts() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 555)[0];
         let config =
             tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1 is empty");
@@ -1421,7 +1398,7 @@ mod tests {
     /// only a per-state comparison does.
     #[test]
     fn who_holds_the_wall_changes_the_answer() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 0x5eed)[0];
         let config =
             tb_layers::pick(&tb_layers::expand(&[seed], 2)[2], 0).expect("layer 2 is empty");
@@ -1468,7 +1445,7 @@ mod tests {
     /// states it does not cover. A bare board would not have caught it.
     #[test]
     fn pack_roundtrips_a_pruned_table() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let stranding = tb_layers::seed_boards(40, 4242)
             .into_iter()
             .find(|&c| tb_layers::live_state_count(c) < 81 * 80 * 2)
@@ -1517,7 +1494,7 @@ mod tests {
     /// because an overflow would silently corrupt the label rather than fail.
     #[test]
     fn measure_max_distance_for_label_packing() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let mut worst = 0i16;
         let mut worst_where = (0u64, 0u64);
         let mut over_i8 = 0usize;
@@ -1565,7 +1542,7 @@ mod tests {
     /// saving did.
     #[test]
     fn merging_packs_deduplicates_without_losing_tables() {
-        use crate::titanium::endgame::tb_layers;
+        use crate::titanium::research::tb_layers;
         let seed = tb_layers::seed_boards(1, 909)[0];
         let config = tb_layers::pick(&tb_layers::expand(&[seed], 1)[1], 0).expect("layer 1");
         let dir = std::env::temp_dir();
@@ -1629,6 +1606,105 @@ mod tests {
         );
         g.wl = [1, 0];
         assert!(!applies(&g), "a wall still in hand leaves the subgame");
+    }
+
+    /// Completeness census: does the table ever DECIDE a hands-empty state the
+    /// analytic oracle DECLINES?
+    ///
+    /// This is the load-bearing evidence for taking the table out of live
+    /// search. `tb_agrees_with_hands_empty_race_oracle_on_all_states` proves the
+    /// two never CONTRADICT each other, but it `continue`s past every state the
+    /// oracle declines — exactly the states where the table would have been the
+    /// only answer. If that set is empty, removing the probe cannot change a
+    /// single search result; if it is not, the removal is a real change and owes
+    /// a strength gate.
+    ///
+    /// A 1000-game match cannot answer this. The sibling project gated the same
+    /// subgame (`race_exact`, both-hands-zero) over 4000 games at 50 ms and got
+    /// 50.8%, Elo +5.6 [-5.2, +16.3] — no decision at cap. Enumeration can.
+    #[test]
+    fn oracle_decides_every_state_the_table_decides() {
+        let mut declined_bare = 0usize;
+        let mut tb_decided_bare = 0usize;
+        let mut total_bare = 0usize;
+        for p0 in 9..81 {
+            for p1 in 0..72 {
+                if p0 == p1 {
+                    continue;
+                }
+                for stm in 0..2 {
+                    let mut g = GameState::new();
+                    g.pawn[0] = p0;
+                    g.pawn[1] = p1;
+                    g.turn = stm;
+                    g.wl = [0, 0];
+                    total_bare += 1;
+                    if hands_empty_race_stm_wins_oracle(&mut g).is_none() {
+                        declined_bare += 1;
+                        if tb().probe_raw(p0, p1, stm).result != TbResult::Draw {
+                            tb_decided_bare += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The live case is not a bare board: hands are empty only once all
+        // twenty walls are down, so the oracle has to be complete on WALLED
+        // topologies too. Same layouts the agreement test uses, plus denser
+        // ones, every pawn pair enumerated.
+        let layouts: [&[&str]; 6] = [
+            &["e3h", "c5v", "f6h"],
+            &["b2h", "d4v", "g7h", "e5v"],
+            &["a1h", "c3h", "e5h", "g7h", "d2v", "f6v"],
+            &["e3h", "c5v", "f6h", "b2h", "d4v", "g7h", "e5v", "a1h"],
+            &["b2v", "d2v", "f2v", "h2v", "b6v", "d6v", "f6v", "h6v"],
+            &["a3h", "c3h", "e3h", "g3h", "a6h", "c6h", "e6h", "g6h"],
+        ];
+        let mut declined_walled = 0usize;
+        let mut tb_decided_walled = 0usize;
+        let mut total_walled = 0usize;
+        for walls in layouts {
+            let mut base = GameState::new();
+            for w in walls {
+                base.make_move(crate::titanium::algebraic_to_move_id(w));
+            }
+            base.wl = [0, 0];
+            let t = ZeroWallTb::build_for(&base);
+            for p0 in 9..81 {
+                for p1 in 0..72 {
+                    if p0 == p1 {
+                        continue;
+                    }
+                    for stm in 0..2 {
+                        let mut g = base.clone();
+                        g.pawn[0] = p0;
+                        g.pawn[1] = p1;
+                        g.turn = stm;
+                        total_walled += 1;
+                        if hands_empty_race_stm_wins_oracle(&mut g).is_none() {
+                            declined_walled += 1;
+                            if t.probe_raw(p0, p1, stm).result != TbResult::Draw {
+                                tb_decided_walled += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!(
+            "bare:   {total_bare} states, oracle declined {declined_bare},              table decided {tb_decided_bare} of those"
+        );
+        println!(
+            "walled: {total_walled} states over 6 topologies, oracle declined              {declined_walled}, table decided {tb_decided_walled} of those"
+        );
+        assert_eq!(
+            tb_decided_bare + tb_decided_walled,
+            0,
+            "the table answers {} hands-empty states the oracle declines —              removing the probe from live search DOES change search results              and owes a strength gate, not an equivalence argument",
+            tb_decided_bare + tb_decided_walled
+        );
     }
 
     #[test]

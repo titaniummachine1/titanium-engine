@@ -1,6 +1,6 @@
 [package]
 name = "titanium"
-version = "19.8.2"
+version = "19.8.3"
 edition = "2021"
 description = "Titanium Engine — hybrid AI (alpha-beta + guided MCTS)"
 license = "GPL-3.0-or-later"

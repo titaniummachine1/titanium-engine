@@ -811,7 +811,7 @@ fn run_cat_packed_batch() {
 /// work; writing one pack per run is what duplicates it on disk, since every run
 /// dumps its whole descendant cone and the cones overlap.
 fn run_tbmerge(args: &[String]) {
-    use titanium::titanium::endgame::tb_zero::TbSolver;
+    use titanium::titanium::research::tb_zero::TbSolver;
     let mut out = None::<String>;
     let mut inputs = Vec::<String>::new();
     let mut i = 2usize;
@@ -869,7 +869,7 @@ fn run_tbmerge(args: &[String]) {
 /// different games — who holds a wall decides who may place it, so each needs
 /// its own table and they are not interchangeable.
 fn run_tbsolve(args: &[String]) {
-    use titanium::titanium::endgame::{tb_layers, tb_zero::TbSolver};
+    use titanium::titanium::research::{tb_layers, tb_zero::TbSolver};
     let mut hands = [1i32, 1i32];
     let mut rng = 0x5eedu64;
     let mut certify = false;
@@ -1025,7 +1025,7 @@ fn run_tbsolve(args: &[String]) {
 ///
 /// Output is one JSONL row per configuration: `{layer, walls, hw, vw}`.
 fn run_tblayers(args: &[String]) {
-    use titanium::titanium::endgame::tb_layers;
+    use titanium::titanium::research::tb_layers;
     let mut seeds = 1usize;
     let mut depth = 4usize;
     let mut rng = 0x5eedu64;
@@ -1125,7 +1125,7 @@ fn run_tblayers(args: &[String]) {
 /// these are tablebase-quality targets, not estimates. One configuration
 /// yields up to 81*80*2 = 12,960 of them.
 fn run_tbdump(args: &[String]) {
-    use titanium::titanium::endgame::tb_zero::{TbResult, ZeroWallTb};
+    use titanium::titanium::research::tb_zero::{TbResult, ZeroWallTb};
     let mut moves = Vec::<String>::new();
     let mut out_path = None::<String>;
     let mut i = 2usize;
@@ -1207,7 +1207,7 @@ fn run_tbdump(args: &[String]) {
 }
 
 fn run_tbgen(args: &[String]) {
-    use titanium::titanium::endgame::tb_zero::ZeroWallTb;
+    use titanium::titanium::research::tb_zero::ZeroWallTb;
     let mut out: Option<String> = None;
     let mut verify: Option<String> = None;
     let mut i = 2usize;

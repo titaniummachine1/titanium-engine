@@ -144,3 +144,56 @@ fn glob_match_works() {
     assert!(!glob_match("progress.txt", "progress.md"));
     assert!(!glob_match("baseline_v*.txt", "baseline.md"));
 }
+
+/// The zero-wall tablebase is a VALIDATION ORACLE, not a search component.
+///
+/// Live search resolves the hands-empty subgame analytically
+/// (`cert_bridge::hands_empty_race_stm_wins`); the table exists so the test
+/// suite can prove that resolver exact by independent retrograde analysis, and
+/// so the offline `tb-*` CLI commands can generate/verify it. Wiring it back
+/// into search or the certificate would put a per-configuration retrograde
+/// solve on a hot path for answers the resolver already gives.
+///
+/// This fails the build if any search or certificate module names `tb_zero`
+/// outside its own `#[cfg(test)]` block.
+#[test]
+fn tablebase_is_not_reachable_from_live_search() {
+    const RUNTIME_FILES: &[&str] = &[
+        "src/titanium/search/search_impl.rs",
+        "src/titanium/endgame/cert_bridge.rs",
+        "src/titanium/endgame/certify.rs",
+        "src/titanium/endgame/race.rs",
+        "src/titanium/endgame/exact_dp.rs",
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    for rel in RUNTIME_FILES {
+        let path = root.join(rel);
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue; // file moved or renamed; the other guards still apply
+        };
+        let mut in_tests = false;
+        for (i, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                in_tests = true;
+            }
+            if in_tests {
+                continue;
+            }
+            // Prose may name it; only compiled references count.
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            if code.contains("tb_zero") || code.contains("ZeroWallTb") {
+                offenders.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the zero-wall tablebase is reachable from live search again \
+         (it is a test oracle, not a search component):\n{}",
+        offenders.join("\n")
+    );
+}
