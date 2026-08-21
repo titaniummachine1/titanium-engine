@@ -383,13 +383,11 @@ pub(crate) fn hands_empty_race_stm_wins_oracle(g: &mut GameState) -> Option<bool
 }
 
 pub fn hands_empty_race_stm_wins(g: &mut GameState) -> Option<bool> {
-    if let Some(entry) = super::tb_zero::probe_global(g) {
-        return match entry.result {
-            super::tb_zero::TbResult::Win => Some(true),
-            super::tb_zero::TbResult::Loss => Some(false),
-            super::tb_zero::TbResult::Draw => None,
-        };
-    }
+    // Live search resolves the hands-empty subgame analytically, here. The
+    // exact retrograde table for this subgame is a TEST-ONLY validation oracle
+    // for this function and is not probed at runtime; see
+    // `endgame/tb_zero.rs` and
+    // `tests/repo_hygiene.rs::tablebase_is_not_reachable_from_live_search`.
     hands_empty_race_stm_wins_oracle(g)
 }
 

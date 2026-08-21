@@ -34,7 +34,7 @@
 use crate::titanium::position::game::GameState;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// Result from the side-to-move's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1092,45 +1092,22 @@ impl TbSolver {
     }
 }
 
-static ZERO_WALL_TB: OnceLock<ZeroWallTb> = OnceLock::new();
-
-/// Solved tables by wall configuration `(hw_bits, vw_bits)`.
-///
-/// Once both hands are empty no wall can be placed, so a whole search sees a
-/// single configuration and this holds one entry in practice. The cap only
-/// guards pathological drivers that hop between unrelated positions.
-static TB_BY_WALLS: OnceLock<Mutex<HashMap<(u64, u64), Arc<ZeroWallTb>>>> = OnceLock::new();
-const TB_CACHE_CAP: usize = 8;
-
-/// Table for this position's wall configuration, building it on first use.
-pub fn table_for(g: &GameState) -> Arc<ZeroWallTb> {
-    let key = (g.hw_bits, g.vw_bits);
-    let cache = TB_BY_WALLS.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(tb) = cache.lock().expect("tb cache poisoned").get(&key) {
-        return Arc::clone(tb);
-    }
-    // Built outside the lock: ~ms of work, and holding it would serialise every
-    // Lazy SMP worker behind the first one to ask.
-    let built = Arc::new(ZeroWallTb::build_for(g));
-    let mut guard = cache.lock().expect("tb cache poisoned");
-    if guard.len() >= TB_CACHE_CAP {
-        guard.clear();
-    }
-    Arc::clone(guard.entry(key).or_insert(built))
-}
-
-/// Probe the process-wide exact zero-wall tablebase, building it once on first use.
-#[inline]
-pub fn probe_global(g: &GameState) -> Option<TbEntry> {
-    if !applies(g) {
-        return None;
-    }
-    if g.hw_bits == 0 && g.vw_bits == 0 {
-        // Bare board: the shared table is already correct, skip the cache.
-        return ZERO_WALL_TB.get_or_init(ZeroWallTb::build).probe(g);
-    }
-    Some(table_for(g).probe_raw(g.pawn[0], g.pawn[1], g.turn))
-}
+// ── No runtime probe ─────────────────────────────────────────────────────────
+//
+// This table is a VALIDATION ORACLE, not a search component. Live search never
+// probes it: `cert_bridge::hands_empty_race_stm_wins` answers the hands-empty
+// subgame analytically, and the test suite proves the two agree on every state
+// (`tb_agrees_with_hands_empty_race_oracle_on_all_states`,
+// `walled_board_table_agrees_with_oracle`).
+//
+// The process-wide `probe_global` / `table_for` cache that used to serve the
+// search is GONE rather than merely unused, so re-wiring the table into a hot
+// path takes writing it back, not flipping a flag. Tests and the offline
+// `tb-*` CLI commands construct a table directly with `ZeroWallTb::build` /
+// `build_for` and call `probe` / `probe_raw` on it.
+//
+// `tests/repo_hygiene.rs::tablebase_is_not_reachable_from_live_search` fails
+// the build if any search or certificate module names this module again.
 
 #[cfg(test)]
 mod tests {
