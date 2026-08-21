@@ -355,6 +355,20 @@ where
 }
 
 #[inline(always)]
+/// READ BEFORE TRUSTING `pct_measured` ON A SMALL HOT LOOP.
+///
+/// Wrapping a tight loop in a timer blocks the inlining and reordering the
+/// optimiser would otherwise apply to it, so the op is slower *because* it is
+/// measured. Measured 2026-08-21: `order_sort` reported 10.03% (1.05 s of a
+/// 10.45 s run), yet replacing that sort with pdqsort -- several times cheaper
+/// on 130 elements -- moved end-to-end speed by -0.5%. A one-second component
+/// cannot be swapped for a cheaper one and yield nothing. The clock reads were
+/// only ~18 ms across 354k calls; the rest was lost optimisation.
+///
+/// Coarse ops (evaluate, gen_moves, a whole flood) are fine. For anything small
+/// and hot, treat the percentage as an UPPER BOUND and confirm with an A/B
+/// gate: `tools/binary_match/gate.py` prints per-ply engine ms at a fixed node
+/// budget, which is a real end-to-end measurement with no observer effect.
 pub fn record<F, R>(pick: fn(&mut BenchInstr) -> &mut OpStat, body: F) -> R
 where
     F: FnOnce() -> R,

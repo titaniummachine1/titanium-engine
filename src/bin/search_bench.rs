@@ -152,11 +152,22 @@ fn load_position_from_moves(moves: &str) -> GameState {
     g
 }
 
-fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
-    let g = match moves {
+/// The position a bench mode should actually run. `--moves` wins over
+/// `--position` when given.
+///
+/// `depth` and `time` mode used to ignore `--moves` entirely and silently bench
+/// the start position instead. That is not a small papercut: it produced a
+/// "parity check" over three different wall-heavy lines that were all secretly
+/// startpos and all trivially matched. Every mode goes through here now.
+fn bench_position(position: &str, moves: Option<&str>) -> GameState {
+    match moves {
         Some(raw) if !raw.trim().is_empty() => load_position_from_moves(raw),
         _ => load_position(position),
-    };
+    }
+}
+
+fn fresh_search(position: &str, moves: Option<&str>) -> Box<TitaniumSearch> {
+    let g = bench_position(position, moves);
     // The one production engine — literally the call the session makes.
     //
     // This has diverged twice now. It used to default to `grafted()` (v15) while
@@ -281,11 +292,11 @@ fn emit_result(
     );
 }
 
-fn bench_time(sec: u64, runs: usize, position: &str, full: bool, log: bool, threads: usize) {
+fn bench_time(sec: u64, runs: usize, position: &str, moves: Option<&str>, full: bool, log: bool, threads: usize) {
     reset_lazy_seal_stats();
     let time_ms = sec * 1000;
-    let g = load_position(position);
-    let mut search = fresh_search(position, None);
+    let g = bench_position(position, moves);
+    let mut search = fresh_search(position, moves);
     let _ = run_think(&mut search, time_ms, MAX_DEPTH, full, false, threads);
     search.set_position(g);
 
@@ -297,7 +308,7 @@ fn bench_time(sec: u64, runs: usize, position: &str, full: bool, log: bool, thre
     let mut run_json = String::new();
 
     for i in 0..runs {
-        search.set_position(load_position(position));
+        search.set_position(bench_position(position, moves));
         let t0 = Instant::now();
         let r = run_think(&mut search, time_ms, MAX_DEPTH, full, log, threads);
         let wall_ms = t0.elapsed().as_millis() as u64;
@@ -352,9 +363,9 @@ fn bench_time(sec: u64, runs: usize, position: &str, full: bool, log: bool, thre
     eprintln!("{}", dump_lazy_seal_stats());
 }
 
-fn bench_depth(target_depth: i32, position: &str, full: bool, threads: usize) {
+fn bench_depth(target_depth: i32, position: &str, moves: Option<&str>, full: bool, threads: usize) {
     reset_lazy_seal_stats();
-    let mut search = fresh_search(position, None);
+    let mut search = fresh_search(position, moves);
     let _ = run_think(
         &mut search,
         60_000,
@@ -363,7 +374,7 @@ fn bench_depth(target_depth: i32, position: &str, full: bool, threads: usize) {
         false,
         threads,
     );
-    search.set_position(load_position(position));
+    search.set_position(bench_position(position, moves));
     let t0 = Instant::now();
     let r = run_think(&mut search, 600_000, target_depth, full, false, threads);
     let wall_ms = t0.elapsed().as_millis() as u64;
@@ -596,11 +607,11 @@ fn main() {
             let sec = parse_u64(&args, "--sec", 10);
             let runs = parse_usize(&args, "--runs", 5);
             let log = parse_flag(&args, "--log");
-            bench_time(sec, runs, position, full, log, threads);
+            bench_time(sec, runs, position, moves, full, log, threads);
         }
         "depth" => {
             let depth = parse_i32(&args, "--depth", 6);
-            bench_depth(depth, position, full, threads);
+            bench_depth(depth, position, moves, full, threads);
         }
         "profile" => {
             let sec = parse_u64(&args, "--sec", 30);

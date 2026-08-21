@@ -121,6 +121,47 @@ const SF_PAWN_HISTORY_TIEBREAK_MAX: i32 = 499;
 // Now: exact evidence for this node, then progress toward the goal, then
 // measured evidence from siblings, then the pawn moves that make no progress,
 // then unproven quiets.
+// Static-eval EVIDENCE BANDS, weakest evidence lowest. Same discipline as the
+// ORD_* move-ordering tiers below: every score a band can emit lies strictly
+// inside its own range, so "proven beats guessed" is a property of the scheme
+// and not of the numbers that happen to occur. The const asserts make the
+// ordering a BUILD ERROR to break, because this was already wrong once.
+//
+// It was wrong until 2026-08-21: the distance heuristic -- whose own comment
+// reads "unproven" -- emitted 2980..4000 while a PROVEN win certificate scored
+// 2500 and a PROVEN refuse-to-place race bound scored 1800. The three are
+// mutually exclusive within one node (they key off wall counts), so nothing
+// contradicted itself locally; but the parent compares SIBLINGS, so "I am ahead
+// on distance with empty hands" (a guess) outranked "I have a proven won race
+// with one wall left". The search preferred the unproven branch.
+//
+// The heuristic keeps its exact internal shape -- only the base moves, so every
+// score-difference inside the band is unchanged -- and now lands below the
+// proven floor.
+/// Unproven hands-empty distance heuristic: `BASE + 50*delta - own_dist`.
+const EVAL_UNPROVEN_RACE_BASE: i32 = 700;
+/// Widest value that heuristic can emit (delta and own_dist are bounded by the
+/// board: a distance is at most 20 steps).
+const EVAL_UNPROVEN_RACE_MAX: i32 = EVAL_UNPROVEN_RACE_BASE + 20 * 50;
+/// PROVEN by the refuse-to-place theorem. Deliberately a mid-band score rather
+/// than RACE_WIN_FLOOR so the search can still refine it.
+const EVAL_PROVEN_BROKE_RACE: i32 = 1_800;
+/// PROVEN by the win certificate.
+const EVAL_PROVEN_CERT_WIN: i32 = 2_500;
+
+const _: () = assert!(
+    EVAL_UNPROVEN_RACE_MAX < EVAL_PROVEN_BROKE_RACE,
+    "a guessed race score must never reach a proven one"
+);
+const _: () = assert!(
+    EVAL_PROVEN_BROKE_RACE < EVAL_PROVEN_CERT_WIN,
+    "the weaker proof must score below the stronger one"
+);
+const _: () = assert!(
+    EVAL_PROVEN_CERT_WIN < RACE_WIN_FLOOR,
+    "a static certificate must never reach the exact-DTM race band"
+);
+
 const ORD_TT: i32 = 2_000_000_000;
 /// Progressing pawn move: `ORD_PAWN_PROGRESS - dist*1000 +/- 499`.
 /// Measured: the refutation is a pawn move at rank 0 in 54-87% of cutoffs, so
@@ -4897,9 +4938,13 @@ impl TitaniumSearch {
         // Distance heuristic fallback (unproven).
         self.race_outcome_stats.resolved_race_heuristic += 1;
         if d_me_i <= d_opp_i {
-            HandsEmptyPipelineOutcome::Score(3000 + (d_opp_i - d_me_i) * 50 - d_me_i)
+            HandsEmptyPipelineOutcome::Score(
+                EVAL_UNPROVEN_RACE_BASE + (d_opp_i - d_me_i) * 50 - d_me_i,
+            )
         } else {
-            HandsEmptyPipelineOutcome::Score(-3000 - (d_me_i - d_opp_i) * 50 + d_opp_i)
+            HandsEmptyPipelineOutcome::Score(
+                -EVAL_UNPROVEN_RACE_BASE - (d_me_i - d_opp_i) * 50 + d_opp_i,
+            )
         }
     }
 
@@ -5183,8 +5228,8 @@ impl TitaniumSearch {
         // Uses a mid-band score (not RACE_WIN_FLOOR) so search can still refine.
         if self.race_proof && (w_me_i == 0) != (w_opp_i == 0) {
             match self.one_side_broke_race_bound() {
-                RaceBound::Lower(_) => return 1800,
-                RaceBound::Upper(_) => return -1800,
+                RaceBound::Lower(_) => return EVAL_PROVEN_BROKE_RACE,
+                RaceBound::Upper(_) => return -EVAL_PROVEN_BROKE_RACE,
                 RaceBound::Exact(_) | RaceBound::Unknown => {}
             }
         }
@@ -5193,7 +5238,7 @@ impl TitaniumSearch {
             && (w_me_i + w_opp_i) > 0
             && self.cert_win_cache_hit(me)
         {
-            return 2500;
+            return EVAL_PROVEN_CERT_WIN;
         }
 
         let hash64 = (self.g.hash_hi as u64) << 32 | self.g.hash_lo as u64;
@@ -5790,19 +5835,27 @@ impl TitaniumSearch {
                 }
             }
         }
-        // stable insertion sort, descending — must match JS tie order exactly
-        for a in 1..n {
-            let mv = moves[a];
-            let ms = sc[a];
-            let mut b = a as isize - 1;
-            while b >= 0 && sc[b as usize] < ms {
-                moves[(b + 1) as usize] = moves[b as usize];
-                sc[(b + 1) as usize] = sc[b as usize];
-                b -= 1;
-            }
-            moves[(b + 1) as usize] = mv;
-            sc[(b + 1) as usize] = ms;
+        // Descending by score, ties by generation order — the JS tie order, and
+        // node counts move if it is broken.
+        //
+        // One u64 key per move instead of an insertion sort over two parallel
+        // arrays: the score goes in the high bits (bit-inverted, so ascending
+        // key == descending score) and the ORIGINAL INDEX in the low 8 bits.
+        // That makes every key unique, so `sort_unstable` — pdqsort, no
+        // allocation, unlike the stable `sort_by` which needs scratch — is
+        // deterministic and produces exactly the stable order. Stability comes
+        // from the key, not from the algorithm.
+        let mut keys = [0u64; 160];
+        for i in 0..n {
+            let score_desc = !((sc[i] as u32) ^ 0x8000_0000) as u64;
+            keys[i] = (score_desc << 8) | i as u64;
         }
+        keys[..n].sort_unstable();
+        let mut ordered = [0i16; 160];
+        for i in 0..n {
+            ordered[i] = moves[(keys[i] & 0xFF) as usize];
+        }
+        moves[..n].copy_from_slice(&ordered[..n]);
     }
 
     /// True when the current board hash already appeared in real game history
