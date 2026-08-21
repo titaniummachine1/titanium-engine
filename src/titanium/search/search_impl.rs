@@ -71,7 +71,7 @@ fn tt_unpack_depth(meta: i32) -> i32 {
 
 #[inline]
 fn reverse_futility_margin(depth: i32, ace_rfp_max_depth: i32) -> Option<i32> {
-    (depth <= ace_rfp_max_depth).then_some(100 * depth)
+    (depth <= ace_rfp_max_depth).then_some(60 * depth)
 }
 
 #[inline]
@@ -612,9 +612,9 @@ mod route_touch_tests {
 
     #[test]
     fn rfp_margin_uses_the_production_schedule() {
-        assert_eq!(reverse_futility_margin(3, 3), Some(300));
+        assert_eq!(reverse_futility_margin(3, 3), Some(180));
         assert_eq!(reverse_futility_margin(4, 3), None);
-        assert_eq!(reverse_futility_margin(4, 4), Some(400));
+        assert_eq!(reverse_futility_margin(4, 4), Some(240));
         assert_eq!(rfp_depth_for_budget(true, 200), 4);
         assert_eq!(rfp_depth_for_budget(true, 201), 3);
         assert_eq!(rfp_depth_for_budget(false, 100), 3);
@@ -1666,14 +1666,58 @@ mod score_label_tests {
         // uniformly fully-legal (gen_legal), and production prunes more
         // aggressively than the original baseline, so no depth-5 mate proof
         // is available. Sign agreement is the part that guards soundness.
+        // Sign agreement must be asked of a CONVERGED search. This fixture's
+        // score oscillates violently while the horizon is short, measured
+        // 2026-08-21 by `two_wall_fixture_score_by_depth`:
+        //
+        //   depth  4  -576      depth 10   -65   <- the old test asked here
+        //   depth  6  +316      depth 12  +310
+        //   depth  8  -432      depth 14  +310
+        //                       depth 16  +310   <- stable
+        //
+        // Depth 10 sits inside the oscillation, so the old assertion was
+        // sampling noise and had been FAILING on main. Depth 14 is past the
+        // point where three consecutive iterations agree.
+        //
+        // Note what this does and does not establish: the two verdicts agree in
+        // SIGN, not in magnitude. The certificate claims a proven win (30976)
+        // where converged search sees +310 -- "better", not "won". That gap is
+        // exactly the soundness question tracked as backlog 6.8, and this test
+        // is not evidence either way about it.
         let mut ordinary = TitaniumSearch::production(game, None);
-        let result = ordinary.think(30_000, 10, true, false, "titanium-v18");
+        let result = ordinary.think(60_000, 14, true, false, "titanium-v19");
         assert_eq!(
             bound.signum(),
             result.score.signum(),
-            "two-wall bound {bound:?} contradicts ordinary search {}",
+            "two-wall bound {bound:?} contradicts converged search {}",
             result.score
         );
+    }
+
+    /// DIAGNOSTIC (not a gate): which of the two is lying?
+    ///
+    /// `two_wall_monopoly_race_bound` calls this fixture a PROVEN win while
+    /// ordinary search calls it slightly lost. One of them is wrong, and an
+    /// unsound "proof" is the worse failure -- it cuts the search off and, per
+    /// the barrier-race LEDGER, exports the wrong sign as a perfect label.
+    /// Print the search's opinion as depth rises: a score that climbs toward
+    /// the win says the certificate saw further; one that stays negative says
+    /// the certificate is a false positive.
+    #[test]
+    #[ignore = "diagnostic: prints, asserts nothing"]
+    fn two_wall_fixture_score_by_depth() {
+        let game = two_wall_fixture("a7", "i2", [2, 0], 0);
+        let mut proof = enabled_two_wall_search(game.clone());
+        println!("certificate: {:?}", proof.two_wall_monopoly_race_bound());
+        for depth in [4, 6, 8, 10, 12, 14, 16] {
+            let mut s = TitaniumSearch::production(game.clone(), None);
+            let r = s.think(60_000, depth, true, false, "titanium-v19");
+            println!(
+                "depth {depth:>2}: score {:>7}  move {}",
+                r.score,
+                crate::titanium::move_id_to_algebraic(r.mv)
+            );
+        }
     }
 
     #[test]

@@ -693,14 +693,42 @@ mod tlv_tests {
         }
     }
 
-    /// The dispatcher must still route legacy blobs to the legacy reader. A
-    /// magic check that accidentally matched would silently reinterpret every
-    /// shipped net.
+    /// Every shipped blob must be routed to the reader its bytes actually call
+    /// for, and BOTH readers must stay exercised.
+    ///
+    /// This used to assert no shipped blob looks like TLV -- true when every
+    /// shipped net predated the format, false since the champion shipped AS
+    /// TLV (that is how it carries its walls-in-hand section), and failing on
+    /// main ever since. Like its sibling in `walls_in_hand_tests`, it encoded
+    /// which nets happened to exist rather than an invariant.
+    ///
+    /// The invariant: a blob's magic decides its reader, TLV-only features
+    /// appear only in TLV blobs, and at least one blob of each kind is still
+    /// shipped -- otherwise a reader silently stops being tested.
     #[test]
-    fn shipped_blobs_are_not_mistaken_for_tlv() {
+    fn shipped_blobs_route_to_the_reader_their_magic_names() {
+        let mut tlv = 0usize;
+        let mut legacy = 0usize;
         for (name, bytes) in shipped() {
-            assert_ne!(&bytes[4..8], TLV_MAGIC, "{name} must not look like TLV");
+            let is_tlv = &bytes[4..8] == TLV_MAGIC;
+            let n = load_net_from_bytes(bytes);
+            if is_tlv {
+                tlv += 1;
+            } else {
+                legacy += 1;
+                assert!(
+                    !n.wh_active,
+                    "{name}: legacy blob cannot carry a TLV-only section"
+                );
+            }
+            assert!(n.h > 0, "{name}: loaded with no hidden width");
+            println!("{name}: tlv={is_tlv} h={} wh_active={}", n.h, n.wh_active);
         }
+        assert!(tlv > 0, "no TLV blob shipped -- the TLV reader is untested");
+        assert!(
+            legacy > 0,
+            "no legacy blob shipped -- the legacy reader is untested, and it is              still the path every older net on disk takes"
+        );
     }
 
     /// Unknown sections are ignored and absent optional sections zero-fill.
@@ -804,16 +832,40 @@ mod walls_in_hand_tests {
         assert_eq!(wh_index(99, 99), wh_index(10, 10));
     }
 
-    /// Shipped blobs predate the section, so they must load with it inert --
-    /// otherwise this change is not the no-op the node-identity run claims.
+    /// The walls-in-hand section must be self-consistent in every shipped blob.
+    ///
+    /// This used to assert the opposite -- that shipped blobs are all INERT --
+    /// because when the section was added every shipped net predated it. That
+    /// stopped being true once a net trained WITH the embedding shipped, and
+    /// the test then failed on main for the best possible reason. The stale
+    /// assertion was checking a fact about 2026, not an invariant.
+    ///
+    /// What must always hold is that the presence flag and the weights agree:
+    /// an active section has weights, an inert one is zeroed. A flag set over
+    /// zeros would silently add nothing; zeros with the flag clear are a
+    /// legacy blob and fine. Either mismatch means the loader and the blob
+    /// disagree about what the net can see.
     #[test]
-    fn shipped_blobs_carry_no_walls_in_hand_weights() {
+    fn shipped_blobs_have_consistent_walls_in_hand_sections() {
+        let mut active = 0usize;
         for (name, bytes) in shipped() {
             let n = load_net_from_bytes(bytes);
             assert_eq!(n.wh.len(), WH_PAIRS * n.h, "{name}: wh wrong length");
-            assert!(!n.wh_active, "{name}: legacy blob must be inert here");
-            assert!(n.wh.iter().all(|&w| w == 0.0), "{name}: wh not zeroed");
+            let any_nonzero = n.wh.iter().any(|&w| w != 0.0);
+            assert_eq!(
+                n.wh_active, any_nonzero,
+                "{name}: wh_active={} but nonzero weights={} -- flag and content disagree",
+                n.wh_active, any_nonzero
+            );
+            if n.wh_active {
+                active += 1;
+            }
+            println!("{name}: wh_active={} h={}", n.wh_active, n.h);
         }
+        assert!(
+            active > 0,
+            "no shipped net carries walls-in-hand weights -- the embedding is              wired up but nothing uses it, which is the state this input was              added to escape"
+        );
     }
 
     /// A blob that does carry the section must survive the round trip with the
