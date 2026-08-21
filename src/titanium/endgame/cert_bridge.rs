@@ -135,16 +135,11 @@ pub fn certify_board(
             None
         };
     }
-    if let Some(verdict) =
-        crate::titanium::wall_ignore_cert::try_wall_ignore_cert_board(board, false)
-    {
-        let winner = player_from_ace(verdict.winner);
-        return if side.is_none_or(|s| s == winner) {
-            Some(winner)
-        } else {
-            None
-        };
-    }
+    // The wall-ignorance certificate used to be consulted here too. It is out
+    // of every live path now -- gated at -118 Elo (10 ms 0.3820, A/B nodes
+    // 0.4254) because it ran on ~44% of nodes to buy 4 cuts per 1.06M calls.
+    // `research::wall_ignore_*` keeps the module and its tests; see backlog
+    // 6.19-6.22 for the loosened, extension-bound form worth building.
     let deadline = if deadline_ms > 0 {
         Some(Instant::now() + Duration::from_millis(deadline_ms))
     } else {

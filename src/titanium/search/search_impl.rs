@@ -2609,7 +2609,6 @@ pub struct TitaniumSearch {
     /// leaves with both hands empty. Inner nodes use the HalfPW net (search
     /// + EME resolve tempo ambiguity). Set in [`Self::grafted_with_weights`].
     /// Cached wall-ignorance certificate decision.
-    wall_ignore_cert_resolved: Option<bool>,
     /// Early Move Extensions on the first ordered wall moves (mirror of graduated LMR).
     pub nodes: u64,
     deadline: Instant,
@@ -2877,7 +2876,6 @@ impl TitaniumSearch {
             q_max: Q_SEARCH_MAX_DEFAULT,
             q_swing_cp: Q_SWING_CP_DEFAULT,
             ace_rfp_max_depth: 3,
-            wall_ignore_cert_resolved: None,
             nodes: 0,
             deadline: Instant::now(),
             root_best: crate::titanium::TITANIUM_NO_MOVE,
@@ -3462,7 +3460,6 @@ impl TitaniumSearch {
         worker.q_max = self.q_max;
         worker.q_swing_cp = self.q_swing_cp;
         worker.ace_rfp_max_depth = self.ace_rfp_max_depth;
-        worker.wall_ignore_cert_resolved = self.wall_ignore_cert_resolved;
         worker.race_proof = self.race_proof;
         worker.opening_book_mode = self.opening_book_mode;
         worker.opening_book_order = self.opening_book_order.clone();
@@ -4632,40 +4629,6 @@ impl TitaniumSearch {
         }
         let slot = self.race_tbl(force)?;
         self.score_from_race_slot(slot)
-    }
-
-    /// Optional walls-remaining certificate as a typed alpha/beta bound.
-    /// Its terminal-ply fields are guarantees, not exact DTM.
-    fn wall_ignore_race_bound(&mut self) -> RaceBound {
-        if !self.race_proof || self.g.wl[0] + self.g.wl[1] == 0 {
-            return RaceBound::Unknown;
-        }
-        use crate::titanium::wall_ignore_cert::{
-            try_wall_ignorance_loss_cert, wall_ignore_loss_cert_enabled, CertScratch,
-        };
-        let enabled = match self.wall_ignore_cert_resolved {
-            Some(v) => v,
-            None => {
-                let v = wall_ignore_loss_cert_enabled();
-                self.wall_ignore_cert_resolved = Some(v);
-                v
-            }
-        };
-        if !enabled {
-            return RaceBound::Unknown;
-        }
-        self.race_outcome_stats.wall_ignore_calls += 1;
-        let mut scratch = CertScratch::new();
-        let Some(verdict) = try_wall_ignorance_loss_cert(&mut self.g, &mut scratch, true) else {
-            self.race_outcome_stats.wall_ignore_unknown += 1;
-            return RaceBound::Unknown;
-        };
-        self.race_outcome_stats.wall_ignore_decisive += 1;
-        if verdict.winner == self.g.turn {
-            RaceBound::Lower(RACE_WIN_FLOOR)
-        } else {
-            RaceBound::Upper(-RACE_WIN_FLOOR)
-        }
     }
 
     /// Hands-empty endgame pipeline (cheap → heavy). Caller must ensure
@@ -6175,20 +6138,6 @@ impl TitaniumSearch {
             return Ok(score);
         }
         if depth <= 0 {
-            match self.wall_ignore_race_bound() {
-                RaceBound::Lower(v) if v >= beta => {
-                    self.race_outcome_stats.wall_ignore_cut_fail_high += 1;
-                    return Ok(beta);
-                }
-                RaceBound::Upper(v) if v <= alpha => {
-                    self.race_outcome_stats.wall_ignore_cut_fail_low += 1;
-                    return Ok(alpha);
-                }
-                RaceBound::Lower(_)
-                | RaceBound::Upper(_)
-                | RaceBound::Exact(_)
-                | RaceBound::Unknown => {}
-            }
             let static_ev = self.evaluate(depth);
             if q_left > 0
                 && ply > 0
@@ -6274,21 +6223,6 @@ impl TitaniumSearch {
                     // stored move is still used for ordering.
                 }
             }
-        }
-
-        match self.wall_ignore_race_bound() {
-            RaceBound::Lower(v) if v >= beta => {
-                self.race_outcome_stats.wall_ignore_cut_fail_high += 1;
-                return Ok(beta);
-            }
-            RaceBound::Upper(v) if v <= alpha => {
-                self.race_outcome_stats.wall_ignore_cut_fail_low += 1;
-                return Ok(alpha);
-            }
-            RaceBound::Lower(_)
-            | RaceBound::Upper(_)
-            | RaceBound::Exact(_)
-            | RaceBound::Unknown => {}
         }
 
         // Static eval once per node (the internal eval cache absorbs
